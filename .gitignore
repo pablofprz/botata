@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+context/.spotify_cache
+state/
+posted/
+context/users/
+context/history.md
+context/timeline.md
+context/perfiles.json
