@@ -17,7 +17,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from atproto import Client
@@ -77,6 +77,36 @@ def load_text(path: Path, default: str = "") -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     return default
+
+
+# ─── T3: el bot sabe la fecha ───────────────────────────────────────────────
+# TZ America/Argentina/Buenos_Aires. Windows no trae tzdata → fallback a offset
+# fijo UTC-3 (Argentina no usa DST). Nombres en español, independientes del locale.
+try:
+    from zoneinfo import ZoneInfo
+    _AR_TZ: object = ZoneInfo("America/Argentina/Buenos_Aires")
+except Exception:  # pragma: no cover - falta tzdata (Windows)
+    _AR_TZ = timezone(timedelta(hours=-3))
+
+_DIAS_ES  = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+             "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+
+def now_ar() -> datetime:
+    """Datetime actual en hora de Argentina."""
+    return datetime.now(_AR_TZ)
+
+
+def current_datetime_line() -> str:
+    """Línea de fecha/hora para inyectar en los prompts de reasoning (T3)."""
+    n = now_ar()
+    return (
+        f"Fecha y hora actual: {_DIAS_ES[n.weekday()]} {n.day} de "
+        f"{_MESES_ES[n.month - 1]} de {n.year}, {n:%H:%M} (hora de Argentina). "
+        "Esta es la fecha de HOY. Cualquier fecha que aparezca en tu memoria o "
+        "contexto pertenece al pasado; no la confundas con el presente."
+    )
 
 
 settings = load_json(SETTINGS_PATH)
@@ -568,7 +598,7 @@ class FeedProcessor:
             content = self.router.chat(
                 "feed_summary",
                 messages=[
-                    {"role": "system", "content": self.SUMMARIZE_SYSTEM},
+                    {"role": "system", "content": f"{current_datetime_line()}\n\n{self.SUMMARIZE_SYSTEM}"},
                     {"role": "user",   "content": user},
                 ],
                 max_tokens=400,
@@ -653,7 +683,7 @@ class FeedProcessor:
         soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
         # Reinforce the character limit explicitly — models tend to ignore it otherwise
         system = (
-            f"{soul}\n\n---\n{prompt}\n\n"
+            f"{soul}\n\n---\n{current_datetime_line()}\n\n---\n{prompt}\n\n"
             "IMPORTANTE: tu respuesta tiene que tener MENOS DE 250 CARACTERES en total. "
             "Contá los caracteres antes de responder. Si te pasás, cortá."
         )
@@ -929,7 +959,7 @@ class GenerateReplyNode:
         facts   = dbmod.hybrid_search_user_facts(self.conn, handle, query, k=5)
         lessons = dbmod.hybrid_search_lessons(self.conn, query, k=5)
 
-        parts = [soul]
+        parts = [soul, f"\n---\n{current_datetime_line()}"]
         if memory:
             parts.append(f"\n---\nTu memoria general:\n{memory}")
         if facts:
@@ -1004,6 +1034,7 @@ class HandleAdminCommandNode:
 
     def run(self, state: MentionState) -> dict:
         system = (
+            f"{current_datetime_line()}\n\n"
             "Sos el sistema de comandos de un bot de Bluesky. "
             "El admin te mandó un comando. Usá la tool apropiada. "
             "Para /remember: si el dato es sobre el usuario → save_to_user_profile. "
@@ -1188,7 +1219,7 @@ class UpdateProfileNode:
 
         try:
             content = self.llm.chat(messages=[
-                {"role": "system", "content": prompt.format(author_handle=handle)},
+                {"role": "system", "content": f"{current_datetime_line()}\n\n{prompt.format(author_handle=handle)}"},
                 {"role": "user",   "content": conversation},
             ])
             result = (content or "").strip()

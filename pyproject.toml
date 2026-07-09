@@ -15,6 +15,8 @@ dependencies = [
     "atproto>=0.0.5",
     # Config / env
     "python-dotenv>=1.0",
+    # Zona horaria IANA (America/Argentina/Buenos_Aires) — Windows no trae tzdata del SO
+    "tzdata>=2024.1",
     # Persistencia: SQLite moderno + búsqueda semántica (vec0)
     "sqlite-vec>=0.1.6",
     # Embeddings locales multilingües (bge-m3)
