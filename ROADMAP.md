@@ -48,12 +48,13 @@ Selección de modelo por función, endpoint-agnóstico, con fallbacks.
 
 ## M2 · Proactividad  `P0`  *(lo más prioritario)*
 
-### T5 · Loop proactivo de feed  `proactivity` `L`
+### T5 · Loop proactivo de feed  `proactivity` `L`  ✅ **HECHO**
 Reemplaza el `FeedProcessor` manual por un loop autónomo.
 - **Acept.:** parámetro de **frecuencia de lectura** por feed (o desactivado).
 - Cada corrida: lee posts dentro de una ventana temporal → resume → el **agente decide** si postea (autónomo) o no; parámetro para forzar posteo.
 - La decisión considera temática y "mood"; puede lanzar tools **whitelisted por scope `feed_reflection`** (T1).
 - Deduplica contra `bot_posts`; respeta presupuesto (router T2). Sin scheduling rígido tipo cron.
+- Impl.: grafo langgraph `build_feed_graph` (fetch→summarize→reflect→post) en `butterbot.py`. `ReflectDecideNode` es el núcleo agéntico (structured output `FeedDecision`, tool_calling scope feed_reflection, política de posteo configurable conservative|balanced|active). Config por feed: `enabled` + `posting_policy` + `interval_hours`. CLI `--proactive [--force-post] [--backfill]`. Dedup normalizado contra `bot_posts`. Tests: `tests/test_feed_proactive.py`.
 
 ### T6 · Aprendizajes del feed → memoria/calendario  `proactivity` `M`
 - **Acept.:** tras leer el feed, el agente decide (o no) extraer aprendizajes.

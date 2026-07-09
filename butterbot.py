@@ -187,6 +187,30 @@ def log_bot_post(
     conn.commit()
 
 
+def recent_bot_posts(conn: sqlite3.Connection, limit: int = 10) -> list[str]:
+    """Últimos textos posteados por el bot (para dedup y para evitar repetirse)."""
+    rows = conn.execute(
+        "SELECT text FROM bot_posts WHERE text IS NOT NULL "
+        "ORDER BY posted_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _norm_text(s: str) -> str:
+    """Normaliza para comparación de duplicados: minúsculas, espacios colapsados."""
+    return " ".join(s.lower().split())
+
+
+def append_feed_summary(feed_name: str, summary: str) -> None:
+    """Appendea un resumen timestamped a context/feeds/{feed_name}.md (memoria del feed)."""
+    path      = FEEDS_DIR / f"{feed_name}.md"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    existing  = path.read_text(encoding="utf-8").rstrip() if path.exists() else f"# {feed_name}"
+    path.write_text(existing + f"\n\n## {timestamp}\n{summary}\n", encoding="utf-8")
+    log.info("Feed %s: summary saved to %s", feed_name, path.name)
+
+
 def get_feed_last_run(conn: sqlite3.Connection, feed_name: str) -> str | None:
     """Returns the ISO timestamp of the last time this feed was processed, or None."""
     row = conn.execute(
@@ -611,17 +635,7 @@ class FeedProcessor:
 
     def _append_to_file(self, feed_name: str, summary: str) -> None:
         """Append a timestamped summary entry to context/feeds/{feed_name}.md."""
-        path      = FEEDS_DIR / f"{feed_name}.md"
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-        if path.exists():
-            existing = path.read_text(encoding="utf-8").rstrip()
-        else:
-            existing = f"# {feed_name}"
-
-        updated = existing + f"\n\n## {timestamp}\n{summary}\n"
-        path.write_text(updated, encoding="utf-8")
-        log.info("Feed %s: summary saved to %s", feed_name, path.name)
+        append_feed_summary(feed_name, summary)
 
     def process(self, feed_name: str, list_uri: str, interval_hours: int, full_backfill: bool = False) -> None:
         """
@@ -709,6 +723,291 @@ class FeedProcessor:
         uri = self.bsky.post(opinion)
         log_bot_post(self.db, uri=uri, in_reply_to=None, reply_to_handle=None, text=opinion)
         log.info("post_opinion: posted %s", uri)
+
+
+# ---------------------------------------------------------------------------
+# T5 · Loop proactivo de feed (grafo langgraph)
+#   fetch → summarize → reflect_decide (tool_calling, scope feed_reflection)
+#         → post (si el agente decide postear y no es duplicado)
+# El agente decide autónomamente si postea, según temática, mood y política.
+# ---------------------------------------------------------------------------
+
+# Guía de comportamiento por política de posteo (configurable por feed en settings.json).
+_FEED_POLICY_GUIDANCE = {
+    "conservative": (
+        "Política CONSERVADORA: posteá SOLO si hay algo genuinamente notable (un tema "
+        "fuerte del día, un mood claro de la comunidad). Ante la duda, NO postees. La "
+        "mayoría de las corridas no deberían terminar en un posteo."
+    ),
+    "balanced": (
+        "Política BALANCEADA: posteá si tenés algo interesante para aportar sobre el feed, "
+        "aunque no sea excepcional. Si el feed está flojo, repetitivo o no te inspira, no postees."
+    ),
+    "active": (
+        "Política ACTIVA: posteá casi siempre que haya material con el que puedas aportar algo. "
+        "Solo abstenete si el feed está muerto o es puramente sensible."
+    ),
+}
+
+
+class FeedDecision(BaseModel):
+    """Decisión del agente sobre si postear en el feed (structured output)."""
+    should_post: bool = Field(
+        default=False, description="True si vale la pena postear sobre este feed ahora."
+    )
+    reason: str = Field(default="", description="Motivo breve de la decisión (para logs).")
+    text: str = Field(
+        default="",
+        validation_alias=AliasChoices("text", "message", "post"),
+        description="El skeet a postear (<=250 chars, rioplatense). Vacío si should_post=False.",
+    )
+
+
+class FeedState(TypedDict, total=False):
+    # entrada
+    feed_name: str
+    list_uri: str
+    interval_hours: int
+    posting_policy: str
+    force_post: bool
+    full_backfill: bool
+    # intermedio / salida
+    posts: list
+    posts_count: int
+    summary: str | None
+    should_post: bool
+    post_text: str
+    reason: str
+    posted_uri: str
+
+
+class FetchFeedNode:
+    """Lee posts nuevos del feed dentro de la ventana temporal (desde last_run)."""
+
+    def __init__(self, bsky: BskyClient, conn: sqlite3.Connection):
+        self.bsky = bsky
+        self.conn = conn
+
+    def run(self, state: FeedState) -> dict:
+        feed_name = state["feed_name"]
+        interval  = state.get("interval_hours", 0)
+        # Respeta la frecuencia salvo force o backfill.
+        if not state.get("force_post") and not state.get("full_backfill") and interval:
+            last_run = get_feed_last_run(self.conn, feed_name)
+            if last_run is not None:
+                elapsed = (datetime.now(timezone.utc)
+                           - datetime.fromisoformat(last_run)).total_seconds() / 3600
+                if elapsed < interval:
+                    log.info("Feed %s: no toca todavía (%.1fh < %dh)", feed_name, elapsed, interval)
+                    return {"posts_count": 0}
+
+        last_run_str = get_feed_last_run(self.conn, feed_name)
+        since = None if state.get("full_backfill") else (
+            datetime.fromisoformat(last_run_str) if last_run_str else None
+        )
+        posts = self.bsky.get_list_feed(state["list_uri"], since=since)
+        save_feed_last_run(self.conn, feed_name)
+        log.info("Feed %s: %d posts nuevos", feed_name, len(posts))
+        return {"posts": posts, "posts_count": len(posts)}
+
+
+class SummarizeFeedNode:
+    """Resume los posts (rol feed_summary) y appendea a la memoria del feed."""
+
+    def __init__(self, router: ModelRouter, conn: sqlite3.Connection):
+        self.router = router
+        self.conn   = conn
+
+    def run(self, state: FeedState) -> dict:
+        posts = state.get("posts") or []
+        if not posts:
+            return {"summary": None}
+        lines = [f"@{p['handle']}: {p['text']}" for p in posts[:50]]
+        user  = f"Feed: {state['feed_name']}\n\n" + "\n".join(lines)
+        try:
+            content = self.router.chat(
+                "feed_summary",
+                messages=[
+                    {"role": "system",
+                     "content": f"{current_datetime_line()}\n\n{FeedProcessor.SUMMARIZE_SYSTEM}"},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=400,
+            )
+        except Exception as e:
+            log.error("SummarizeFeedNode: %s", e)
+            return {"summary": None}
+        summary = (content or "").strip()
+        if not summary or summary.upper() == "NADA":
+            return {"summary": None}
+        append_feed_summary(state["feed_name"], summary)
+        return {"summary": summary}
+
+
+class ReflectDecideNode:
+    """
+    Núcleo agéntico de T5. El agente lee el resumen y decide si postear, considerando
+    temática, mood, política de posteo y sus posts recientes (para no repetirse). Puede
+    llamar tools con scope feed_reflection (T1) antes de decidir.
+    """
+
+    def __init__(self, llm: RoleLLM, registry: ToolRegistry, conn: sqlite3.Connection):
+        self.llm      = llm
+        self.registry = registry
+        self.conn     = conn
+
+    def run(self, state: FeedState) -> dict:
+        summary = state.get("summary")
+        if not summary:
+            return {"should_post": False, "reason": "sin resumen"}
+
+        soul     = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
+        reflect  = load_text(PROMPTS_DIR / "reflect_feed_prompt.md")
+        policy   = state.get("posting_policy", "balanced")
+        guidance = _FEED_POLICY_GUIDANCE.get(policy, _FEED_POLICY_GUIDANCE["balanced"])
+        recientes = recent_bot_posts(self.conn, limit=8)
+
+        parts = [
+            soul,
+            f"\n---\n{current_datetime_line()}",
+            f"\n---\n{reflect}" if reflect else "",
+            f"\n---\n{guidance}",
+        ]
+        if recientes:
+            parts.append(
+                "\n---\nYa posteaste esto recientemente (NO lo repitas ni parafrasees):\n"
+                + "\n".join(f"- {t}" for t in recientes)
+            )
+        if state.get("force_post"):
+            parts.append(
+                "\n---\nIMPORTANTE: esta corrida es FORZADA. Tenés que postear sí o sí: "
+                "poné should_post=true y generá el mejor texto posible."
+            )
+
+        # Fase de tools (scope feed_reflection). Hoy puede no haber ninguna; queda cableado.
+        tools = self.registry.openai_schemas(Scope.FEED_REFLECTION)
+        if tools:
+            tool_system = "\n".join(p for p in parts if p) + (
+                "\n---\nSi necesitás info extra (buscar algo, ver el calendario, etc.) llamá "
+                "a una tool. Si no, no llames ninguna."
+            )
+            try:
+                _, tool_calls = self.llm.call_with_tools(tool_system, summary, tools)
+                for call in tool_calls or []:
+                    name  = call.function.name
+                    cargs = json.loads(call.function.arguments)
+                    outcome = self.registry.execute(name, cargs, ToolContext(state=state, conn=self.conn))
+                    parts.append(f"\n---\nResultado de {name}: {outcome.text}")
+            except Exception as e:
+                log.warning("ReflectDecideNode: fase de tools falló: %s", e)
+
+        parts.append(
+            "\n---\nRespondé SOLO con JSON válido: 'should_post' (bool), 'reason' (str breve), "
+            "'text' (el skeet a postear, <=250 chars, vacío si should_post=false)."
+        )
+        system = "\n".join(p for p in parts if p)
+
+        try:
+            decision = self.llm.complete(system, summary, FeedDecision)
+        except Exception as e:
+            log.error("ReflectDecideNode: %s", e)
+            return {"should_post": False, "reason": f"error: {e}"}
+
+        should = bool(decision.should_post) or bool(state.get("force_post"))
+        log.info("Feed %s: decisión should_post=%s (%s)",
+                 state["feed_name"], should, decision.reason[:80])
+        return {"should_post": should, "post_text": decision.text, "reason": decision.reason}
+
+
+class PostFeedNode:
+    """Postea el skeet decidido, con guardia de duplicados contra bot_posts."""
+
+    def __init__(self, bsky: BskyClient, conn: sqlite3.Connection):
+        self.bsky = bsky
+        self.conn = conn
+
+    def run(self, state: FeedState) -> dict:
+        if not state.get("should_post"):
+            return {}
+        text = (state.get("post_text") or "").strip()
+        if not text:
+            log.info("Feed %s: should_post pero sin texto — skip", state.get("feed_name"))
+            return {}
+        norm = _norm_text(text)
+        if any(_norm_text(t) == norm for t in recent_bot_posts(self.conn, limit=20)):
+            log.info("Feed %s: texto duplicado de un post reciente — skip", state.get("feed_name"))
+            return {}
+        uri = self.bsky.post(text)
+        log_bot_post(self.conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
+        log.info("Feed %s: posteado %s", state.get("feed_name"), uri)
+        return {"posted_uri": uri}
+
+
+def _feed_has_posts(state: FeedState) -> str:
+    return "summarize" if state.get("posts_count", 0) > 0 else "END"
+
+
+def _feed_has_summary(state: FeedState) -> str:
+    return "reflect" if state.get("summary") else "END"
+
+
+def _feed_should_post(state: FeedState) -> str:
+    return "post" if state.get("should_post") else "END"
+
+
+def build_feed_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection,
+                     registry: ToolRegistry):
+    """
+    Grafo proactivo de feed (T5):
+        START → fetch → summarize → reflect → post → END
+                  ↓sin posts   ↓sin resumen   ↓no postea
+                 END          END            END
+    """
+    fetch     = FetchFeedNode(bsky, db)
+    summarize = SummarizeFeedNode(router, db)
+    reflect   = ReflectDecideNode(RoleLLM(router, "feed_opinion"), registry, db)
+    post      = PostFeedNode(bsky, db)
+
+    g = StateGraph(FeedState)
+    g.add_node("fetch",     fetch.run)
+    g.add_node("summarize", summarize.run)
+    g.add_node("reflect",   reflect.run)
+    g.add_node("post",      post.run)
+
+    g.add_edge(START, "fetch")
+    g.add_conditional_edges("fetch",     _feed_has_posts,   {"summarize": "summarize", "END": END})
+    g.add_conditional_edges("summarize", _feed_has_summary, {"reflect": "reflect", "END": END})
+    g.add_conditional_edges("reflect",   _feed_should_post, {"post": "post", "END": END})
+    g.add_edge("post", END)
+    return g.compile()
+
+
+def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None:
+    """Corre el loop proactivo (T5) una vez sobre todos los feeds habilitados."""
+    db       = init_db()
+    bsky     = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    router   = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    registry = build_tool_registry(TOOLS_CONFIG)
+    graph    = build_feed_graph(router, bsky, db, registry)
+
+    for feed in FEEDS_CONFIG:
+        if not feed.get("enabled", True):
+            log.info("Feed %s: deshabilitado, skip", feed["name"])
+            continue
+        state: FeedState = {
+            "feed_name":      feed["name"],
+            "list_uri":       feed["uri"],
+            "interval_hours": feed.get("interval_hours", 0),
+            "posting_policy": feed.get("posting_policy", "balanced"),
+            "force_post":     force_post,
+            "full_backfill":  full_backfill,
+        }
+        result = graph.invoke(state)
+        if result.get("posted_uri"):
+            log.info("Feed %s: OK → %s", feed["name"], result["posted_uri"])
+        else:
+            log.info("Feed %s: sin posteo (%s)", feed["name"], result.get("reason", "n/a"))
+    log.info("Loop proactivo completo.")
 
 
 # ---------------------------------------------------------------------------
@@ -1468,9 +1767,22 @@ if __name__ == "__main__":
         metavar="FEED_NAME",
         help="Generate and post an opinion about the latest summary of a feed, then exit.",
     )
+    parser.add_argument(
+        "--proactive",
+        action="store_true",
+        help="T5: run the autonomous feed loop (fetch→summarize→agent decides→maybe post) and exit.",
+    )
+    parser.add_argument(
+        "--force-post",
+        action="store_true",
+        help="Use with --proactive: force a post per feed even if the agent would abstain.",
+    )
     args = parser.parse_args()
 
-    if args.fetch_feeds:
+    if args.proactive:
+        run_feed_loop(force_post=args.force_post, full_backfill=args.backfill)
+
+    elif args.fetch_feeds:
         db        = init_db()
         bsky      = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
         router    = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
