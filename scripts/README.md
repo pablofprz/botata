@@ -45,6 +45,52 @@ La primera vez, subí tu DB local para crearla en la nube:
 En prod, dejá `db-backup.sh` en un cron (ej. cada hora) para tener siempre la última
 copia en la nube; desde el dev hacés `db-restore` y trabajás sobre eso.
 
+## Sync de chats → vault de Obsidian
+Importa conversaciones de Claude al vault (`../butterbot-vault/chats/`) con frontmatter,
+tags por keyword y wikilinks. Idempotente (manifest en `chats/.manifest.json`). Solo stdlib.
+
+- **code**: lee los transcripts `.jsonl` de Claude Code
+  (`~/.claude/projects/C--Users-pablo-Documents-butterbot/*.jsonl`) — automático, sin export manual.
+- **web**: lee exports `.md` de claude.ai que dejes en `~/claude-exports/web/` (export manual).
+
+```powershell
+.\scripts\sync_claude_obsidian.ps1              # ambas fuentes
+.\scripts\sync_claude_obsidian.ps1 --dry-run    # previsualizar
+.\scripts\sync_claude_obsidian.ps1 --source code
+```
+```bash
+./scripts/sync_claude_obsidian.sh               # Linux / prod
+```
+
+**Agendar (Windows Task Scheduler)** — diario 22:00, sin ventana:
+```powershell
+$act = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -WindowStyle Hidden -File `"$HOME\Documents\butterbot\scripts\sync_claude_obsidian.ps1`""
+$trg = New-ScheduledTaskTrigger -Daily -At 22:00
+Register-ScheduledTask -TaskName "butterbot-sync-chats" -Action $act -Trigger $trg
+```
+En Linux (prod), cron: `0 22 * * * $HOME/butterbot/scripts/sync_claude_obsidian.sh`.
+
+## Graphify (grafo del código)
+Grafo AST del repo (tree-sitter, 0 tokens) para consultar estructura sin re-leer archivos.
+Ya está instalado (`pip install graphifyy`, CLI en el PATH de pyenv). Output en
+`graphify-out/` (gitignored).
+
+```bash
+graphify update .                 # (re)construye el grafo — AST puro, sin LLM
+graphify query "cómo se arma el contexto de una reply"
+graphify explain "GenerateReplyNode"
+graphify path "LoadContextNode" "UpdateProfileNode"
+```
+
+> **Nota de permisos:** ejecutar `graphify` y `graphify install --platform claude`
+> (que crea el skill `/graphify` en `~/.claude/skills/`) los bloquea el clasificador
+> de auto-mode de Claude Code por ser paquete de terceros que modifica config global.
+> Para habilitarlo, agregá una regla de permiso Bash (`Bash(graphify:*)`) en tu
+> `settings.local.json`, o corré `graphify install --platform claude` a mano en una
+> terminal. El grafo se puede reconstruir a mano cuando cambia el código, o vía
+> `graphify hook install` (git hook post-commit).
+
 ## Credenciales (butterbot-secrets)
 Ver el README del repo privado `butterbot-secrets` (repos hermanos):
 ```

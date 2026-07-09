@@ -18,6 +18,12 @@ context/.spotify_cache
 *.db-wal
 *.db-shm
 
+# Graphify — grafo del código (regenerable, no versionar)
+graphify-out/
+
+# Claude Code — settings locales (paths de la máquina); los comandos SÍ se versionan
+.claude/settings.local.json
+
 # Butterbot credentials & secrets
 config/instagram.json
 config/bluesky.json
