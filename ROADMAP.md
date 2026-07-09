@@ -35,12 +35,14 @@ Selección de modelo por función, endpoint-agnóstico, con fallbacks.
 - No atado a OpenRouter: cualquier endpoint OpenAI-compatible configurable (base_url + api_key por endpoint).
 - Reintentos con backoff; loguea qué endpoint sirvió cada llamada.
 
-### T3 · El bot sabe la fecha  `infra` `S`  *(quick win)*
+### T3 · El bot sabe la fecha  `infra` `S`  *(quick win)*  ✅ **HECHO**
 - **Acept.:** cada contexto de reasoning (reply, feed-reflection, admin) recibe la fecha/hora actual (TZ America/Argentina/Buenos_Aires) inyectada en el system prompt.
+- Impl.: helper `current_datetime_line()` en `butterbot.py` (ZoneInfo + fallback UTC-3, `tzdata` en deps). Inyectado en reply, admin, feed_summary, feed_opinion y update_profile. Fija el bug de fecha alucinada (el bot leía fechas de MEMORY.md como "hoy").
 
-### T4 · Schema de eventos/calendario  `infra` `S`
+### T4 · Schema de eventos/calendario  `infra` `S`  ✅ **HECHO**
 - **Acept.:** tabla `events(id, handle?, title, description, event_at, kind, source, created_at)` + índices por fecha y handle.
 - Migración idempotente en `db.py`. Helpers CRUD + query "próximos N eventos" / "eventos de hoy".
+- Impl.: tabla + índices en `_SCHEMA`; helpers `create/get/update/delete_event`, `upcoming_events`, `events_today` (default AR, filtro por handle+comunidad). FK cascade al borrar user. Tests en `tests/test_events.py`.
 
 ---
 
