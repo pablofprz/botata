@@ -1,0 +1,48 @@
+# scripts/ — ops de datos y credenciales
+
+Tooling para trabajar cross-compu sin meter secretos ni la DB en el repo.
+
+## Modelo mental
+- **La DB es source of truth y single-writer.** Hay UNA canónica (la de prod). Desde
+  otra compu traés una **copia de trabajo**, no un segundo master. No corras el bot
+  en dos lados contra copias distintas.
+- **Credenciales y DB nunca van al repo** (ya están en `.gitignore`). Se sincronizan
+  aparte: credenciales por el repo privado `butterbot-secrets`, la DB por rclone.
+
+## Base de datos (rclone)
+
+### Setup por compu (una vez)
+1. Instalar rclone: https://rclone.org/downloads/  (Windows: `winget install Rclone.Rclone`)
+2. Configurar el remote a tu nube:
+   ```
+   rclone config
+   ```
+   Elegí `n` (new), nombre **`gdrive`** (o `dropbox`), tipo Google Drive / Dropbox,
+   y seguí el OAuth en el browser. El token queda en `rclone.conf` (local, no en git).
+
+### Uso
+```powershell
+# Windows (dev / otra compu)
+.\scripts\db-restore.ps1      # bajar la copia canónica antes de trabajar
+.\scripts\db-backup.ps1       # subir tus cambios cuando terminás
+```
+```bash
+# Linux (prod)
+./scripts/db-backup.sh        # típicamente en un cron: respalda la DP viva
+```
+- `db-backup` hace un **snapshot consistente** (`db_snapshot.py`, backup API de SQLite)
+  antes de subir — seguro con el bot corriendo.
+- `db-restore` respalda tu DB local (`.bak-<fecha>`) y limpia WAL/SHM viejos antes de
+  bajar la nube. Pasá `-Remote dropbox` si tu remote no se llama `gdrive`.
+
+En prod, dejá `db-backup.sh` en un cron (ej. cada hora) para tener siempre la última
+copia en la nube; desde el dev hacés `db-restore` y trabajás sobre eso.
+
+## Credenciales (butterbot-secrets)
+Ver el README del repo privado `butterbot-secrets` (repos hermanos):
+```
+Documents/
+  butterbot/           <- este repo
+  butterbot-secrets/   <- .env + config/instagram.json (privado)
+```
+`pull` hidrata las credenciales en butterbot; `push` guarda tus cambios locales.
