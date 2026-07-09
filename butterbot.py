@@ -30,6 +30,7 @@ from typing_extensions import TypedDict
 
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
+from tools import ToolRegistry, ToolContext, ToolResult, Scope  # framework de tools
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -90,6 +91,7 @@ IMAGE_MODEL        : str  = settings.get("IMAGE_MODEL", "google/gemini-2.5-flash
 OPENAI_ENDPOINT    : str  = settings.get("OPENAI_ENDPOINT", "https://openrouter.ai/api/v1")
 POLL_INTERVAL      : int  = settings.get("POLL_INTERVAL_SECONDS", 60)
 FEEDS_CONFIG       : list = settings.get("FEEDS", [])
+TOOLS_CONFIG       : dict = settings.get("TOOLS", {})
 
 # ---------------------------------------------------------------------------
 # SQLite
@@ -712,149 +714,126 @@ class FeedProcessor:
 
 
 # ---------------------------------------------------------------------------
-# Admin tools
-# These are the functions the LLM can invoke via tool calling.
-# Each one returns a confirmation string that gets posted as the reply.
+# Tools concretas
+# Los handlers reciben (args, ctx) y devuelven un ToolResult. ctx.state es el
+# MentionState y ctx.conn la conexión sqlite. Se cierran sobre los globals del
+# módulo (dbmod, MEMORY_PATH, load_text) para no acoplar tools.py a la app.
+# El schema + scopes de cada tool se declara en build_tool_registry().
 # ---------------------------------------------------------------------------
 
-# Tool schemas in OpenAI format
-ADMIN_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "save_to_user_profile",
-            "description": (
-                "Save a fact about the user who is speaking to their profile file. "
-                "Use for personal data: age, pronouns, location, job, teams, preferences, events."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The fact to save, written as a short plain sentence.",
-                    }
-                },
-                "required": ["content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_to_memory",
-            "description": (
-                "Save a general fact to the bot's own MEMORY.md. "
-                "Use for community context, standing instructions for the bot, or world-facts."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The fact to save, written as a short plain sentence.",
-                    }
-                },
-                "required": ["content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_debug_info",
-            "description": "Return current runtime debug information about the bot.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_help",
-            "description": "Return the list of available commands.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_images",
-            "description": (
-                "Search the image catalog for images matching a query. "
-                "Use when the admin asks for a meme, image, foto, or picture. "
-                "Returns the path to the best matching image so it can be posted."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query in Spanish, e.g. 'meme de gato', 'perro enojado'.",
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "Optional category filter: 'meme', 'foto', 'arte', 'captura', 'otro'.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-]
+def _tool_save_to_user_profile(args: dict, ctx: ToolContext) -> ToolResult:
+    content = args["content"]
+    dbmod.upsert_user_fact(ctx.conn, ctx.state["author_handle"], content, source_uri="/remember")
+    log.info("/remember → user_facts @%s: %s", ctx.state["author_handle"], content)
+    return ToolResult(text=f"anotado en tu perfil: {content}")
 
 
-def execute_tool(
-    tool_name  : str,
-    tool_args  : dict,
-    state      : MentionState,
-    conn       : sqlite3.Connection,
-) -> tuple[str, str | None]:
-    """
-    Execute an admin tool. Returns (confirmation_text, image_path_or_None).
-    This is where the actual side effects happen (DB writes, MEMORY.md, etc).
-    """
+def _tool_save_to_memory(args: dict, ctx: ToolContext) -> ToolResult:
+    content   = args["content"]
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    existing  = load_text(MEMORY_PATH)
+    updated   = existing.rstrip() + f"\n\n## {timestamp}\n- {content}\n"
+    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MEMORY_PATH.write_text(updated, encoding="utf-8")
+    log.info("/remember → MEMORY.md: %s", content)
+    return ToolResult(text=f"anotado en mi memoria: {content}")
 
-    if tool_name == "save_to_user_profile":
-        content = tool_args["content"]
-        dbmod.upsert_user_fact(conn, state["author_handle"], content, source_uri="/remember")
-        log.info("/remember → user_facts @%s: %s", state["author_handle"], content)
-        return f"anotado en tu perfil: {content}", None
 
-    if tool_name == "save_to_memory":
-        content  = tool_args["content"]
-        existing = load_text(MEMORY_PATH)
-        updated  = existing.rstrip() + f"\n\n## {timestamp}\n- {content}\n"
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(updated, encoding="utf-8")
-        log.info("/remember → MEMORY.md: %s", content)
-        return f"anotado en mi memoria: {content}", None
+def _tool_get_debug_info(args: dict, ctx: ToolContext) -> ToolResult:
+    s = ctx.state
+    return ToolResult(text=(
+        f"[debug] mode={s['mode']} | author={s['author_handle']} | text={s['mention_text'][:80]}"
+    ))
 
-    if tool_name == "get_debug_info":
-        return (
-            f"[debug] mode={state['mode']} | "
-            f"author={state['author_handle']} | "
-            f"text={state['mention_text'][:80]}"
-        ), None
 
-    if tool_name == "get_help":
-        return "comandos: /remember <texto>, /bloques (quién te bloquea, vía ClearSky), /imagen <búsqueda>, /debug, /help", None
+def _tool_get_help(args: dict, ctx: ToolContext) -> ToolResult:
+    return ToolResult(text=(
+        "comandos: /remember <texto>, /bloques (quién te bloquea, vía ClearSky), "
+        "/imagen <búsqueda>, /debug, /help"
+    ))
 
-    if tool_name == "search_images":
-        query = tool_args.get("query", "")
-        category = tool_args.get("category")
-        results = dbmod.hybrid_search_image_catalog(conn, query, category=category, limit=5)
-        if not results:
-            return f"no encontré imágenes para '{query}'", None
-        best = results[0]
-        image_path = best["file_path"]
-        dbmod.mark_image_used(conn, best["id"])
-        summary = ", ".join(
-            f"{r['description'][:50]}… [{r['category']}]" for r in results[:3]
-        )
-        return f"encontré {len(results)} imágenes: {summary}", image_path
 
-    return f"[tool desconocida: {tool_name}]", None
+def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
+    query    = args.get("query", "")
+    category = args.get("category")
+    results  = dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category, limit=5)
+    if not results:
+        return ToolResult(text=f"no encontré imágenes para '{query}'")
+    best = results[0]
+    dbmod.mark_image_used(ctx.conn, best["id"])
+    summary = ", ".join(f"{r['description'][:50]}… [{r['category']}]" for r in results[:3])
+    return ToolResult(text=f"encontré {len(results)} imágenes: {summary}", image_path=best["file_path"])
+
+
+def build_tool_registry(config: dict | None = None) -> ToolRegistry:
+    """Registra las tools concretas y aplica overrides de settings.json → sección TOOLS.
+
+    Scopes actuales: todas en ADMIN (paridad de comportamiento con el ADMIN_TOOLS
+    previo). Los scopes REPLY / FEED_REFLECTION ya existen en el framework para las
+    tools que vienen (búsqueda web, calendar, música) sin tocar esta base.
+    """
+    reg = ToolRegistry()
+    reg.register(
+        "save_to_user_profile",
+        "Save a fact about the user who is speaking to their profile file. "
+        "Use for personal data: age, pronouns, location, job, teams, preferences, events.",
+        {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The fact to save, written as a short plain sentence."}
+            },
+            "required": ["content"],
+        },
+        _tool_save_to_user_profile,
+        {Scope.ADMIN},
+    )
+    reg.register(
+        "save_to_memory",
+        "Save a general fact to the bot's own MEMORY.md. "
+        "Use for community context, standing instructions for the bot, or world-facts.",
+        {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The fact to save, written as a short plain sentence."}
+            },
+            "required": ["content"],
+        },
+        _tool_save_to_memory,
+        {Scope.ADMIN},
+    )
+    reg.register(
+        "get_debug_info",
+        "Return current runtime debug information about the bot.",
+        {"type": "object", "properties": {}, "required": []},
+        _tool_get_debug_info,
+        {Scope.ADMIN},
+    )
+    reg.register(
+        "get_help",
+        "Return the list of available commands.",
+        {"type": "object", "properties": {}, "required": []},
+        _tool_get_help,
+        {Scope.ADMIN},
+    )
+    reg.register(
+        "search_images",
+        "Search the image catalog for images matching a query. "
+        "Use when the admin asks for a meme, image, foto, or picture. "
+        "Returns the path to the best matching image so it can be posted.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query in Spanish, e.g. 'meme de gato', 'perro enojado'."},
+                "category": {"type": "string", "description": "Optional category filter: 'meme', 'foto', 'arte', 'captura', 'otro'."},
+            },
+            "required": ["query"],
+        },
+        _tool_search_images,
+        {Scope.ADMIN},
+    )
+    if config:
+        reg.apply_config(config)
+    return reg
 
 
 # ---------------------------------------------------------------------------
@@ -1053,9 +1032,10 @@ class HandleAdminCommandNode:
     Tools: save_to_user_profile, save_to_memory, get_debug_info, get_help.
     """
 
-    def __init__(self, llm: LLMClient, conn: sqlite3.Connection):
-        self.llm  = llm
-        self.conn = conn
+    def __init__(self, llm: LLMClient, conn: sqlite3.Connection, registry: ToolRegistry):
+        self.llm      = llm
+        self.conn     = conn
+        self.registry = registry
 
     def run(self, state: MentionState) -> dict:
         system = (
@@ -1071,7 +1051,8 @@ class HandleAdminCommandNode:
             f"Comando recibido: {state['mention_text']}"
         )
 
-        text_reply, tool_calls = self.llm.call_with_tools(system, user, ADMIN_TOOLS)
+        admin_tools = self.registry.openai_schemas(Scope.ADMIN)
+        text_reply, tool_calls = self.llm.call_with_tools(system, user, admin_tools)
 
         # No tool called — use direct text response as fallback
         if not tool_calls:
@@ -1084,10 +1065,10 @@ class HandleAdminCommandNode:
         tool_args = json.loads(call.function.arguments)
         log.info("Tool called: %s(%s)", tool_name, tool_args)
 
-        confirmation, image_path = execute_tool(tool_name, tool_args, state, self.conn)
-        result: dict = {"reply_text": confirmation}
-        if image_path:
-            result["image_path"] = image_path
+        outcome = self.registry.execute(tool_name, tool_args, ToolContext(state=state, conn=self.conn))
+        result: dict = {"reply_text": outcome.text}
+        if outcome.image_path:
+            result["image_path"] = outcome.image_path
         return result
 
 
@@ -1304,11 +1285,13 @@ def build_graph(llm: LLMClient, bsky: BskyClient, db: sqlite3.Connection):
                                                 → update_profile → END
     """
     lite_llm = LLMClient(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT, model=LITE_MODEL)
+    registry = build_tool_registry(TOOLS_CONFIG)
+    log.info("Tool registry: %s", ", ".join(registry.names()) or "(vacío)")
 
     classify       = ClassifyNode(lite_llm)
     load_context   = LoadContextNode(llm, bsky, db)
     generate_reply = GenerateReplyNode(llm, db)
-    handle_admin   = HandleAdminCommandNode(llm, db)
+    handle_admin   = HandleAdminCommandNode(llm, db, registry)
     handle_blocks  = HandleBlockQueryNode(bsky, db)
     post_reply     = PostReplyNode(bsky, db)
     update_profile = UpdateProfileNode(llm, db)

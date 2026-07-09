@@ -30,6 +30,7 @@ dependencies = [
 dev = [
     "ruff>=0.5",
     "mypy>=1.10",
+    "pytest>=8.0",
 ]
 
 [build-system]
