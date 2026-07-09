@@ -1,0 +1,22 @@
+{
+	"BOT_HANDLE": "maripobot.bsky.social",
+	"ADMIN_HANDLE": "ppolci.com",
+	"SPOTIFY_REDIRECT_URI": "http://127.0.0.1:8888/callback",
+	"OPENAI_ENDPOINT": "https://openrouter.ai/api/v1",
+	"REASONING_MODEL": "deepseek/deepseek-v4-pro",
+	"LITE_MODEL": "deepseek/deepseek-v4-flash",
+	"IMAGE_MODEL": "google/gemini-2.5-flash",
+	"OPENROUTER_DAILY_BUDGET_USD": 1.00,
+    "PIPELINE_DAILY_RUNS": {
+        "news":                1,
+        "video":               0,
+        "image":               6,
+        "music":               1,
+        "timeline":            2,
+        "timeline_reflection": 2,
+        "update_history":      1,
+        "reflection":          1
+    }
+}
+
+

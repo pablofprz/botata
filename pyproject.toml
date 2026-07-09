@@ -1,0 +1,54 @@
+[project]
+name = "butterbot"
+version = "0.1.0"
+description = "Bot comunitario de Bluesky Argentina basado en agentes y grafos (langgraph)."
+requires-python = ">=3.12"
+readme = "README.md"
+dependencies = [
+    # Orquestación de agentes
+    "langgraph>=0.2.60",
+    # Estructuración de datos / Structured Outputs
+    "pydantic>=2.7",
+    # Cliente LLM (OpenRouter es compatible con la API de OpenAI)
+    "openai>=1.30",
+    # Cliente Bluesky (AT Protocol)
+    "atproto>=0.0.5",
+    # Config / env
+    "python-dotenv>=1.0",
+    # Persistencia: SQLite moderno + búsqueda semántica (vec0)
+    "sqlite-vec>=0.1.6",
+    # Embeddings locales multilingües (bge-m3)
+    "sentence-transformers>=3.0",
+    # Automatización de navegador (capa reusable de scraping: IG, Reddit, X...)
+    "playwright>=1.44",
+    "patchright>=1.44",  # playwright parcheado (stealth) — camino browser de IG
+    # Scraping de Instagram vía API privada mobile (sin navegador, sin fingerprint)
+    "instagrapi>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["butterbot", "db"]
+
+# --- ruff: tipado estricto, sin opinionated noise ---------------------------
+[tool.ruff]
+line-length = 99
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "TID"]
+ignore = ["E501"]  # line-length lo manejamos con formatter
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_module_defs = true

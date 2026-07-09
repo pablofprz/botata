@@ -1,0 +1,763 @@
+"""db.py — capa de persistencia de butterbot.
+
+SQLite (WAL) como source of truth único + sqlite-vec (vec0, ANN coseno)
++ FTS5 (BM25) para búsqueda híbrida. El esquema y las decisiones de diseño
+están documentados en CLAUDE.md, sección "Esquema de persistencia (DECIDIDO)".
+
+Este módulo cubre solo la fundación: conexión, pragmas, carga de la
+extensión sqlite-vec, esquema DDL completo y el cargador del modelo de
+embeddings (bge-m3, 1024 dim). Las funciones de upsert/dedup y búsqueda
+híbrida (vec + FTS5 + RRF) se agregan en el paso siguiente.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import sqlite_vec
+
+log = logging.getLogger("butterbot.db")
+
+# ─── Constantes ────────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "posted" / "butterbot.db"
+
+# bge-m3 (dense) → 1024 dimensiones. Verificado contra config.json del modelo.
+EMBED_DIM = 1024
+EMBED_MODEL_NAME = "BAAI/bge-m3"
+
+# Cosine: vec0 devuelve distance = 1 - similitud. Umbral de dedup propuesto
+# (cosine > 0.92 ⟺ distance < 0.08). Se usa en el paso de upsert/dedup.
+DEDUP_THRESHOLD = 0.92
+
+# ─── Esquema ────────────────────────────────────────────────────────────────
+_SCHEMA = """
+-- ─── users: identidad y perfil base ──────────────────────────────────
+CREATE TABLE IF NOT EXISTS users (
+    handle       TEXT PRIMARY KEY,          -- ej. 'ppolci.com' (sin @)
+    did          TEXT UNIQUE,               -- Bluesky DID (estable ante cambio de handle)
+    display_name TEXT,
+    bio_raw      TEXT,                      -- bio literal de Bluesky
+    bio_interp   TEXT,                      -- bullets extraídos por interpret_bio_prompt
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ─── user_facts: hechos autorrevelados (semántico) ───────────────────
+CREATE TABLE IF NOT EXISTS user_facts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    handle        TEXT NOT NULL REFERENCES users(handle) ON DELETE CASCADE,
+    fact_text     TEXT NOT NULL,            -- ej. "Vive en Rosario"
+    source_uri    TEXT,                     -- URI del post de origen (auditoría)
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    superseded_by INTEGER REFERENCES user_facts(id) ON DELETE SET NULL  -- dedup/merge soft
+);
+CREATE INDEX IF NOT EXISTS idx_user_facts_handle  ON user_facts(handle);
+CREATE INDEX IF NOT EXISTS idx_user_facts_created ON user_facts(created_at);
+
+-- ─── lessons: lecciones conductuales (semántico, cross-user) ─────────
+CREATE TABLE IF NOT EXISTS lessons (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    lesson_text   TEXT NOT NULL,            -- ej. "Cuando X hace Y, responder Z funciona mejor"
+    scope         TEXT NOT NULL DEFAULT 'community',  -- 'community' | 'user:ppolci.com'
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    superseded_by INTEGER REFERENCES lessons(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_scope ON lessons(scope);
+
+-- ─── relationships: grafo ponderado entre usuarios ───────────────────
+-- aristas no dirigidas: la asimetría handle_a/handle_b es solo de storage;
+-- consultar siempre por (handle_a = :h OR handle_b = :h).
+CREATE TABLE IF NOT EXISTS relationships (
+    handle_a TEXT NOT NULL REFERENCES users(handle) ON DELETE CASCADE,
+    handle_b TEXT NOT NULL REFERENCES users(handle) ON DELETE CASCADE,
+    kind     TEXT NOT NULL,                 -- 'reply'|'mention'|'thread'|'mutual'
+    weight   REAL NOT NULL DEFAULT 1.0,     -- afinidad; decae con el tiempo (job de mantenimiento)
+    last_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (handle_a, handle_b, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_rel_a ON relationships(handle_a);
+CREATE INDEX IF NOT EXISTS idx_rel_b ON relationships(handle_b);
+
+-- ─── bot_posts: lo que el bot publicó (log de salida) ───────────────
+CREATE TABLE IF NOT EXISTS bot_posts (
+    uri             TEXT PRIMARY KEY,
+    in_reply_to     TEXT,                   -- URI del post respondido (NULL si raíz)
+    reply_to_handle TEXT REFERENCES users(handle),
+    posted_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    text            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bot_posts_reply  ON bot_posts(in_reply_to);
+CREATE INDEX IF NOT EXISTS idx_bot_posts_handle ON bot_posts(reply_to_handle);
+
+-- ─── replied_posts: idempotencia de procesamiento (entrada) ─────────
+-- (preexistente en butterbot.py — se preserva tal cual)
+CREATE TABLE IF NOT EXISTS replied_posts (
+    uri        TEXT PRIMARY KEY,
+    cid        TEXT NOT NULL,
+    author     TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',   -- pending|replied|failed
+    replied_at TEXT NOT NULL,
+    mode       TEXT NOT NULL
+);
+
+-- ─── feed_cursors: cursores por feed ─────────────────────────────────
+-- (preexistente en butterbot.py — se preserva tal cual)
+CREATE TABLE IF NOT EXISTS feed_cursors (
+    feed_name  TEXT PRIMARY KEY,
+    last_run   TEXT
+);
+
+-- ─── clearsky_cache: cache de bloqueadores por DID ────────────────────
+-- Proxy de la API pública de ClearSky ("quién me bloquea"). TTL corto: los
+-- bloques no cambian seguido y amortiguamos repetición del comando. El JSON
+-- guarda la lista cruda de {did, blocked_date} devuelta por ClearSky.
+CREATE TABLE IF NOT EXISTS clearsky_cache (
+    did           TEXT PRIMARY KEY,
+    blockers_json TEXT NOT NULL,        -- JSON array de {did, blocked_date}
+    fetched_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ─── scraped_items: entrada scrapeada de plataformas externas ────────
+-- Log de entrada + idempotencia del scraping (IG, Reddit, X...). Dedup por
+-- (platform, external_id). Reusable: cualquier Source (adaptador de plataforma)
+-- escribe acá con el mismo esquema, agnóstico de la plataforma.
+CREATE TABLE IF NOT EXISTS scraped_items (
+    platform    TEXT NOT NULL,              -- 'instagram' | 'reddit' | 'twitter'
+    external_id TEXT NOT NULL,              -- shortcode / post id (clave estable)
+    source_name TEXT,                       -- nombre de la cuenta/feed en la config
+    author      TEXT,
+    text        TEXT,
+    media_urls  TEXT,                       -- JSON array de URLs
+    url         TEXT,                       -- permalink
+    posted_at   TEXT,                       -- fecha del post si se pudo extraer
+    scraped_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    status      TEXT NOT NULL DEFAULT 'pending',   -- pending|processed|failed
+    PRIMARY KEY (platform, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scraped_source ON scraped_items(platform, source_name);
+CREATE INDEX IF NOT EXISTS idx_scraped_status ON scraped_items(status);
+
+-- ─── image_catalog: mapa de conocimiento de imágenes del bot ─────────
+-- Cada archivo de imagen en scrape/pictures/ tiene una fila acá con su
+-- descripción generada por LLM multimodal, categoría, tags y OCR. Es la
+-- fuente de verdad para que el bot sepa qué imágenes tiene disponibles.
+CREATE TABLE IF NOT EXISTS image_catalog (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform      TEXT NOT NULL,              -- 'instagram' | 'reddit' | 'local'
+    external_id   TEXT NOT NULL,              -- post shortcode (link a scraped_items)
+    source_name   TEXT NOT NULL,              -- cuenta de origen (ej. 'encadenado_shitpost')
+    file_path     TEXT NOT NULL,              -- relativo a repo root
+    description   TEXT NOT NULL,              -- descripción LLM de qué hay en la imagen
+    category      TEXT NOT NULL,              -- 'meme' | 'foto' | 'arte' | 'captura' | 'otro'
+    tags          TEXT NOT NULL DEFAULT '[]', -- JSON array: ["shitpost", "argentina", "gato"]
+    ocr_text      TEXT,                       -- texto visible en la imagen (si tiene)
+    source_url    TEXT,                       -- permalink al post original
+    posted_at     TEXT,                       -- fecha del post original
+    used_at       TEXT,                       -- última vez que butterbot usó esta imagen
+    use_count     INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(platform, external_id, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_image_cat_platform ON image_catalog(platform, source_name);
+CREATE INDEX IF NOT EXISTS idx_image_cat_category ON image_catalog(category);
+CREATE INDEX IF NOT EXISTS idx_image_cat_used    ON image_catalog(used_at);
+
+-- ─── Búsqueda semántica: sqlite-vec (vec0, cosine) ───────────────────
+-- distance_metric=cosine → distance = 1 - cos_sim. rowid == id de la tabla base.
+-- user_facts_vec particionada por handle: el dedup y la recuperación de hechos
+-- del autor se restringen a esa partición (sin contaminar con hechos ajenos).
+CREATE VIRTUAL TABLE IF NOT EXISTS user_facts_vec USING vec0(
+    embedding FLOAT[1024] distance_metric=cosine,
+    partition_key TEXT
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS lessons_vec USING vec0(
+    embedding FLOAT[1024] distance_metric=cosine
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS image_catalog_vec USING vec0(
+    embedding FLOAT[1024] distance_metric=cosine
+);
+
+-- ─── Búsqueda keyword: FTS5 (BM25) ───────────────────────────────────
+-- content='external': el texto vive en la tabla base; FTS5 solo indexa.
+CREATE VIRTUAL TABLE IF NOT EXISTS user_facts_fts USING fts5(
+    fact_text,
+    content='user_facts', content_rowid='id'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(
+    lesson_text,
+    content='lessons', content_rowid='id'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS image_catalog_fts USING fts5(
+    description, tags, ocr_text,
+    content='image_catalog', content_rowid='id'
+);
+
+-- triggers: mantener FTS5 sincronizado con la tabla base (user_facts)
+CREATE TRIGGER IF NOT EXISTS user_facts_ai AFTER INSERT ON user_facts BEGIN
+  INSERT INTO user_facts_fts(rowid, fact_text) VALUES (new.id, new.fact_text);
+END;
+CREATE TRIGGER IF NOT EXISTS user_facts_ad AFTER DELETE ON user_facts BEGIN
+  INSERT INTO user_facts_fts(user_facts_fts, rowid, fact_text) VALUES ('delete', old.id, old.fact_text);
+END;
+CREATE TRIGGER IF NOT EXISTS user_facts_au AFTER UPDATE ON user_facts BEGIN
+  INSERT INTO user_facts_fts(user_facts_fts, rowid, fact_text) VALUES ('delete', old.id, old.fact_text);
+  INSERT INTO user_facts_fts(rowid, fact_text) VALUES (new.id, new.fact_text);
+END;
+
+-- triggers: mantener FTS5 sincronizado con la tabla base (lessons)
+CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN
+  INSERT INTO lessons_fts(rowid, lesson_text) VALUES (new.id, new.lesson_text);
+END;
+CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN
+  INSERT INTO lessons_fts(lessons_fts, rowid, lesson_text) VALUES ('delete', old.id, old.lesson_text);
+END;
+CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN
+  INSERT INTO lessons_fts(lessons_fts, rowid, lesson_text) VALUES ('delete', old.id, old.lesson_text);
+  INSERT INTO lessons_fts(rowid, lesson_text) VALUES (new.id, new.lesson_text);
+END;
+
+-- triggers: mantener FTS5 sincronizado con la tabla base (image_catalog)
+CREATE TRIGGER IF NOT EXISTS image_catalog_ai AFTER INSERT ON image_catalog BEGIN
+  INSERT INTO image_catalog_fts(rowid, description, tags, ocr_text)
+  VALUES (new.id, new.description, new.tags, new.ocr_text);
+END;
+CREATE TRIGGER IF NOT EXISTS image_catalog_ad AFTER DELETE ON image_catalog BEGIN
+  INSERT INTO image_catalog_fts(image_catalog_fts, rowid, description, tags, ocr_text)
+  VALUES ('delete', old.id, old.description, old.tags, old.ocr_text);
+END;
+CREATE TRIGGER IF NOT EXISTS image_catalog_au AFTER UPDATE ON image_catalog BEGIN
+  INSERT INTO image_catalog_fts(image_catalog_fts, rowid, description, tags, ocr_text)
+  VALUES ('delete', old.id, old.description, old.tags, old.ocr_text);
+  INSERT INTO image_catalog_fts(rowid, description, tags, ocr_text)
+  VALUES (new.id, new.description, new.tags, new.ocr_text);
+END;
+"""
+
+
+# ─── Conexión e inicialización ─────────────────────────────────────────────
+def _load_vec_extension(conn: sqlite3.Connection) -> None:
+    """Carga la extensión loadable de sqlite-vec en la conexión."""
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+
+def init_db(path: Path | str = DB_PATH) -> sqlite3.Connection:
+    """Abre/crea butterbot.db, aplica pragmas, carga sqlite-vec y crea el esquema.
+
+    Devuelve una conexión lista para uso del bot. `check_same_thread=False`
+    porque langgraph puede ejecutar nodos en hilos; WAL cubre la concurrencia.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    for pragma in ("journal_mode=WAL", "foreign_keys=ON", "synchronous=NORMAL"):
+        conn.execute(f"PRAGMA {pragma}")
+    _load_vec_extension(conn)
+    conn.executescript(_SCHEMA)
+    conn.commit()
+    log.info("DB ready at %s (sqlite_vec loaded)", path)
+    return conn
+
+
+# ─── scraped_items: idempotencia y log de entrada del scraping ──────────────
+def has_scraped_item(conn: sqlite3.Connection, platform: str, external_id: str) -> bool:
+    """True si ya vimos este ítem (dedup por clave de plataforma)."""
+    row = conn.execute(
+        "SELECT 1 FROM scraped_items WHERE platform = ? AND external_id = ?",
+        (platform, external_id),
+    ).fetchone()
+    return row is not None
+
+
+def save_scraped_item(
+    conn: sqlite3.Connection,
+    *,
+    platform: str,
+    external_id: str,
+    source_name: str | None = None,
+    author: str | None = None,
+    text: str | None = None,
+    media_urls: str | None = None,   # JSON array serializado
+    url: str | None = None,
+    posted_at: str | None = None,
+) -> bool:
+    """Inserta un ítem scrapeado. Devuelve True si es nuevo, False si ya existía.
+
+    Idempotente: el INSERT OR IGNORE + rowcount distingue insert real de duplicado.
+    """
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO scraped_items "
+        "(platform, external_id, source_name, author, text, media_urls, url, posted_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (platform, external_id, source_name, author, text, media_urls, url, posted_at),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def mark_scraped_status(
+    conn: sqlite3.Connection, platform: str, external_id: str, status: str
+) -> None:
+    conn.execute(
+        "UPDATE scraped_items SET status = ? WHERE platform = ? AND external_id = ?",
+        (status, platform, external_id),
+    )
+    conn.commit()
+
+
+# ─── Embeddings (bge-m3, lazy) ─────────────────────────────────────────────
+_embedder: Any = None  # SentenceTransformer | None
+
+
+def get_embedder() -> Any:
+    """Carga perezosa del modelo de embeddings (bge-m3).
+
+    Es pesado (~2GB en disco, carga en RAM) y puede no ser necesario en todos
+    los procesos (ej. tests de esquema), por eso se difiere al primer uso.
+    """
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+
+        log.info("loading embedding model %s ...", EMBED_MODEL_NAME)
+        _embedder = SentenceTransformer(EMBED_MODEL_NAME)
+    return _embedder
+
+
+def embed(text: str) -> bytes:
+    """Embedding denso de `text` como bytes float32 little-endian (para vec0).
+
+    bge-m3 dense no requiere prefijos. La métrica cosine de vec0 normaliza
+    implícitamente, así que no se normaliza acá.
+    """
+    model = get_embedder()
+    vec = model.encode(text, convert_to_numpy=True)
+    return np.asarray(vec, dtype="float32").tobytes()
+
+
+# ─── Escritura: upsert + dedup semántico ────────────────────────────────────
+def upsert_user_fact(
+    conn: sqlite3.Connection,
+    handle: str,
+    fact_text: str,
+    source_uri: str | None = None,
+    *,
+    threshold: float = DEDUP_THRESHOLD,
+) -> int | None:
+    """Inserta un hecho para `handle` salvo que exista uno semánticamente duplicado.
+
+    El dedup corre solo dentro de la partición del usuario (partition_key=handle):
+    busca el vecino más cercano del candidato y, si coseno >= threshold, lo
+    considera duplicado y salta el insert (devuelve None). Si no hay duplicado,
+    inserta la fila + el vector y devuelve el nuevo id.
+
+    `superseded_by` NO se toca acá: es para merges explícitos posteriores (un
+    hecho que reemplaza a otro, ej. "Vive en Rosario" → "Se mudó a Córdoba").
+    El dedup automático solo previene duplicados, no mergea.
+    """
+    q = embed(fact_text)
+    hit = conn.execute(
+        "SELECT rowid AS id, distance FROM user_facts_vec "
+        "WHERE embedding MATCH ? AND k = 1 AND partition_key = ? "
+        "ORDER BY distance",
+        (q, handle),
+    ).fetchone()
+    if hit is not None and (1.0 - hit["distance"]) >= threshold:
+        log.debug("user_facts dedup skip (handle=%s sim=%.3f)", handle, 1.0 - hit["distance"])
+        return None
+
+    cur = conn.execute(
+        "INSERT INTO user_facts(handle, fact_text, source_uri) VALUES (?, ?, ?)",
+        (handle, fact_text, source_uri),
+    )
+    fid = cur.lastrowid
+    conn.execute(
+        "INSERT INTO user_facts_vec(rowid, embedding, partition_key) VALUES (?, ?, ?)",
+        (fid, q, handle),
+    )
+    conn.commit()
+    return fid
+
+
+def upsert_lesson(
+    conn: sqlite3.Connection,
+    lesson_text: str,
+    scope: str = "community",
+    *,
+    threshold: float = DEDUP_THRESHOLD,
+) -> int | None:
+    """Inserta una lección salvo que exista una duplicada dentro del mismo `scope`.
+
+    lessons_vec no está particionada (cross-user), así que el dedup recupera los
+    k=10 más cercanos globales y salta el insert si alguno del mismo scope supera
+    el threshold. `scope`: 'community' o 'user:<handle>'.
+    """
+    q = embed(lesson_text)
+    hits = conn.execute(
+        "SELECT v.rowid AS id, v.distance AS d, l.scope AS scope "
+        "FROM lessons_vec v JOIN lessons l ON l.id = v.rowid "
+        "WHERE v.embedding MATCH ? AND k = 10 ORDER BY v.distance",
+        (q,),
+    ).fetchall()
+    for hit in hits:
+        if hit["scope"] == scope and (1.0 - hit["d"]) >= threshold:
+            log.debug("lessons dedup skip (scope=%s sim=%.3f)", scope, 1.0 - hit["d"])
+            return None
+
+    cur = conn.execute(
+        "INSERT INTO lessons(lesson_text, scope) VALUES (?, ?)",
+        (lesson_text, scope),
+    )
+    lid = cur.lastrowid
+    conn.execute(
+        "INSERT INTO lessons_vec(rowid, embedding) VALUES (?, ?)",
+        (lid, q),
+    )
+    conn.commit()
+    return lid
+
+
+# ─── Lectura: búsqueda híbrida (vec + FTS5 + RRF) ───────────────────────────
+def _rrf(rankings: list[list[int]], *, k: int = 60) -> list[tuple[int, float]]:
+    """Reciprocal Rank Fusion: fusiona listas rankeadas de rowids.
+
+    score(d) = Σ 1 / (k + rank)  sobre cada lista donde d aparece (rank 1-based).
+    Devuelve [(rowid, score), ...] ordenado por score descendente.
+    """
+    scores: dict[int, float] = {}
+    for ranking in rankings:
+        for rank, doc_id in enumerate(ranking, start=1):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
+def _fts_query(text: str) -> str:
+    """Sanitiza `text` para FTS5: quita todo menos palabras y las cita como frases.
+
+    Evita errores de sintaxis de FTS5 con puntuación/operadores y mantiene los
+    acentos (re.UNICODE). Ej: "Vive en Rosario!" → '"Vive" "en" "Rosario"'.
+    """
+    tokens = re.findall(r"\w+", text, flags=re.UNICODE)
+    return " ".join(f'"{t}"' for t in tokens)
+
+
+def hybrid_search_user_facts(
+    conn: sqlite3.Connection,
+    handle: str,
+    query: str,
+    k: int = 5,
+    *,
+    rrf_k: int = 60,
+) -> list[tuple[int, str]]:
+    """Recupera los k hechos más relevantes de `handle` para `query`.
+
+    Búsqueda híbrida: vec0 (coseno, partición del usuario) + FTS5 (BM25, filtrado
+    por handle en el JOIN), fusionadas por RRF. Devuelve [(id, fact_text), ...].
+    """
+    q = embed(query)
+    pool = max(k * 3, 15)
+
+    vec_rows = conn.execute(
+        "SELECT v.rowid AS id, f.fact_text AS text "
+        "FROM user_facts_vec v JOIN user_facts f ON f.id = v.rowid "
+        "WHERE v.embedding MATCH ? AND k = ? AND v.partition_key = ? "
+        "ORDER BY v.distance",
+        (q, pool, handle),
+    ).fetchall()
+    fts_rows = conn.execute(
+        "SELECT f.id AS id, f.fact_text AS text "
+        "FROM user_facts_fts JOIN user_facts f ON f.id = user_facts_fts.rowid "
+        "WHERE user_facts_fts MATCH ? AND f.handle = ? "
+        "ORDER BY rank LIMIT ?",
+        (_fts_query(query), handle, pool),
+    ).fetchall()
+
+    fused = _rrf(
+        [[r["id"] for r in vec_rows], [r["id"] for r in fts_rows]], k=rrf_k
+    )
+    by_id = {r["id"]: r["text"] for r in vec_rows}
+    by_id.update({r["id"]: r["text"] for r in fts_rows})
+    return [(doc_id, by_id[doc_id]) for doc_id, _ in fused[:k]]
+
+
+def hybrid_search_lessons(
+    conn: sqlite3.Connection,
+    query: str,
+    k: int = 5,
+    *,
+    rrf_k: int = 60,
+) -> list[tuple[int, str]]:
+    """Recupera las k lecciones más relevantes para `query` (cross-user).
+
+    vec0 (coseno, global) + FTS5 (BM25), fusionadas por RRF.
+    Devuelve [(id, lesson_text), ...].
+    """
+    q = embed(query)
+    pool = max(k * 3, 15)
+
+    vec_rows = conn.execute(
+        "SELECT v.rowid AS id, l.lesson_text AS text "
+        "FROM lessons_vec v JOIN lessons l ON l.id = v.rowid "
+        "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+        (q, pool),
+    ).fetchall()
+    fts_rows = conn.execute(
+        "SELECT l.id AS id, l.lesson_text AS text "
+        "FROM lessons_fts JOIN lessons l ON l.id = lessons_fts.rowid "
+        "WHERE lessons_fts MATCH ? ORDER BY rank LIMIT ?",
+        (_fts_query(query), pool),
+    ).fetchall()
+
+    fused = _rrf(
+        [[r["id"] for r in vec_rows], [r["id"] for r in fts_rows]], k=rrf_k
+    )
+    by_id = {r["id"]: r["text"] for r in vec_rows}
+    by_id.update({r["id"]: r["text"] for r in fts_rows})
+    return [(doc_id, by_id[doc_id]) for doc_id, _ in fused[:k]]
+
+
+# ─── clearsky_cache: proxy de "quién me bloquea" ────────────────────────────
+# TTL corto (1h): los bloques no cambian seguido y amortizamos repetición del
+# comando /bloques. El JSON guarda la lista cruda de {did, blocked_date}.
+CLEARSKY_CACHE_TTL_SECONDS = 3600
+
+
+def get_cached_blocklist(
+    conn: sqlite3.Connection, did: str, *, ttl_seconds: int = CLEARSKY_CACHE_TTL_SECONDS
+) -> list[dict[str, str]] | None:
+    """Devuelve la lista cacheada de bloqueadores de `did`, o None si no hay /
+    expiró. None (no []) para que la caller sepa que debe refrescar contra ClearSky.
+    """
+    row = conn.execute(
+        "SELECT blockers_json, fetched_at FROM clearsky_cache WHERE did = ?", (did,)
+    ).fetchone()
+    if row is None:
+        return None
+
+    fetched_at = datetime.fromisoformat(row["fetched_at"]) if "T" in row["fetched_at"] else None
+    if fetched_at is not None and (datetime.now(timezone.utc) - fetched_at) > timedelta(seconds=ttl_seconds):
+        return None  # stale → forzar refresco
+    return json.loads(row["blockers_json"])
+
+
+def save_blocklist_cache(
+    conn: sqlite3.Connection, did: str, blockers: list[dict[str, str]]
+) -> None:
+    """Persiste la lista de bloqueadores para `did` con timestamp actual."""
+    conn.execute(
+        "INSERT OR REPLACE INTO clearsky_cache (did, blockers_json, fetched_at) "
+        "VALUES (?, ?, ?)",
+        (did, json.dumps(blockers, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+# ─── image_catalog: mapa de conocimiento de imágenes ─────────────────────────
+def _build_image_embed_text(category: str, description: str, tags: str, ocr_text: str | None) -> str:
+    """Arma el texto que se embeebe para búsqueda semántica de imágenes."""
+    return f"[{category}] {description} | tags: {tags} | texto visible: {ocr_text or ''}"
+
+
+def upsert_image_catalog(
+    conn: sqlite3.Connection,
+    *,
+    platform: str,
+    external_id: str,
+    source_name: str,
+    file_path: str,
+    description: str,
+    category: str,
+    tags: list[str] | str,
+    ocr_text: str | None,
+    source_url: str | None,
+    posted_at: str | None,
+) -> int:
+    """Inserta o actualiza un ítem en el catálogo de imágenes.
+
+    Dedup por (platform, external_id, file_path). Si ya existe, actualiza
+    description/tags/category y re-embebe. Devuelve el id de la fila.
+    """
+    tags_json = json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else (tags or "[]")
+
+    row = conn.execute(
+        "SELECT id FROM image_catalog WHERE platform = ? AND external_id = ? AND file_path = ?",
+        (platform, external_id, file_path),
+    ).fetchone()
+
+    if row:
+        conn.execute(
+            "UPDATE image_catalog SET description = ?, category = ?, tags = ?, ocr_text = ?, "
+            "source_name = ?, source_url = ?, posted_at = ? WHERE id = ?",
+            (description, category, tags_json, ocr_text, source_name, source_url, posted_at, row["id"]),
+        )
+        fid = row["id"]
+        # Re-embed: delete old vector, insert new
+        conn.execute("DELETE FROM image_catalog_vec WHERE rowid = ?", (fid,))
+    else:
+        cur = conn.execute(
+            "INSERT INTO image_catalog "
+            "(platform, external_id, source_name, file_path, description, category, tags, ocr_text, source_url, posted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (platform, external_id, source_name, file_path, description, category,
+             tags_json, ocr_text, source_url, posted_at),
+        )
+        fid = cur.lastrowid
+
+    search_text = _build_image_embed_text(category, description, tags_json, ocr_text)
+    q = embed(search_text)
+    conn.execute("INSERT INTO image_catalog_vec(rowid, embedding) VALUES (?, ?)", (fid, q))
+    conn.commit()
+    return fid
+
+
+def hybrid_search_image_catalog(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    category: str | None = None,
+    limit: int = 5,
+    rrf_k: int = 60,
+) -> list[dict]:
+    """Recupera las `limit` imágenes más relevantes para `query`.
+
+    Búsqueda híbrida (vec0 + FTS5 + RRF). Filtra por `category` si se pasa.
+    Devuelve lista de dicts con todos los campos de image_catalog.
+    """
+    q = embed(query)
+    pool = max(limit * 3, 15)
+
+    if category:
+        vec_rows = conn.execute(
+            "SELECT v.rowid AS id FROM image_catalog_vec v "
+            "JOIN image_catalog i ON i.id = v.rowid "
+            "WHERE v.embedding MATCH ? AND k = ? AND i.category = ? "
+            "ORDER BY v.distance",
+            (q, pool, category),
+        ).fetchall()
+        fts_rows = conn.execute(
+            "SELECT i.id AS id FROM image_catalog_fts "
+            "JOIN image_catalog i ON i.id = image_catalog_fts.rowid "
+            "WHERE image_catalog_fts MATCH ? AND i.category = ? "
+            "ORDER BY rank LIMIT ?",
+            (_fts_query(query), category, pool),
+        ).fetchall()
+    else:
+        vec_rows = conn.execute(
+            "SELECT v.rowid AS id FROM image_catalog_vec v "
+            "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+            (q, pool),
+        ).fetchall()
+        fts_rows = conn.execute(
+            "SELECT i.id AS id FROM image_catalog_fts "
+            "JOIN image_catalog i ON i.id = image_catalog_fts.rowid "
+            "WHERE image_catalog_fts MATCH ? ORDER BY rank LIMIT ?",
+            (_fts_query(query), pool),
+        ).fetchall()
+
+    if not vec_rows and not fts_rows:
+        return []
+
+    fused = _rrf(
+        [[r["id"] for r in vec_rows], [r["id"] for r in fts_rows]], k=rrf_k
+    )
+    if not fused:
+        return []
+
+    ids = [doc_id for doc_id, _ in fused[:limit]]
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT * FROM image_catalog WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    by_id = {r["id"]: dict(r) for r in rows}
+    return [by_id[doc_id] for doc_id, _ in fused[:limit] if doc_id in by_id]
+
+
+def list_uncataloged_files(
+    conn: sqlite3.Connection, base_dir: Path
+) -> list[tuple[str, str, str]]:
+    """Devuelve [(platform, external_id, file_path), ...] de archivos en disco
+    que no tienen fila en image_catalog.
+
+    Escanea scrape/pictures/<platform>/ recursivamente.
+    """
+    uncataloged: list[tuple[str, str, str]] = []
+    pictures_dir = base_dir / "scrape" / "pictures"
+    if not pictures_dir.exists():
+        return uncataloged
+
+    for platform_dir in sorted(pictures_dir.iterdir()):
+        if not platform_dir.is_dir():
+            continue
+        platform = platform_dir.name
+
+        for img_file in sorted(platform_dir.iterdir()):
+            if img_file.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                continue
+
+            file_path = str(img_file.relative_to(base_dir)).replace("\\", "/")
+
+            # Parsear external_id del nombre: <external_id>_<n>.jpg
+            stem = img_file.stem
+            parts = stem.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                external_id = parts[0]
+            else:
+                external_id = stem  # fallback: nombre completo sin extensión
+
+            row = conn.execute(
+                "SELECT 1 FROM image_catalog WHERE platform = ? AND external_id = ? AND file_path = ?",
+                (platform, external_id, file_path),
+            ).fetchone()
+            if not row:
+                uncataloged.append((platform, external_id, file_path))
+
+    return uncataloged
+
+
+def get_scraped_meta(
+    conn: sqlite3.Connection, platform: str, external_id: str
+) -> dict | None:
+    """Busca metadata en scraped_items para enriquecer una fila de image_catalog."""
+    row = conn.execute(
+        "SELECT source_name, author, text, url, posted_at "
+        "FROM scraped_items WHERE platform = ? AND external_id = ?",
+        (platform, external_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_image_catalog_stats(conn: sqlite3.Connection) -> dict:
+    """Resumen del catálogo por categoría y fuente (para el contexto del bot)."""
+    rows = conn.execute(
+        "SELECT category, source_name, platform, COUNT(*) AS cnt "
+        "FROM image_catalog GROUP BY category, source_name, platform "
+        "ORDER BY category, cnt DESC"
+    ).fetchall()
+    return {
+        "total": conn.execute("SELECT COUNT(*) FROM image_catalog").fetchone()[0],
+        "by_category": [
+            {"category": r["category"], "source_name": r["source_name"],
+             "platform": r["platform"], "count": r["cnt"]}
+            for r in rows
+        ],
+    }
+
+
+def mark_image_used(conn: sqlite3.Connection, image_id: int) -> None:
+    """Marca una imagen como usada (actualiza used_at y use_count)."""
+    conn.execute(
+        "UPDATE image_catalog SET used_at = datetime('now'), use_count = use_count + 1 "
+        "WHERE id = ?",
+        (image_id,),
+    )
+    conn.commit()
