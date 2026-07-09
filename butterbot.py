@@ -510,6 +510,7 @@ class BskyClient:
                     posts.append({
                         "handle"     : post.author.handle,
                         "text"       : text,
+                        "uri"        : post.uri,
                         "indexed_at" : indexed_at.isoformat(),
                     })
 
@@ -763,6 +764,25 @@ class FeedDecision(BaseModel):
     )
 
 
+# T6 · aprendizajes del feed → memoria/calendario (structured output)
+class UserFactLearning(BaseModel):
+    handle: str = Field(description="Handle del autor que reveló el hecho (sin @).")
+    fact: str = Field(description="Hecho autorrevelado, frase corta en tercera persona.")
+
+
+class EventLearning(BaseModel):
+    title: str = Field(description="Título breve del evento.")
+    event_at: str = Field(description="Fecha ISO 8601 (YYYY-MM-DD o YYYY-MM-DDTHH:MM).")
+    handle: str | None = Field(default=None, description="Dueño del evento, o null si es de comunidad.")
+    kind: str = Field(default="other", description="birthday|reminder|community|other")
+    description: str | None = Field(default=None)
+
+
+class FeedLearnings(BaseModel):
+    facts: list[UserFactLearning] = Field(default_factory=list)
+    events: list[EventLearning] = Field(default_factory=list)
+
+
 class FeedState(TypedDict, total=False):
     # entrada
     feed_name: str
@@ -771,10 +791,13 @@ class FeedState(TypedDict, total=False):
     posting_policy: str
     force_post: bool
     full_backfill: bool
+    learn: bool
     # intermedio / salida
     posts: list
     posts_count: int
     summary: str | None
+    learned_facts: int
+    learned_events: int
     should_post: bool
     post_text: str
     reason: str
@@ -842,6 +865,58 @@ class SummarizeFeedNode:
             return {"summary": None}
         append_feed_summary(state["feed_name"], summary)
         return {"summary": summary}
+
+
+class LearnFromFeedNode:
+    """
+    T6: tras leer el feed, el agente extrae aprendizajes de los posts crudos.
+    - Hechos autorrevelados por usuarios CON perfil → upsert_user_fact (dedup semántico).
+    - Fechas/eventos → events (T4), con dedup idempotente (event_exists).
+    Fechas relativas se resuelven con la fecha actual (T3). No afecta la decisión de postear.
+    """
+
+    def __init__(self, llm: RoleLLM, conn: sqlite3.Connection):
+        self.llm  = llm
+        self.conn = conn
+
+    def run(self, state: FeedState) -> dict:
+        if not state.get("learn", True):
+            return {}
+        posts = state.get("posts") or []
+        if not posts:
+            return {}
+
+        lines = [f"[{p['handle']}]: {p['text']}" for p in posts[:50]]
+        uri_by_handle = {p["handle"]: p.get("uri") for p in posts}
+        prompt = load_text(PROMPTS_DIR / "feed_learnings_prompt.md")
+        system = f"{current_datetime_line()}\n\n{prompt}"
+        try:
+            learnings = self.llm.complete(system, "\n".join(lines), FeedLearnings)
+        except Exception as e:
+            log.error("LearnFromFeedNode: %s", e)
+            return {}
+
+        n_facts = n_events = 0
+        for f in learnings.facts:
+            handle = f.handle.lstrip("@").strip()
+            if handle and dbmod.user_exists(self.conn, handle):  # solo usuarios con perfil
+                # upsert_user_fact devuelve None si es un duplicado semántico → no cuenta.
+                if dbmod.upsert_user_fact(self.conn, handle, f.fact,
+                                          source_uri=uri_by_handle.get(handle)) is not None:
+                    n_facts += 1
+        for ev in learnings.events:
+            handle = ev.handle.lstrip("@").strip() if ev.handle else None
+            if handle and not dbmod.user_exists(self.conn, handle):
+                handle = None  # sin perfil → evento de comunidad (respeta el FK)
+            if not dbmod.event_exists(self.conn, title=ev.title, event_at=ev.event_at, handle=handle):
+                dbmod.create_event(self.conn, title=ev.title, event_at=ev.event_at,
+                                   handle=handle, kind=ev.kind, description=ev.description, source="feed")
+                n_events += 1
+
+        if n_facts or n_events:
+            log.info("Feed %s: aprendizajes → %d hechos, %d eventos",
+                     state["feed_name"], n_facts, n_events)
+        return {"learned_facts": n_facts, "learned_events": n_events}
 
 
 class ReflectDecideNode:
@@ -944,7 +1019,7 @@ class PostFeedNode:
 
 
 def _feed_has_posts(state: FeedState) -> str:
-    return "summarize" if state.get("posts_count", 0) > 0 else "END"
+    return "learn" if state.get("posts_count", 0) > 0 else "END"
 
 
 def _feed_has_summary(state: FeedState) -> str:
@@ -958,24 +1033,28 @@ def _feed_should_post(state: FeedState) -> str:
 def build_feed_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection,
                      registry: ToolRegistry):
     """
-    Grafo proactivo de feed (T5):
-        START → fetch → summarize → reflect → post → END
-                  ↓sin posts   ↓sin resumen   ↓no postea
-                 END          END            END
+    Grafo proactivo de feed (T5 + T6):
+        START → fetch → learn → summarize → reflect → post → END
+                  ↓sin posts       ↓sin resumen   ↓no postea
+                 END              END            END
+    `learn` (T6) extrae hechos/eventos de los posts crudos; siempre sigue a summarize.
     """
     fetch     = FetchFeedNode(bsky, db)
+    learn     = LearnFromFeedNode(RoleLLM(router, "update_profile"), db)
     summarize = SummarizeFeedNode(router, db)
     reflect   = ReflectDecideNode(RoleLLM(router, "feed_opinion"), registry, db)
     post      = PostFeedNode(bsky, db)
 
     g = StateGraph(FeedState)
     g.add_node("fetch",     fetch.run)
+    g.add_node("learn",     learn.run)
     g.add_node("summarize", summarize.run)
     g.add_node("reflect",   reflect.run)
     g.add_node("post",      post.run)
 
     g.add_edge(START, "fetch")
-    g.add_conditional_edges("fetch",     _feed_has_posts,   {"summarize": "summarize", "END": END})
+    g.add_conditional_edges("fetch",     _feed_has_posts,   {"learn": "learn", "END": END})
+    g.add_edge("learn", "summarize")
     g.add_conditional_edges("summarize", _feed_has_summary, {"reflect": "reflect", "END": END})
     g.add_conditional_edges("reflect",   _feed_should_post, {"post": "post", "END": END})
     g.add_edge("post", END)
@@ -999,6 +1078,7 @@ def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None
             "list_uri":       feed["uri"],
             "interval_hours": feed.get("interval_hours", 0),
             "posting_policy": feed.get("posting_policy", "balanced"),
+            "learn":          feed.get("learn", True),
             "force_post":     force_post,
             "full_backfill":  full_backfill,
         }

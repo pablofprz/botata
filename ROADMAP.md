@@ -56,11 +56,12 @@ Reemplaza el `FeedProcessor` manual por un loop autónomo.
 - Deduplica contra `bot_posts`; respeta presupuesto (router T2). Sin scheduling rígido tipo cron.
 - Impl.: grafo langgraph `build_feed_graph` (fetch→summarize→reflect→post) en `butterbot.py`. `ReflectDecideNode` es el núcleo agéntico (structured output `FeedDecision`, tool_calling scope feed_reflection, política de posteo configurable conservative|balanced|active). Config por feed: `enabled` + `posting_policy` + `interval_hours`. CLI `--proactive [--force-post] [--backfill]`. Dedup normalizado contra `bot_posts`. Tests: `tests/test_feed_proactive.py`.
 
-### T6 · Aprendizajes del feed → memoria/calendario  `proactivity` `M`
+### T6 · Aprendizajes del feed → memoria/calendario  `proactivity` `M`  ✅ **HECHO**
 - **Acept.:** tras leer el feed, el agente decide (o no) extraer aprendizajes.
 - Si un post revela algo de un usuario con perfil → `upsert_user_fact` para ese handle.
 - Si revela una fecha/evento → alta en `events` (T4). Ej: "hoy me duele el pie" → fact de ese usuario.
 - Idempotente: no duplica aprendizajes ya guardados (dedup semántico existente).
+- Impl.: `LearnFromFeedNode` en el grafo proactivo (fetch→**learn**→summarize→reflect→post), structured output `FeedLearnings` (facts + events) vía rol `update_profile`. Gate `db.user_exists` (solo perfiles existentes); eventos sin perfil → comunidad. Fechas relativas resueltas con T3. Dedup: `upsert_user_fact` (semántico) + `db.event_exists` (día+dueño+título). Toggle `learn` por feed. `get_list_feed` ahora incluye `uri` (source de los hechos). Tests: `tests/test_feed_learnings.py`.
 
 ### T7 · Generalización de fuentes de feed  `proactivity` `M`
 - **Acept.:** config por comunidad soporta 3 tipos de fuente: `list` (actual), `feed` (generator/algoritmo), `following` (home timeline del bot).

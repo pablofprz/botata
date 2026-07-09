@@ -812,6 +812,30 @@ def get_event(conn: sqlite3.Connection, event_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def event_exists(
+    conn: sqlite3.Connection, *, title: str, event_at: str, handle: str | None = None
+) -> bool:
+    """True si ya hay un evento del mismo día, mismo dueño y título equivalente.
+
+    Dedup idempotente para el aprendizaje del feed (T6). `handle IS ?` matchea
+    tanto NULL (comunidad) como un handle concreto.
+    """
+    day  = event_at[:10]  # parte fecha del ISO
+    rows = conn.execute(
+        "SELECT title FROM events WHERE date(event_at) = ? AND handle IS ?",
+        (day, handle),
+    ).fetchall()
+    norm = " ".join(title.lower().split())
+    return any(" ".join(r[0].lower().split()) == norm for r in rows)
+
+
+def user_exists(conn: sqlite3.Connection, handle: str) -> bool:
+    """True si el handle ya tiene perfil en users (gate del aprendizaje del feed, T6)."""
+    return conn.execute(
+        "SELECT 1 FROM users WHERE handle = ?", (handle,)
+    ).fetchone() is not None
+
+
 def update_event(conn: sqlite3.Connection, event_id: int, **fields: Any) -> bool:
     """Actualiza campos de un evento. Devuelve True si existía. Ignora claves desconocidas."""
     cols = [(k, v) for k, v in fields.items() if k in _EVENT_FIELDS]
