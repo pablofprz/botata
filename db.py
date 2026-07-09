@@ -96,6 +96,23 @@ CREATE TABLE IF NOT EXISTS bot_posts (
 CREATE INDEX IF NOT EXISTS idx_bot_posts_reply  ON bot_posts(in_reply_to);
 CREATE INDEX IF NOT EXISTS idx_bot_posts_handle ON bot_posts(reply_to_handle);
 
+-- ─── events: calendario / eventos (T4) ──────────────────────────────
+-- handle NULL = evento de comunidad (sin dueño). event_at en ISO 8601
+-- (fecha o fecha+hora). Fuente de las tools de calendar (T9) y del loop
+-- proactivo (T6: aprendizajes del feed → eventos).
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    handle      TEXT REFERENCES users(handle) ON DELETE CASCADE,  -- NULL = comunidad
+    title       TEXT NOT NULL,
+    description TEXT,
+    event_at    TEXT NOT NULL,                    -- ISO 8601 (America/Argentina)
+    kind        TEXT NOT NULL DEFAULT 'other',    -- birthday|reminder|community|other
+    source      TEXT,                             -- admin|feed|/comando|uri de origen
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_events_at     ON events(event_at);
+CREATE INDEX IF NOT EXISTS idx_events_handle ON events(handle);
+
 -- ─── replied_posts: idempotencia de procesamiento (entrada) ─────────
 -- (preexistente en butterbot.py — se preserva tal cual)
 CREATE TABLE IF NOT EXISTS replied_posts (
@@ -761,3 +778,100 @@ def mark_image_used(conn: sqlite3.Connection, image_id: int) -> None:
         (image_id,),
     )
     conn.commit()
+
+
+# ─── Events / calendario (T4) ──────────────────────────────────────────────
+# event_at se guarda en hora de Argentina (ISO 8601). Las queries usan por
+# default "ahora"/"hoy" en AR (UTC-3, sin DST); pasá `now`/`day` explícito para
+# testear o para otra zona.
+_EVENT_FIELDS = ("handle", "title", "description", "event_at", "kind", "source")
+
+
+def create_event(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    event_at: str,
+    handle: str | None = None,
+    description: str | None = None,
+    kind: str = "other",
+    source: str | None = None,
+) -> int:
+    """Crea un evento. Devuelve su id. handle=None → evento de comunidad."""
+    cur = conn.execute(
+        "INSERT INTO events (handle, title, description, event_at, kind, source) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (handle, title, description, event_at, kind, source),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_event(conn: sqlite3.Connection, event_id: int) -> dict | None:
+    row = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_event(conn: sqlite3.Connection, event_id: int, **fields: Any) -> bool:
+    """Actualiza campos de un evento. Devuelve True si existía. Ignora claves desconocidas."""
+    cols = [(k, v) for k, v in fields.items() if k in _EVENT_FIELDS]
+    if not cols:
+        return get_event(conn, event_id) is not None
+    set_clause = ", ".join(f"{k} = ?" for k, _ in cols)
+    cur = conn.execute(
+        f"UPDATE events SET {set_clause} WHERE id = ?",
+        (*[v for _, v in cols], event_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_event(conn: sqlite3.Connection, event_id: int) -> bool:
+    cur = conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def upcoming_events(
+    conn: sqlite3.Connection,
+    *,
+    now: str | None = None,
+    limit: int = 10,
+    handle: str | None = None,
+) -> list[dict]:
+    """Próximos `limit` eventos con event_at >= ahora, ascendente.
+
+    Si `handle` se pasa → eventos de ese usuario + los de comunidad (handle IS NULL).
+    Si es None → todos. `now` default = ahora en AR (UTC-3).
+    """
+    now_expr = "?" if now is not None else "datetime('now','-3 hours')"
+    params: list[Any] = [now] if now is not None else []
+    where = [f"event_at >= {now_expr}"]
+    if handle is not None:
+        where.append("(handle = ? OR handle IS NULL)")
+        params.append(handle)
+    rows = conn.execute(
+        f"SELECT * FROM events WHERE {' AND '.join(where)} ORDER BY event_at ASC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def events_today(
+    conn: sqlite3.Connection,
+    *,
+    day: str | None = None,
+    handle: str | None = None,
+) -> list[dict]:
+    """Eventos cuyo event_at cae en `day` (YYYY-MM-DD). Default = hoy en AR."""
+    day_expr = "?" if day is not None else "date('now','-3 hours')"
+    params: list[Any] = [day] if day is not None else []
+    where = [f"date(event_at) = {day_expr}"]
+    if handle is not None:
+        where.append("(handle = ? OR handle IS NULL)")
+        params.append(handle)
+    rows = conn.execute(
+        f"SELECT * FROM events WHERE {' AND '.join(where)} ORDER BY event_at ASC",
+        tuple(params),
+    ).fetchall()
+    return [dict(r) for r in rows]
