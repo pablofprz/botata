@@ -24,13 +24,13 @@ from atproto import Client
 from atproto.exceptions import NetworkError as BskyNetworkError, RequestException as BskyRequestException
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
-from openai import OpenAI
 from pydantic import AliasChoices, BaseModel, Field
 from typing_extensions import TypedDict
 
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
 from tools import ToolRegistry, ToolContext, ToolResult, Scope  # framework de tools
+from router import ModelRouter, RoleLLM, build_router  # router de modelos + fallbacks
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -92,6 +92,16 @@ OPENAI_ENDPOINT    : str  = settings.get("OPENAI_ENDPOINT", "https://openrouter.
 POLL_INTERVAL      : int  = settings.get("POLL_INTERVAL_SECONDS", 60)
 FEEDS_CONFIG       : list = settings.get("FEEDS", [])
 TOOLS_CONFIG       : dict = settings.get("TOOLS", {})
+MODELS_CONFIG      : dict | None = settings.get("MODELS")
+
+# Back-compat del router: si no hay sección MODELS, se derivan los aliases de estos.
+_LEGACY_MODELS = {
+    "base_url":  OPENAI_ENDPOINT,
+    "api_key":   OPENROUTER_API_KEY,
+    "reasoning": REASONING_MODEL,
+    "lite":      LITE_MODEL,
+    "vision":    IMAGE_MODEL,
+}
 
 # ---------------------------------------------------------------------------
 # SQLite
@@ -508,50 +518,9 @@ class BskyClient:
 
 
 # ---------------------------------------------------------------------------
-# LLM client
+# LLM: el cliente vive en router.py (ModelRouter + RoleLLM). Cada nodo recibe un
+# RoleLLM ligado a su rol; el router resuelve endpoint/modelo y hace fallback.
 # ---------------------------------------------------------------------------
-
-class LLMClient:
-    """OpenAI-compatible client pointing at OpenRouter."""
-
-    def __init__(self, api_key: str, base_url: str, model: str):
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
-        self._model  = model
-
-    def complete(self, system: str, user: str, response_model: type[BaseModel]) -> BaseModel:
-        """Call LLM → parse response into a Pydantic model."""
-        schema   = response_model.model_json_schema()
-        response = self._client.chat.completions.create(
-            model          = self._model,
-            messages       = [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            response_format = {"type": "json_object"},
-            extra_body     = {"guided_json": schema},
-        )
-        raw = response.choices[0].message.content
-        try:
-            return response_model.model_validate_json(raw)
-        except Exception:
-            log.error("Validation failed for %s. Raw: %r", response_model.__name__, raw)
-            raise
-
-    def call_with_tools(self, system: str, user: str, tools: list[dict]) -> tuple[str | None, list]:
-        """
-        Call LLM with tool definitions.
-        Returns (text_reply, tool_calls).
-        text_reply  = direct text if the model answered without calling tools.
-        tool_calls  = list of tool_call objects if the model wants to use tools.
-        Exactly one of them will be non-empty.
-        """
-        response = self._client.chat.completions.create(
-            model    = self._model,
-            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            tools    = tools,
-            tool_choice = "auto",
-        )
-        msg = response.choices[0].message
-        if msg.tool_calls:
-            return None, msg.tool_calls
-        return msg.content or "", []
 
 
 # ---------------------------------------------------------------------------
@@ -576,10 +545,10 @@ class FeedProcessor:
         "Sin hashtags. Sin markdown complejo. Si no hay nada relevante, respondé exactamente: NADA"
     )
 
-    def __init__(self, bsky: BskyClient, llm: LLMClient, db: sqlite3.Connection):
-        self.bsky = bsky
-        self.llm  = llm
-        self.db   = db
+    def __init__(self, bsky: BskyClient, router: ModelRouter, db: sqlite3.Connection):
+        self.bsky   = bsky
+        self.router = router
+        self.db     = db
 
     def should_run(self, feed_name: str, interval_hours: int) -> bool:
         """Returns True if enough time has passed since the last run."""
@@ -596,15 +565,15 @@ class FeedProcessor:
         user  = f"Feed: {feed_name}\n\n" + "\n".join(lines)
 
         try:
-            resp = self.llm._client.chat.completions.create(
-                model    = self.llm._model,
-                messages = [
+            content = self.router.chat(
+                "feed_summary",
+                messages=[
                     {"role": "system", "content": self.SUMMARIZE_SYSTEM},
                     {"role": "user",   "content": user},
                 ],
                 max_tokens=400,
             )
-            result = resp.choices[0].message.content.strip()
+            result = (content or "").strip()
             return None if result.upper() == "NADA" else result
         except Exception as e:
             log.error("FeedProcessor: summarize failed for %s: %s", feed_name, e)
@@ -690,15 +659,14 @@ class FeedProcessor:
         )
 
         try:
-            resp = self.llm._client.chat.completions.create(
-                model    = self.llm._model,
-                messages = [
+            raw = self.router.chat(
+                "feed_opinion",
+                messages=[
                     {"role": "system", "content": system},
                     {"role": "user",   "content": f"Feed: {feed_name}\n\n{latest_block}"},
                 ],
                 max_tokens=200,
             )
-            raw     = resp.choices[0].message.content
             if not raw:
                 log.error("post_opinion: LLM returned empty content for %s", feed_name)
                 return
@@ -846,7 +814,7 @@ class ClassifyNode:
     Uses LITE_MODEL — detecting a /command doesn't need reasoning.
     """
 
-    def __init__(self, llm: LLMClient):
+    def __init__(self, llm: RoleLLM):
         self.llm = llm
 
     def run(self, state: MentionState) -> dict:
@@ -878,7 +846,7 @@ class LoadContextNode:
     vía dbmod.hybrid_search_user_facts.
     """
 
-    def __init__(self, llm: LLMClient, bsky: BskyClient, conn: sqlite3.Connection):
+    def __init__(self, llm: RoleLLM, bsky: BskyClient, conn: sqlite3.Connection):
         self.llm  = llm
         self.bsky = bsky
         self.conn = conn
@@ -929,14 +897,11 @@ class LoadContextNode:
             log.warning("interpret_bio_prompt.md not found")
             return ""
         try:
-            response = self.llm._client.chat.completions.create(
-                model    = self.llm._model,
-                messages = [
-                    {"role": "system", "content": prompt.format(handle=handle)},
-                    {"role": "user",   "content": f"Bio de @{handle}: {bio}"},
-                ],
-            )
-            return response.choices[0].message.content.strip()
+            content = self.llm.chat(messages=[
+                {"role": "system", "content": prompt.format(handle=handle)},
+                {"role": "user",   "content": f"Bio de @{handle}: {bio}"},
+            ])
+            return (content or "").strip()
         except Exception as e:
             log.error("Bio extraction failed for @%s: %s", handle, e)
             return ""
@@ -948,7 +913,7 @@ class GenerateReplyNode:
     Context = SOUL.md + MEMORY.md + user profile.
     """
 
-    def __init__(self, llm: LLMClient, conn: sqlite3.Connection):
+    def __init__(self, llm: RoleLLM, conn: sqlite3.Connection):
         self.llm  = llm
         self.conn = conn
 
@@ -1032,7 +997,7 @@ class HandleAdminCommandNode:
     Tools: save_to_user_profile, save_to_memory, get_debug_info, get_help.
     """
 
-    def __init__(self, llm: LLMClient, conn: sqlite3.Connection, registry: ToolRegistry):
+    def __init__(self, llm: RoleLLM, conn: sqlite3.Connection, registry: ToolRegistry):
         self.llm      = llm
         self.conn     = conn
         self.registry = registry
@@ -1206,7 +1171,7 @@ class UpdateProfileNode:
     nada notable, devuelve NADA. Usa REASONING_MODEL.
     """
 
-    def __init__(self, llm: LLMClient, conn: sqlite3.Connection):
+    def __init__(self, llm: RoleLLM, conn: sqlite3.Connection):
         self.llm  = llm
         self.conn = conn
 
@@ -1222,14 +1187,11 @@ class UpdateProfileNode:
             return {}
 
         try:
-            response = self.llm._client.chat.completions.create(
-                model    = self.llm._model,
-                messages = [
-                    {"role": "system", "content": prompt.format(author_handle=handle)},
-                    {"role": "user",   "content": conversation},
-                ],
-            )
-            result = response.choices[0].message.content.strip()
+            content = self.llm.chat(messages=[
+                {"role": "system", "content": prompt.format(author_handle=handle)},
+                {"role": "user",   "content": conversation},
+            ])
+            result = (content or "").strip()
         except Exception as e:
             log.error("UpdateProfileNode failed for @%s: %s", handle, e)
             return {}
@@ -1275,7 +1237,7 @@ def route_after_classify(state: MentionState) -> str:
 # Graph
 # ---------------------------------------------------------------------------
 
-def build_graph(llm: LLMClient, bsky: BskyClient, db: sqlite3.Connection):
+def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
     """
     Flow:
         START → classify
@@ -1283,18 +1245,18 @@ def build_graph(llm: LLMClient, bsky: BskyClient, db: sqlite3.Connection):
             → handle_admin_command → post_reply → END
             → load_context → generate_reply → post_reply
                                                 → update_profile → END
+    Cada nodo recibe un RoleLLM ligado a su rol; el router hace fallback por endpoint.
     """
-    lite_llm = LLMClient(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT, model=LITE_MODEL)
     registry = build_tool_registry(TOOLS_CONFIG)
     log.info("Tool registry: %s", ", ".join(registry.names()) or "(vacío)")
 
-    classify       = ClassifyNode(lite_llm)
-    load_context   = LoadContextNode(llm, bsky, db)
-    generate_reply = GenerateReplyNode(llm, db)
-    handle_admin   = HandleAdminCommandNode(llm, db, registry)
+    classify       = ClassifyNode(RoleLLM(router, "classify"))
+    load_context   = LoadContextNode(RoleLLM(router, "bio_interp"), bsky, db)
+    generate_reply = GenerateReplyNode(RoleLLM(router, "reply"), db)
+    handle_admin   = HandleAdminCommandNode(RoleLLM(router, "admin"), db, registry)
     handle_blocks  = HandleBlockQueryNode(bsky, db)
     post_reply     = PostReplyNode(bsky, db)
-    update_profile = UpdateProfileNode(llm, db)
+    update_profile = UpdateProfileNode(RoleLLM(router, "update_profile"), db)
 
     g = StateGraph(MentionState)
     g.add_node("classify_mention",      classify.run)
@@ -1397,13 +1359,13 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
 def run(mode: str) -> None:
     log.info("Starting butterbot — mode: %s", mode.upper())
 
-    db   = init_db()
-    bsky = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
-    llm  = LLMClient(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT, model=REASONING_MODEL)
-    lite_llm = LLMClient(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT, model=LITE_MODEL)
+    db     = init_db()
+    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    log.info("Router de modelos: %s", router.describe())
 
-    graph          = build_graph(llm, bsky, db)
-    feed_processor = FeedProcessor(bsky, lite_llm, db)
+    graph          = build_graph(router, bsky, db)
+    feed_processor = FeedProcessor(bsky, router, db)
 
     log.info("Graph compiled. Polling every %ds. Admin: %s", POLL_INTERVAL, ADMIN_HANDLE)
     log.info("Feeds configured: %d", len(FEEDS_CONFIG))
@@ -1480,8 +1442,8 @@ if __name__ == "__main__":
     if args.fetch_feeds:
         db        = init_db()
         bsky      = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
-        lite_llm  = LLMClient(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT, model=LITE_MODEL)
-        processor = FeedProcessor(bsky, lite_llm, db)
+        router    = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+        processor = FeedProcessor(bsky, router, db)
         for feed in FEEDS_CONFIG:
             processor.process(
                 feed_name      = feed["name"],
@@ -1494,8 +1456,8 @@ if __name__ == "__main__":
     elif args.post_summary:
         db        = init_db()
         bsky      = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
-        llm       = LLMClient(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT, model=LITE_MODEL)
-        processor = FeedProcessor(bsky, llm, db)
+        router    = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+        processor = FeedProcessor(bsky, router, db)
         processor.post_opinion(feed_name=args.post_summary)
 
     else:
