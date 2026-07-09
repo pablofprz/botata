@@ -1061,22 +1061,20 @@ def build_feed_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connecti
     return g.compile()
 
 
-def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None:
-    """Corre el loop proactivo (T5) una vez sobre todos los feeds habilitados."""
-    db       = init_db()
-    bsky     = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
-    router   = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    registry = build_tool_registry(TOOLS_CONFIG)
-    graph    = build_feed_graph(router, bsky, db, registry)
+def _run_feed_pass(graph, *, force_post: bool = False, full_backfill: bool = False,
+                   respect_interval: bool = True) -> None:
+    """Una pasada del grafo proactivo sobre todos los feeds habilitados.
 
+    Reutilizado por `run_feed_loop` (CLI `--proactive`, one-shot, ignora el
+    intervalo) y por el loop continuo `run()` (respeta el intervalo por feed).
+    """
     for feed in FEEDS_CONFIG:
         if not feed.get("enabled", True):
-            log.info("Feed %s: deshabilitado, skip", feed["name"])
             continue
         state: FeedState = {
             "feed_name":      feed["name"],
             "list_uri":       feed["uri"],
-            "interval_hours": feed.get("interval_hours", 0),
+            "interval_hours": feed.get("interval_hours", 6) if respect_interval else 0,
             "posting_policy": feed.get("posting_policy", "balanced"),
             "learn":          feed.get("learn", True),
             "force_post":     force_post,
@@ -1085,8 +1083,19 @@ def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None
         result = graph.invoke(state)
         if result.get("posted_uri"):
             log.info("Feed %s: OK → %s", feed["name"], result["posted_uri"])
-        else:
+        elif result.get("posts_count"):
             log.info("Feed %s: sin posteo (%s)", feed["name"], result.get("reason", "n/a"))
+
+
+def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None:
+    """Loop proactivo (T5/T6) como pase único desde CLI (`--proactive`). Ignora intervalo."""
+    db       = init_db()
+    bsky     = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    router   = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    registry = build_tool_registry(TOOLS_CONFIG)
+    graph    = build_feed_graph(router, bsky, db, registry)
+    _run_feed_pass(graph, force_post=force_post, full_backfill=full_backfill,
+                   respect_interval=False)
     log.info("Loop proactivo completo.")
 
 
@@ -1774,24 +1783,20 @@ def run(mode: str) -> None:
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     log.info("Router de modelos: %s", router.describe())
 
-    graph          = build_graph(router, bsky, db)
-    feed_processor = FeedProcessor(bsky, router, db)
+    graph      = build_graph(router, bsky, db)
+    registry   = build_tool_registry(TOOLS_CONFIG)
+    feed_graph = build_feed_graph(router, bsky, db, registry)
 
     log.info("Graph compiled. Polling every %ds. Admin: %s", POLL_INTERVAL, ADMIN_HANDLE)
-    log.info("Feeds configured: %d", len(FEEDS_CONFIG))
+    log.info("Feeds configured: %d (loop proactivo T5/T6 integrado)", len(FEEDS_CONFIG))
 
     # Reprocesar mentions trancados del run anterior antes de entrar al loop.
     retry_stuck_mentions(graph, db, bsky, mode)
 
     while True:
         try:
-            # --- Feed processing (runs only when interval is due) ---
-            for feed in FEEDS_CONFIG:
-                feed_processor.process(
-                    feed_name     = feed["name"],
-                    list_uri      = feed["uri"],
-                    interval_hours= feed.get("interval_hours", 6),
-                )
+            # --- Loop proactivo de feed (T5/T6): corre solo cuando toca el intervalo ---
+            _run_feed_pass(feed_graph, respect_interval=True)
 
             # --- Mention polling ---
             mentions = [m for m in bsky.get_mentions() if not has_replied(db, m["uri"])]
