@@ -2,7 +2,7 @@
 # Snapshot consistente de posted/butterbot.db y subida a la nube vía rclone (prod/Linux).
 # Uso:  ./scripts/db-backup.sh [remote] [remote_path]
 set -euo pipefail
-REMOTE="${1:-gdrive}"
+REMOTE="${1:-butterbotdb}"
 REMOTE_PATH="${2:-butterbot/butterbot.db}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

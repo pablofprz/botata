@@ -3,7 +3,7 @@
 # Uso:  .\scripts\db-backup.ps1                 (remote 'gdrive' por default)
 #       .\scripts\db-backup.ps1 -Remote dropbox
 param(
-    [string]$Remote = "gdrive",
+    [string]$Remote = "butterbotdb",
     [string]$RemotePath = "butterbot/butterbot.db"
 )
 $ErrorActionPreference = "Stop"

@@ -2,7 +2,7 @@
 # Trae la DB canónica desde la nube a posted/butterbot.db (respaldando la local).
 # Uso:  ./scripts/db-restore.sh [remote] [remote_path]
 set -euo pipefail
-REMOTE="${1:-gdrive}"
+REMOTE="${1:-butterbotdb}"
 REMOTE_PATH="${2:-butterbot/butterbot.db}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

@@ -1,7 +1,7 @@
 # Trae la DB canónica desde la nube a posted/butterbot.db (respaldando la local).
 # Uso:  .\scripts\db-restore.ps1                 (remote 'gdrive' por default)
 param(
-    [string]$Remote = "gdrive",
+    [string]$Remote = "butterbotdb",
     [string]$RemotePath = "butterbot/butterbot.db"
 )
 $ErrorActionPreference = "Stop"

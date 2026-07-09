@@ -13,14 +13,21 @@ Tooling para trabajar cross-compu sin meter secretos ni la DB en el repo.
 
 ### Setup por compu (una vez)
 1. Instalar rclone: https://rclone.org/downloads/  (Windows: `winget install Rclone.Rclone`)
-2. Configurar el remote a tu nube:
-   ```
-   rclone config
-   ```
-   Elegí `n` (new), nombre **`gdrive`** (o `dropbox`), tipo Google Drive / Dropbox,
-   y seguí el OAuth en el browser. El token queda en `rclone.conf` (local, no en git).
+2. Configurar el remote a tu nube con `rclone config` (OAuth en el browser). El remote
+   actual se llama **`butterbotdb`** (Google Drive) — es el default de las scripts.
+   El token queda en `rclone.conf` (local, nunca en git).
 
-### Uso
+> **Config encriptado:** si le pusiste password al `rclone.conf`, el uso manual te lo
+> pide por consola. Para el cron de prod, exportá `RCLONE_CONFIG_PASS` (o usá
+> `--password-command`) para que corra sin prompt.
+
+### Primer uso (semilla)
+La primera vez, subí tu DB local para crearla en la nube:
+```powershell
+.\scripts\db-backup.ps1       # crea butterbot/butterbot.db en el Drive
+```
+
+### Uso diario
 ```powershell
 # Windows (dev / otra compu)
 .\scripts\db-restore.ps1      # bajar la copia canónica antes de trabajar
@@ -33,7 +40,7 @@ Tooling para trabajar cross-compu sin meter secretos ni la DB en el repo.
 - `db-backup` hace un **snapshot consistente** (`db_snapshot.py`, backup API de SQLite)
   antes de subir — seguro con el bot corriendo.
 - `db-restore` respalda tu DB local (`.bak-<fecha>`) y limpia WAL/SHM viejos antes de
-  bajar la nube. Pasá `-Remote dropbox` si tu remote no se llama `gdrive`.
+  bajar la nube. Pasá `-Remote <nombre>` si tu remote no se llama `butterbotdb`.
 
 En prod, dejá `db-backup.sh` en un cron (ej. cada hora) para tener siempre la última
 copia en la nube; desde el dev hacés `db-restore` y trabajás sobre eso.
