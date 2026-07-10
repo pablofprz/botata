@@ -29,7 +29,7 @@ from typing_extensions import TypedDict
 
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
-from tools import ToolRegistry, ToolContext, ToolResult, Scope  # framework de tools
+from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope  # framework de tools
 from router import ModelRouter, RoleLLM, build_router  # router de modelos + fallbacks
 
 # ---------------------------------------------------------------------------
@@ -1072,7 +1072,7 @@ def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None
     db       = init_db()
     bsky     = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
     router   = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    registry = build_tool_registry(TOOLS_CONFIG)
+    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router)
     graph    = build_feed_graph(router, bsky, db, registry)
     _run_feed_pass(graph, force_post=force_post, full_backfill=full_backfill,
                    respect_interval=False)
@@ -1131,12 +1131,58 @@ def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text=f"encontré {len(results)} imágenes: {summary}", image_path=best["file_path"])
 
 
-def build_tool_registry(config: dict | None = None) -> ToolRegistry:
+def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | None") -> ToolHandler:
+    """Handler de `summarize_feed`: resume en vivo los posts recientes de un feed.
+    Se cierra sobre bsky+router (no viven en ToolContext). Scope REPLY, toggleable."""
+    def _summarize_feed(args: dict, ctx: ToolContext) -> ToolResult:
+        if bsky is None or router is None:
+            return ToolResult(text="[summarize_feed no disponible en este contexto]")
+        name = (args.get("feed_name") or "").strip()
+        enabled = [f for f in FEEDS_CONFIG if f.get("enabled", True)]
+        if not enabled:
+            return ToolResult(text="no hay feeds configurados para resumir")
+        feed = next((f for f in enabled if f["name"] == name), None) if name else enabled[0]
+        if feed is None:
+            return ToolResult(text=f"no conozco un feed llamado '{name}'")
+        since = datetime.now(timezone.utc) - timedelta(hours=6)
+        try:
+            posts = bsky.get_list_feed(feed["uri"], since=since, limit=50)
+        except Exception as e:
+            log.error("summarize_feed: fetch falló: %s", e)
+            return ToolResult(text="no pude leer el feed ahora, probá más tarde")
+        if not posts:
+            return ToolResult(text="el feed no tuvo movimiento en las últimas horas")
+        lines = [f"@{p['handle']}: {p['text']}" for p in posts[:50]]
+        # Prompt propio (on-demand): a diferencia del loop proactivo, acá el usuario
+        # pidió el resumen → siempre devolvemos algo útil, sin la escotilla "NADA".
+        prompt = load_text(PROMPTS_DIR / "summarize_feed_tool_prompt.md")
+        try:
+            content = router.chat(
+                "feed_summary",
+                messages=[
+                    {"role": "system", "content": f"{current_datetime_line()}\n\n{prompt}"},
+                    {"role": "user", "content": f"Feed: {feed['name']}\n\n" + "\n".join(lines)},
+                ],
+                max_tokens=400,
+            )
+        except Exception as e:
+            log.error("summarize_feed: LLM falló: %s", e)
+            return ToolResult(text="no pude resumir el feed ahora")
+        summary = (content or "").strip()
+        if not summary or summary.upper() == "NADA":
+            return ToolResult(text="el feed está tranquilo, no hay mucho movimiento ahora mismo")
+        return ToolResult(text=summary)
+    return _summarize_feed
+
+
+def build_tool_registry(config: dict | None = None, *,
+                        bsky: "BskyClient | None" = None,
+                        router: "ModelRouter | None" = None) -> ToolRegistry:
     """Registra las tools concretas y aplica overrides de settings.json → sección TOOLS.
 
-    Scopes actuales: todas en ADMIN (paridad de comportamiento con el ADMIN_TOOLS
-    previo). Los scopes REPLY / FEED_REFLECTION ya existen en el framework para las
-    tools que vienen (búsqueda web, calendar, música) sin tocar esta base.
+    Las tools de memoria/imágenes son scope ADMIN. `summarize_feed` es scope REPLY
+    (usuarios) y se cierra sobre bsky+router para resumir el feed en vivo; se
+    activa/desactiva por config como cualquier otra tool.
     """
     reg = ToolRegistry()
     reg.register(
@@ -1196,6 +1242,22 @@ def build_tool_registry(config: dict | None = None) -> ToolRegistry:
         },
         _tool_search_images,
         {Scope.ADMIN},
+    )
+    reg.register(
+        "summarize_feed",
+        "Resume los posts recientes (últimas horas) del feed de la comunidad. "
+        "Usala cuando un usuario pregunta qué se está hablando en el feed, pide un "
+        "resumen del feed/timeline, o quiere saber la actividad reciente de la comunidad.",
+        {
+            "type": "object",
+            "properties": {
+                "feed_name": {"type": "string",
+                              "description": "Nombre del feed a resumir. Omitir para el feed principal."}
+            },
+            "required": [],
+        },
+        _make_summarize_feed_tool(bsky, router),
+        {Scope.REPLY},
     )
     if config:
         reg.apply_config(config)
@@ -1311,9 +1373,10 @@ class GenerateReplyNode:
     Context = SOUL.md + MEMORY.md + user profile.
     """
 
-    def __init__(self, llm: RoleLLM, conn: sqlite3.Connection):
-        self.llm  = llm
-        self.conn = conn
+    def __init__(self, llm: RoleLLM, conn: sqlite3.Connection, registry: ToolRegistry | None = None):
+        self.llm      = llm
+        self.conn     = conn
+        self.registry = registry
 
     def run(self, state: MentionState) -> dict:
         soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
@@ -1350,6 +1413,26 @@ class GenerateReplyNode:
             )
         else:
             parts.append("\n---\nNo hay imágenes disponibles en el catálogo.")
+
+        # Fase de tools scope REPLY (toggleable por config; hoy: summarize_feed).
+        # Si el LLM decide llamar una tool, su resultado se inyecta al contexto.
+        if self.registry is not None:
+            reply_tools = self.registry.openai_schemas(Scope.REPLY)
+            if reply_tools:
+                tool_system = "\n".join(parts) + (
+                    "\n---\nSi para responder necesitás información en vivo (por ejemplo, "
+                    "resumir el feed de la comunidad) llamá a la tool apropiada. Si no hace "
+                    "falta, no llames ninguna."
+                )
+                try:
+                    _, tool_calls = self.llm.call_with_tools(tool_system, query, reply_tools)
+                    for call in tool_calls or []:
+                        cname = call.function.name
+                        cargs = json.loads(call.function.arguments)
+                        outcome = self.registry.execute(cname, cargs, ToolContext(state=state, conn=self.conn))
+                        parts.append(f"\n---\nResultado de {cname}: {outcome.text}")
+                except Exception as e:
+                    log.warning("GenerateReplyNode: fase de tools falló: %s", e)
 
         # T23: bloque de formato externalizado en prompts/reply_format.md
         parts.append("\n---\n" + load_text(PROMPTS_DIR / "reply_format.md"))
@@ -1634,12 +1717,12 @@ def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
                                                 → update_profile → END
     Cada nodo recibe un RoleLLM ligado a su rol; el router hace fallback por endpoint.
     """
-    registry = build_tool_registry(TOOLS_CONFIG)
+    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router)
     log.info("Tool registry: %s", ", ".join(registry.names()) or "(vacío)")
 
     classify       = ClassifyNode(RoleLLM(router, "classify"))
     load_context   = LoadContextNode(RoleLLM(router, "bio_interp"), bsky, db)
-    generate_reply = GenerateReplyNode(RoleLLM(router, "reply"), db)
+    generate_reply = GenerateReplyNode(RoleLLM(router, "reply"), db, registry)
     handle_admin   = HandleAdminCommandNode(RoleLLM(router, "admin"), db, registry)
     handle_blocks  = HandleBlockQueryNode(bsky, db)
     post_reply     = PostReplyNode(bsky, db)
@@ -1752,7 +1835,7 @@ def run(mode: str) -> None:
     log.info("Router de modelos: %s", router.describe())
 
     graph      = build_graph(router, bsky, db)
-    registry   = build_tool_registry(TOOLS_CONFIG)
+    registry   = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router)
     feed_graph = build_feed_graph(router, bsky, db, registry)
 
     log.info("Graph compiled. Polling every %ds. Admin: %s", POLL_INTERVAL, ADMIN_HANDLE)

@@ -94,6 +94,13 @@ Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`.
 ### T11 · Comando `resetme`  `tools` `S`
 - **Acept.:** borra **únicamente** la memoria del handle que lo pide (facts + embeddings + events propios). **Nunca** toca datos de otros. No bloquea.
 
+### T24 · Tool `summarize_feed` on-demand para usuarios  `tools` `M`  ✅ **HECHO**
+Un usuario puede pedirle al bot un resumen en vivo del feed de la comunidad.
+- **Acept.:** tool registrada en el framework (T1), **toggleable** por config (`settings.json` → `TOOLS.summarize_feed`, hoy `enabled:true` scope `reply`). No todos los despliegues la querrán habilitada para usuarios.
+- Impl.: `summarize_feed` (scope REPLY) se cierra sobre bsky+router; fetchea la ventana de las últimas 6h del feed principal (o `feed_name`), resume con rol `feed_summary` y **prompt propio** `prompts/summarize_feed_tool_prompt.md` (sin escotilla "NADA": on-demand siempre devuelve algo). `build_tool_registry(config, *, bsky, router)`. **Se le agregó fase de tool_calling a `GenerateReplyNode`** (antes solo `complete`): si hay tools scope REPLY habilitadas, el LLM puede llamarlas y el resultado se inyecta al contexto de la respuesta. Tests: `tests/test_reply_tools.py` (6).
+- **Costo:** con la fase de tools activa, cada reply hace una llamada extra de reasoning (tool phase + generación). Si molesta, se apaga con `enabled:false`.
+- Tapa parcialmente el gap del reply (antes decía "no tengo acceso al feed"); queda pendiente que el bot sepa contestar por su propia actividad/posts, no solo resumir el feed ajeno.
+
 ---
 
 ## M4 · Tools de contenido  `P2`
