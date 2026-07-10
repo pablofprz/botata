@@ -1167,6 +1167,61 @@ def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text=f"encontré {len(results)} imágenes: {summary}", image_path=best["file_path"])
 
 
+# ─── T9 · Calendar: leer/escribir la tabla events (T4) como tools ────────────
+def _format_events(events: list[dict]) -> str:
+    if not events:
+        return "no hay eventos agendados"
+    lines = []
+    for e in events:
+        when  = e["event_at"][:16].replace("T", " ")
+        owner = "comunidad" if e.get("handle") is None else f"@{e['handle']}"
+        desc  = f" — {e['description']}" if e.get("description") else ""
+        lines.append(f"[{e['id']}] {when} · {e['title']} ({owner}){desc}")
+    return "\n".join(lines)
+
+
+def _tool_get_upcoming_events(args: dict, ctx: ToolContext) -> ToolResult:
+    """Lee la agenda. Un usuario ve sus eventos + los de comunidad; el admin y el
+    loop proactivo (sin author) ven todos. Incluye los de hoy aunque ya hayan pasado."""
+    author = ctx.state.get("author_handle")
+    scope_handle = None if (not author or author == ADMIN_HANDLE) else author
+    limit  = int(args.get("limit") or 10)
+    today  = dbmod.events_today(ctx.conn, handle=scope_handle)
+    up     = dbmod.upcoming_events(ctx.conn, handle=scope_handle, limit=limit)
+    seen: set[int] = set()
+    merged = [e for e in (*today, *up) if not (e["id"] in seen or seen.add(e["id"]))]
+    merged.sort(key=lambda e: e["event_at"])
+    return ToolResult(text=_format_events(merged))
+
+
+def _tool_create_event(args: dict, ctx: ToolContext) -> ToolResult:
+    """Agenda un evento. Regla de propiedad: el admin puede crear para la comunidad
+    (handle omitido) o para cualquier usuario; un usuario común SIEMPRE crea para sí
+    mismo (nunca para otro). Idempotente por (día + dueño + título)."""
+    author   = ctx.state.get("author_handle")
+    is_admin = author == ADMIN_HANDLE
+    title    = (args.get("title") or "").strip()
+    event_at = (args.get("event_at") or "").strip()
+    if not title or len(event_at) < 10:
+        return ToolResult(text="necesito un título y una fecha (YYYY-MM-DD) para agendar")
+    if is_admin:
+        req   = (args.get("handle") or "").lstrip("@").strip()
+        owner = req or None  # None = evento de comunidad
+    else:
+        owner = author       # usuario común: siempre para sí mismo, ignora 'handle'
+    if owner is not None and not dbmod.user_exists(ctx.conn, owner):
+        return ToolResult(text=f"@{owner} no tiene perfil todavía, no puedo agendarle un evento")
+    if dbmod.event_exists(ctx.conn, title=title, event_at=event_at, handle=owner):
+        return ToolResult(text=f"ese evento ya estaba agendado: {title}")
+    kind = (args.get("kind") or "other").strip() or "other"
+    desc = (args.get("description") or "").strip() or None
+    eid  = dbmod.create_event(ctx.conn, title=title, event_at=event_at, handle=owner,
+                              description=desc, kind=kind, source="tool")
+    who  = "la comunidad" if owner is None else f"@{owner}"
+    when = event_at[:16].replace("T", " ")
+    return ToolResult(text=f"listo, agendé '{title}' para {who} el {when} (id {eid})")
+
+
 def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | None") -> ToolHandler:
     """Handler de `summarize_feed`: resume en vivo los posts recientes de un feed.
     Se cierra sobre bsky+router (no viven en ToolContext). Scope REPLY, toggleable."""
@@ -1295,6 +1350,40 @@ def build_tool_registry(config: dict | None = None, *,
         },
         _make_summarize_feed_tool(bsky, router),
         {Scope.REPLY},
+    )
+    reg.register(
+        "get_upcoming_events",
+        "Consulta la agenda de la comunidad: eventos de hoy y próximos (cumpleaños, "
+        "juntadas, recordatorios). Usala cuando un usuario pregunta qué se viene / qué hay "
+        "agendado, o para decidir si saludar/recordar algo en el loop proactivo.",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Cuántos eventos próximos traer (default 10)."}
+            },
+            "required": [],
+        },
+        _tool_get_upcoming_events,
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
+    )
+    reg.register(
+        "create_event",
+        "Agenda un evento en el calendario (fecha + título). El admin puede agendar para "
+        "la comunidad (omitiendo 'handle') o para un usuario; un usuario común solo puede "
+        "agendar para sí mismo.",
+        {
+            "type": "object",
+            "properties": {
+                "title":       {"type": "string", "description": "Título breve del evento."},
+                "event_at":    {"type": "string", "description": "Fecha ISO 8601: YYYY-MM-DD o YYYY-MM-DDTHH:MM. Resolvé fechas relativas ('mañana', 'el sábado') usando la fecha de HOY."},
+                "description": {"type": "string", "description": "Detalle opcional del evento."},
+                "kind":        {"type": "string", "description": "Tipo: 'birthday', 'meetup', 'reminder', 'other'."},
+                "handle":      {"type": "string", "description": "Solo admin: dueño del evento (sin @), u omitir para evento de comunidad. Ignorado para usuarios comunes (su evento es siempre propio)."},
+            },
+            "required": ["title", "event_at"],
+        },
+        _tool_create_event,
+        {Scope.ADMIN},
     )
     if config:
         reg.apply_config(config)

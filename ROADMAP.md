@@ -82,10 +82,10 @@ Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`.
 - Se dispara cuando un usuario pide buscar algo (o el agente lo decide en feed_reflection si está en scope).
 - Devuelve top resultados resumidos; maneja rate limit / falta de API key con degradación graceful.
 
-### T9 · Tool de calendar  `tools` `M`
+### T9 · Tool de calendar  `tools` `M`  ✅ **HECHO**
 - **Acept.:** el agente lee/escribe `events` (T4) como tool.
-- Acciona según eventos cargados (ej. saludar en cumpleaños, recordar evento del día) dentro del loop proactivo.
-- Alta de eventos por admin y — parámetro configurable — por usuario. Un usuario nunca crea eventos de otro.
+- Impl.: dos tools en el registry (T1). **`get_upcoming_events`** (scopes `reply`+`feed_reflection`+`admin`): lee hoy+próximos; un usuario ve *sus* eventos + los de comunidad, el admin y el loop proactivo (sin author) ven todos. Registrada en `feed_reflection` → el agente puede consultarla al reflexionar y decidir saludar/recordar (satisface "acciona según eventos dentro del loop proactivo"). **`create_event`** (scope `admin` por default): regla de propiedad en el handler — el admin agenda para la comunidad (sin `handle`) o para cualquier usuario; un usuario común **siempre** crea para sí mismo, nunca para otro. Idempotente por (día+dueño+título) vía `event_exists`. **Parámetro configurable "usuarios pueden crear"** = agregar `reply` a `TOOLS.create_event.scopes` en `settings.json` (default off). Prompt admin actualizado. Tests: `tests/test_calendar_tools.py` (9).
+- Pendiente menor: no hay tool de `delete`/`update` en-banda (los `events` se limpian por SQL/mem_admin futuro); el saludo automático depende de que el agente decida llamar la tool (no hay trigger rígido).
 
 ### T10 · Comando `blockme`  `tools` `S`
 - **Acept.:** el bot bloquea al usuario que lo pide y **borra toda su memoria** (user_facts + embeddings + events del handle + relationships). Confirmación al usuario.
