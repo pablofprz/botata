@@ -83,6 +83,7 @@ Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`.
 
 ### T9 · Tool de calendar  `tools` `M`  ✅ **HECHO**
 - **Acept.:** el agente lee/escribe `events` (T4) como tool.
+- **Config (post-M4):** `create_event` ahora scope `admin`+`reply` → **usuarios pueden agendar eventos propios** (el handler los fuerza a sí mismos; nunca a otros). Admin sigue agendando para comunidad/cualquiera; el feed auto-popula (T6).
 - Impl.: dos tools en el registry (T1). **`get_upcoming_events`** (scopes `reply`+`feed_reflection`+`admin`): lee hoy+próximos; un usuario ve *sus* eventos + los de comunidad, el admin y el loop proactivo (sin author) ven todos. Registrada en `feed_reflection` → el agente puede consultarla al reflexionar y decidir saludar/recordar (satisface "acciona según eventos dentro del loop proactivo"). **`create_event`** (scope `admin` por default): regla de propiedad en el handler — el admin agenda para la comunidad (sin `handle`) o para cualquier usuario; un usuario común **siempre** crea para sí mismo, nunca para otro. Idempotente por (día+dueño+título) vía `event_exists`. **Parámetro configurable "usuarios pueden crear"** = agregar `reply` a `TOOLS.create_event.scopes` en `settings.json` (default off). Prompt admin actualizado. Tests: `tests/test_calendar_tools.py` (9).
 - Pendiente menor: no hay tool de `delete`/`update` en-banda (los `events` se limpian por SQL/mem_admin futuro); el saludo automático depende de que el agente decida llamar la tool (no hay trigger rígido).
 
@@ -128,6 +129,7 @@ El bot puede contestar sobre lo que él mismo viene posteando/respondiendo, no s
 ### T15 · Noticias/RSS gestionadas por admin  `tools` `M`  ✅ **HECHO**
 - **Acept.:** el admin carga listas de RSS con **título + descripción**; el bot postea lo nuevo.
 - Impl.: `config/news_sites.json` pasa al modelo `{url, title, description, mode, enabled, interval_hours}` (acepta strings legacy → `mode:post`). `fetch_rss` portado a **stdlib xml** (RSS 2.0, sin feedparser; limpia HTML). Pipeline `run_news_pass`: por fuente habilitada respeta `interval_hours` (cursor en `feed_cursors` como `news:{host}`), filtra items **nuevos** (dedup en tabla `posted_news` por link/guid) y — según `mode` — postea **un comentario LLM** (`comment`, rol feed_summary + `prompts/summarize_news_prompt.md` portado) o **cada item** (`post`, capado a N/pasada). Integrado en el loop `run()` (respeta intervalo) + CLI `--news` (one-shot). **Master toggle `NEWS_ENABLED` (default false)** — outward-facing, el admin lo prende. Fetch/parse **verificado en vivo** (La Política Online + Página/12). Tests: `tests/test_news.py` (7). **Cierra M4.**
+- **Config review (post-M4):** cada fuente ahora lleva **`category`** (catalogación), inyectada en el contexto del comentario (`_summarize_news`) para que el bot sepa a qué pertenece. Tool **`get_news(category?)`** (scope reply+admin, on por default) para que los **usuarios pidan noticias/links** filtrables por categoría — independiente de `NEWS_ENABLED`. Tests: `tests/test_news_tool.py` (7).
 
 ---
 

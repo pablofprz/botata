@@ -1283,6 +1283,9 @@ def _summarize_news(router: ModelRouter, items: list[dict], source: dict) -> str
     soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
     prompt = load_text(PROMPTS_DIR / "summarize_news_prompt.md")
     label  = source.get("title") or source["host"]
+    cat    = source.get("category")
+    if cat:
+        label = f"{label} · {cat}"  # el bot sabe la categoría de la fuente
     body   = "\n\n".join(f"[{label}] {it['title']}\n{it['description']}" for it in items[:15])
     try:
         content = router.chat(
@@ -1707,6 +1710,36 @@ def _tool_share_video(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text=text)
 
 
+def _tool_get_news(args: dict, ctx: ToolContext) -> ToolResult:
+    """T15 (reply): un usuario pide noticias/links de las fuentes RSS configuradas,
+    opcionalmente filtradas por categoría. Independiente de NEWS_ENABLED (que gobierna
+    solo el posteo autónomo)."""
+    if not NEWS_SOURCES:
+        return ToolResult(text="no tengo fuentes de noticias configuradas")
+    cat     = (args.get("category") or "").strip().lower() or None
+    sources = [s for s in NEWS_SOURCES if s.get("enabled", True)]
+    if cat:
+        sources = [s for s in sources
+                   if cat in (s.get("category", "") + " " + s.get("title", "")).lower()]
+    if not sources:
+        return ToolResult(text=f"no tengo fuentes de noticias de '{cat}'" if cat
+                          else "no hay fuentes de noticias activas")
+    lines: list[str] = []
+    for s in sources:
+        try:
+            items = fetch_rss(s["url"], max_items=3)
+        except Exception as e:
+            log.error("get_news %s: %s", s["host"], e)
+            continue
+        label = s.get("title") or s["host"]
+        for it in items[:3]:
+            link = f" {it['link']}" if it.get("link") else ""
+            lines.append(f"- [{label}] {it['title']}{link}")
+    if not lines:
+        return ToolResult(text="no pude traer noticias ahora")
+    return ToolResult(text="\n".join(lines[:8]))
+
+
 def _tool_reset_my_memory(args: dict, ctx: ToolContext) -> ToolResult:
     """T11 `resetme`: borra SOLO la memoria del usuario que lo pide (hechos +
     embeddings + eventos propios). Nunca toca datos de otros; no bloquea."""
@@ -1987,6 +2020,21 @@ def build_tool_registry(config: dict | None = None, *,
         },
         _tool_share_video,
         {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
+    )
+    reg.register(
+        "get_news",
+        "Trae titulares recientes con su link de las fuentes de noticias RSS configuradas "
+        "(La Política Online, Página/12, etc.). Usala cuando un usuario pide noticias, "
+        "titulares o links de actualidad. Se puede filtrar por categoría (ej. 'política').",
+        {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Opcional: filtrar por categoría de la fuente (ej. 'política', 'noticias'). Omitir para todas."}
+            },
+            "required": [],
+        },
+        _tool_get_news,
+        {Scope.REPLY, Scope.ADMIN},
     )
     if config:
         reg.apply_config(config)

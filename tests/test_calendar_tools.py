@@ -99,5 +99,5 @@ def test_scopes_default(conn):
     assert "get_upcoming_events" in [t.name for t in reg.available(Scope.REPLY)]
     assert "get_upcoming_events" in [t.name for t in reg.available(Scope.FEED_REFLECTION)]
     assert "create_event" in [t.name for t in reg.available(Scope.ADMIN)]
-    # default: los usuarios NO pueden crear eventos (no en scope reply)
-    assert "create_event" not in [t.name for t in reg.available(Scope.REPLY)]
+    # default actual: admin + usuarios (los usuarios agendan solo para sí — regla en el handler)
+    assert "create_event" in [t.name for t in reg.available(Scope.REPLY)]
