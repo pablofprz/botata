@@ -131,6 +131,14 @@ CREATE TABLE IF NOT EXISTS feed_cursors (
     last_run   TEXT
 );
 
+-- ─── posted_news: idempotencia de items RSS ya posteados (T15) ────────
+CREATE TABLE IF NOT EXISTS posted_news (
+    item_id   TEXT PRIMARY KEY,   -- link o guid del item RSS
+    source    TEXT,               -- host de la fuente
+    title     TEXT,
+    posted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ─── clearsky_cache: cache de bloqueadores por DID ────────────────────
 -- Proxy de la API pública de ClearSky ("quién me bloquea"). TTL corto: los
 -- bloques no cambian seguido y amortiguamos repetición del comando. El JSON
@@ -934,3 +942,21 @@ def purge_user_memory(
         conn.execute("DELETE FROM users WHERE handle = ?", (handle,))
     conn.commit()
     return {"facts": len(fact_ids), "events": events, "relationships": rels}
+
+
+# ─── posted_news: dedup de items RSS ya posteados (T15) ───────────────────────
+def news_item_posted(conn: sqlite3.Connection, item_id: str) -> bool:
+    """True si el item RSS (por link/guid) ya fue posteado."""
+    return conn.execute(
+        "SELECT 1 FROM posted_news WHERE item_id = ?", (item_id,)
+    ).fetchone() is not None
+
+
+def mark_news_item_posted(conn: sqlite3.Connection, item_id: str,
+                          source: str | None = None, title: str | None = None) -> None:
+    """Marca un item RSS como posteado (idempotente)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO posted_news (item_id, source, title) VALUES (?, ?, ?)",
+        (item_id, source, title),
+    )
+    conn.commit()

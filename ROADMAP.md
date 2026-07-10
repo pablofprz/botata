@@ -125,9 +125,9 @@ El bot puede contestar sobre lo que él mismo viene posteando/respondiendo, no s
 - Impl.: tool `share_video(query?)` (scopes `reply`+`feed_reflection`+`admin`): con `query` busca; sin query trae `mostPopular` de AR — vía **YouTube Data API v3** (stdlib `urllib`, `YOUTUBE_API_KEY` en `.env` gitignored). Dedup contra `bot_posts`. `get_youtube_transcript` portado (import lazy de `youtube_transcript_api`, dep opcional; proxy Webshare si hay creds; None si no está). Comentario unificado en el LLM del nodo. Degradación graceful (sin key / sin video / error). **Verificado en vivo** (mostPopular AR + search). Tests: `tests/test_video_tool.py` (13).
 - **Decisión (admin):** se descartó el port literal (video top de subreddits vía Reddit) porque **Reddit devuelve 403 Blocked** sin autenticación (cualquier UA/IP) — es el muro de T17/T18. Se optó por la API oficial de YouTube (API key, no OAuth: los endpoints públicos van con `?key=`). `config/video_subreddits.json` queda sin uso (posible fuente futura de T18).
 
-### T15 · Noticias/RSS gestionadas por admin  `tools` `M`
+### T15 · Noticias/RSS gestionadas por admin  `tools` `M`  ✅ **HECHO**
 - **Acept.:** el admin carga listas de RSS con **título + descripción**; el bot postea lo nuevo.
-- Toggle por feed: **comentar (LLM)** o **solo postear**. Portar `fetch_rss` / `summarize_news`. Dedup de items ya posteados.
+- Impl.: `config/news_sites.json` pasa al modelo `{url, title, description, mode, enabled, interval_hours}` (acepta strings legacy → `mode:post`). `fetch_rss` portado a **stdlib xml** (RSS 2.0, sin feedparser; limpia HTML). Pipeline `run_news_pass`: por fuente habilitada respeta `interval_hours` (cursor en `feed_cursors` como `news:{host}`), filtra items **nuevos** (dedup en tabla `posted_news` por link/guid) y — según `mode` — postea **un comentario LLM** (`comment`, rol feed_summary + `prompts/summarize_news_prompt.md` portado) o **cada item** (`post`, capado a N/pasada). Integrado en el loop `run()` (respeta intervalo) + CLI `--news` (one-shot). **Master toggle `NEWS_ENABLED` (default false)** — outward-facing, el admin lo prende. Fetch/parse **verificado en vivo** (La Política Online + Página/12). Tests: `tests/test_news.py` (7). **Cierra M4.**
 
 ---
 

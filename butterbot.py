@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -129,6 +130,29 @@ POLL_INTERVAL      : int  = settings.get("POLL_INTERVAL_SECONDS", 60)
 FEEDS_CONFIG       : list = settings.get("FEEDS", [])
 TOOLS_CONFIG       : dict = settings.get("TOOLS", {})
 MODELS_CONFIG      : dict | None = settings.get("MODELS")
+
+
+def _load_news_sources() -> list[dict]:
+    """Carga config/news_sites.json. Acepta strings (back-compat, mode=post) u objetos
+    {url, title, description, mode, enabled, interval_hours}. Tagea cada fuente con `host`."""
+    try:
+        raw = load_json(CONFIG_DIR / "news_sites.json")
+    except Exception:
+        return []
+    out: list[dict] = []
+    for e in raw:
+        if isinstance(e, str):
+            e = {"url": e, "mode": "post"}
+        if not e.get("url"):
+            continue
+        host = urllib.parse.urlparse(e["url"]).netloc.replace("www.", "") or e["url"]
+        out.append({**e, "host": host})
+    return out
+
+
+NEWS_SOURCES : list = _load_news_sources()
+# Master toggle del posteo de noticias (outward-facing). OFF por default: el admin lo prende.
+NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 
 # Back-compat del router: si no hay sección MODELS, se derivan los aliases de estos.
 _LEGACY_MODELS = {
@@ -1220,6 +1244,117 @@ def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None
     _run_feed_pass(graph, force_post=force_post, full_backfill=full_backfill,
                    respect_interval=False)
     log.info("Loop proactivo completo.")
+
+
+# ---------------------------------------------------------------------------
+# T15 · Noticias / RSS gestionadas por admin
+# ---------------------------------------------------------------------------
+_NEWS_UA = "butterbot/1.0 (bot comunitario de Bluesky Argentina)"
+
+
+def _strip_html(s: str | None) -> str:
+    return re.sub(r"<[^>]+>", "", s or "").strip()
+
+
+def fetch_rss(url: str, max_items: int = 15) -> list[dict]:
+    """Titulares + descripciones de un feed RSS 2.0 (stdlib xml, sin feedparser).
+    Portado de maripobot_deprecated. Devuelve [{title, link, description, id}]."""
+    req = urllib.request.Request(url, headers={"User-Agent": _NEWS_UA})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read()
+    root  = ET.fromstring(raw)
+    items = []
+    for item in root.iter("item"):  # RSS 2.0 (channel/item)
+        title = (item.findtext("title") or "").strip()
+        link  = (item.findtext("link") or "").strip()
+        guid  = (item.findtext("guid") or "").strip()
+        desc  = _strip_html(item.findtext("description"))
+        ident = link or guid or title
+        if not (title and ident):
+            continue
+        items.append({"title": title, "link": link or guid, "description": desc, "id": ident})
+        if len(items) >= max_items:
+            break
+    return items
+
+
+def _summarize_news(router: ModelRouter, items: list[dict], source: dict) -> str | None:
+    """Comentario en la voz del bot sobre los titulares nuevos (rol feed_summary)."""
+    soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
+    prompt = load_text(PROMPTS_DIR / "summarize_news_prompt.md")
+    label  = source.get("title") or source["host"]
+    body   = "\n\n".join(f"[{label}] {it['title']}\n{it['description']}" for it in items[:15])
+    try:
+        content = router.chat(
+            "feed_summary",
+            messages=[
+                {"role": "system", "content": f"{soul}\n\n{current_datetime_line()}\n\n{prompt}"},
+                {"role": "user", "content": body},
+            ],
+            max_tokens=400,
+        )
+    except Exception as e:
+        log.error("summarize_news: %s", e)
+        return None
+    return (content or "").strip() or None
+
+
+def run_news_pass(bsky: BskyClient, router: ModelRouter, db: sqlite3.Connection, *,
+                  force: bool = False, respect_interval: bool = True,
+                  max_post_items: int = 3) -> None:
+    """T15: por cada fuente RSS habilitada, postea lo NUEVO (dedup por item).
+    `mode` por fuente: 'comment' (un comentario LLM de los items nuevos) o 'post'
+    (cada item nuevo como skeet, capado). Master toggle NEWS_ENABLED (off por default)."""
+    if not NEWS_ENABLED:
+        return
+    for src in NEWS_SOURCES:
+        if not src.get("enabled", True):
+            continue
+        cursor   = "news:" + src["host"]
+        interval = src.get("interval_hours", 6)
+        if respect_interval and not force and interval:
+            last = get_feed_last_run(db, cursor)
+            if last:
+                elapsed = (datetime.now(timezone.utc)
+                           - datetime.fromisoformat(last)).total_seconds() / 3600
+                if elapsed < interval:
+                    log.info("news %s: no toca todavía (%.1fh < %dh)", src["host"], elapsed, interval)
+                    continue
+        try:
+            items = fetch_rss(src["url"])
+        except Exception as e:
+            log.error("news %s: fetch falló: %s", src["host"], e)
+            continue
+        save_feed_last_run(db, cursor)
+        new = [it for it in items if not dbmod.news_item_posted(db, it["id"])]
+        if not new:
+            log.info("news %s: nada nuevo", src["host"])
+            continue
+
+        if src.get("mode", "comment") == "comment":
+            comment = _summarize_news(router, new, src)
+            if comment:
+                uri = bsky.post(comment)
+                log_bot_post(db, uri=uri, in_reply_to=None, reply_to_handle=None, text=comment)
+                log.info("news %s: comentario posteado %s (%d items)", src["host"], uri, len(new))
+            for it in new:  # marcados aunque el comentario falle: no reintentar los mismos
+                dbmod.mark_news_item_posted(db, it["id"], src["host"], it["title"])
+        else:  # mode == 'post'
+            for it in new[:max_post_items]:
+                text = f"{it['title']}\n{it['link']}" if it["link"] else it["title"]
+                uri  = bsky.post(text)
+                log_bot_post(db, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
+                dbmod.mark_news_item_posted(db, it["id"], src["host"], it["title"])
+                log.info("news %s: item posteado %s", src["host"], uri)
+
+
+def run_news_loop() -> None:
+    """Pase único del pipeline de noticias desde CLI (`--news`). Ignora el intervalo."""
+    db     = init_db()
+    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    run_news_pass(bsky, router, db, force=True, respect_interval=False)
+    log.info("News pass completo.")
 
 
 # ---------------------------------------------------------------------------
@@ -2434,6 +2569,9 @@ def run(mode: str) -> None:
             # --- Loop proactivo de feed (T5/T6): corre solo cuando toca el intervalo ---
             _run_feed_pass(feed_graph, respect_interval=True)
 
+            # --- Noticias RSS (T15): postea lo nuevo por fuente (respeta intervalo) ---
+            run_news_pass(bsky, router, db, respect_interval=True)
+
             # --- Mention polling ---
             mentions = [m for m in bsky.get_mentions() if not has_replied(db, m["uri"])]
             if mentions:
@@ -2498,10 +2636,19 @@ if __name__ == "__main__":
         action="store_true",
         help="Use with --proactive: force a post per feed even if the agent would abstain.",
     )
+    parser.add_argument(
+        "--news",
+        action="store_true",
+        help="T15: run the RSS news pass once (post what's new per source) and exit. "
+             "Requires NEWS_ENABLED=true in settings.json.",
+    )
     args = parser.parse_args()
 
     if args.proactive:
         run_feed_loop(force_post=args.force_post, full_backfill=args.backfill)
+
+    elif args.news:
+        run_news_loop()
 
     elif args.fetch_feeds:
         db        = init_db()
