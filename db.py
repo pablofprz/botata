@@ -899,3 +899,34 @@ def events_today(
         tuple(params),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def purge_user_memory(
+    conn: sqlite3.Connection,
+    handle: str,
+    *,
+    include_relationships: bool = False,
+    drop_profile: bool = False,
+) -> dict[str, int]:
+    """Borra la memoria de UN handle: `user_facts` (+ sus embeddings en `user_facts_vec`)
+    y sus `events` propios. Nunca toca datos de otros handles.
+
+    Base de `resetme` (T11: solo lo anterior) y `blockme` (T10: además
+    `include_relationships` + `drop_profile`). Los embeddings vec0 no los cubre el
+    FK cascade → se borran a mano por rowid antes de los facts. Devuelve conteos.
+    """
+    fact_ids = [r[0] for r in conn.execute(
+        "SELECT id FROM user_facts WHERE handle = ?", (handle,)).fetchall()]
+    for fid in fact_ids:
+        conn.execute("DELETE FROM user_facts_vec WHERE rowid = ?", (fid,))
+    conn.execute("DELETE FROM user_facts WHERE handle = ?", (handle,))  # trigger limpia el FTS
+    events = conn.execute("DELETE FROM events WHERE handle = ?", (handle,)).rowcount
+    rels = 0
+    if include_relationships:
+        rels = conn.execute(
+            "DELETE FROM relationships WHERE handle_a = ? OR handle_b = ?", (handle, handle)
+        ).rowcount
+    if drop_profile:
+        conn.execute("DELETE FROM users WHERE handle = ?", (handle,))
+    conn.commit()
+    return {"facts": len(fact_ids), "events": events, "relationships": rels}

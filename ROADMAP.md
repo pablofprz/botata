@@ -90,8 +90,9 @@ Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`.
 ### T10 · Comando `blockme`  `tools` `S`
 - **Acept.:** el bot bloquea al usuario que lo pide y **borra toda su memoria** (user_facts + embeddings + events del handle + relationships). Confirmación al usuario.
 
-### T11 · Comando `resetme`  `tools` `S`
+### T11 · Comando `resetme`  `tools` `S`  ✅ **HECHO**
 - **Acept.:** borra **únicamente** la memoria del handle que lo pide (facts + embeddings + events propios). **Nunca** toca datos de otros. No bloquea.
+- Impl.: helper `db.purge_user_memory(conn, handle, *, include_relationships, drop_profile)` (borra embeddings vec0 a mano por rowid + facts + events propios; el FK cascade no cubre vec0). Tool `reset_my_memory` (scopes `reply`+`admin`, sin args) que purga `ctx.state.author_handle` → siempre el que pide, nunca otro. Descripción estricta ("solo si el usuario lo pide EXPLÍCITAMENTE"). El helper es la base compartida con `blockme` (T10, que suma `include_relationships`+`drop_profile`+block). Tests: `tests/test_reset_memory.py` (6, con embeddings dummy en vec0).
 
 ### T24 · Tool `summarize_feed` on-demand para usuarios  `tools` `M`  ✅ **HECHO**
 Un usuario puede pedirle al bot un resumen en vivo del feed de la comunidad.

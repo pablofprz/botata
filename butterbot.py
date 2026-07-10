@@ -1256,6 +1256,20 @@ def _tool_get_my_recent_posts(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text="\n".join(lines))
 
 
+def _tool_reset_my_memory(args: dict, ctx: ToolContext) -> ToolResult:
+    """T11 `resetme`: borra SOLO la memoria del usuario que lo pide (hechos +
+    embeddings + eventos propios). Nunca toca datos de otros; no bloquea."""
+    handle = ctx.state.get("author_handle")
+    if not handle:
+        return ToolResult(text="no pude identificar tu cuenta para borrar tu memoria")
+    counts = dbmod.purge_user_memory(ctx.conn, handle)
+    log.info("resetme: memoria purgada de @%s (%s)", handle, counts)
+    return ToolResult(text=(
+        f"listo, borré lo que sabía de vos: {counts['facts']} hechos y "
+        f"{counts['events']} eventos tuyos. arrancamos de cero."
+    ))
+
+
 def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | None") -> ToolHandler:
     """Handler de `summarize_feed`: resume en vivo los posts recientes de un feed.
     Se cierra sobre bsky+router (no viven en ToolContext). Scope REPLY, toggleable."""
@@ -1433,6 +1447,16 @@ def build_tool_registry(config: dict | None = None, *,
             "required": [],
         },
         _tool_get_my_recent_posts,
+        {Scope.REPLY, Scope.ADMIN},
+    )
+    reg.register(
+        "reset_my_memory",
+        "Borra ÚNICAMENTE la memoria del usuario que te habla: sus hechos, embeddings y "
+        "eventos propios. Llamala SOLO cuando el usuario pide EXPLÍCITAMENTE borrar/resetear "
+        "su memoria (ej. '/resetme', 'borrá todo lo que sabés de mí', 'olvidate de mí'). "
+        "Nunca borra datos de otras personas y no bloquea a nadie.",
+        {"type": "object", "properties": {}, "required": []},
+        _tool_reset_my_memory,
         {Scope.REPLY, Scope.ADMIN},
     )
     if config:
