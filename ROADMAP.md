@@ -68,6 +68,12 @@ Reemplaza el `FeedProcessor` manual por un loop autónomo.
 - Cliente Bluesky con método por tipo; `FEEDS[]` declara `type` + identificador.
 - Documentar que hoy solo hay `list`.
 
+### T23 · Externalizar prompts hardcodeados  `infra` `S`  `P1`  ✅ **HECHO**
+Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`. Principio de diseño (CLAUDE.md): config declarativa, no strings incrustados.
+- **Acept.:** mover a archivos los prompts incrustados en `butterbot.py`; cargarlos con `load_text(PROMPTS_DIR / ...)` como ya hacían `reflect_feed_prompt.md` / SOUL.
+- Impl.: externalizados a `prompts/` — guía de posteo por política → `feed_policy_{conservative,balanced,active}.md` (helper `feed_policy_guidance()` con fallback a balanced); resumen de feed → `feed_summary_prompt.md`; formato JSON de `ReflectDecideNode` → `feed_decision_format.md`; system prompt de `HandleAdminCommandNode` → `admin_command_prompt.md`; bloque de formato de `GenerateReplyNode` → `reply_format.md`. 31 tests verdes.
+- **Quedan inline a propósito** (no son prompts fijos sino armado dinámico): labels de secciones del reply (memoria/hechos/lecciones/catálogo, interpolan data), instrucción condicional de force-post y hint de tools en `ReflectDecideNode`, y el path legacy `FeedProcessor.post_opinion`.
+
 ---
 
 ## M3 · Tools prioritarias  `P1`

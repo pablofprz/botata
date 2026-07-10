@@ -590,15 +590,8 @@ class FeedProcessor:
     Runs at most once per `interval_hours` per feed (tracked in SQLite).
     """
 
-    SUMMARIZE_SYSTEM = (
-        "Sos un asistente que resume feeds de Bluesky para un bot de una comunidad argentina. "
-        "Te llega una lista de posts recientes. Tu tarea es identificar los temas principales, "
-        "debates, eventos o links que se están compartiendo. "
-        "Evitá hacer resúmenes de temas sensibles"
-        "Respondé en español rioplatense. Máximo 150 palabras. "
-        "Formato: texto corrido con guiones para separar temas si hay más de uno. "
-        "Sin hashtags. Sin markdown complejo. Si no hay nada relevante, respondé exactamente: NADA"
-    )
+    # T23: prompt externalizado en prompts/feed_summary_prompt.md
+    SUMMARIZE_SYSTEM = load_text(PROMPTS_DIR / "feed_summary_prompt.md")
 
     def __init__(self, bsky: BskyClient, router: ModelRouter, db: sqlite3.Connection):
         self.bsky   = bsky
@@ -734,21 +727,11 @@ class FeedProcessor:
 # ---------------------------------------------------------------------------
 
 # Guía de comportamiento por política de posteo (configurable por feed en settings.json).
-_FEED_POLICY_GUIDANCE = {
-    "conservative": (
-        "Política CONSERVADORA: posteá SOLO si hay algo genuinamente notable (un tema "
-        "fuerte del día, un mood claro de la comunidad). Ante la duda, NO postees. La "
-        "mayoría de las corridas no deberían terminar en un posteo."
-    ),
-    "balanced": (
-        "Política BALANCEADA: posteá si tenés algo interesante para aportar sobre el feed, "
-        "aunque no sea excepcional. Si el feed está flojo, repetitivo o no te inspira, no postees."
-    ),
-    "active": (
-        "Política ACTIVA: posteá casi siempre que haya material con el que puedas aportar algo. "
-        "Solo abstenete si el feed está muerto o es puramente sensible."
-    ),
-}
+def feed_policy_guidance(policy: str) -> str:
+    """Guía de decisión de posteo por política (T23: prompt externalizado en
+    prompts/feed_policy_{policy}.md). Cae a `balanced` si la política es desconocida."""
+    return (load_text(PROMPTS_DIR / f"feed_policy_{policy}.md")
+            or load_text(PROMPTS_DIR / "feed_policy_balanced.md"))
 
 
 class FeedDecision(BaseModel):
@@ -939,7 +922,7 @@ class ReflectDecideNode:
         soul     = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
         reflect  = load_text(PROMPTS_DIR / "reflect_feed_prompt.md")
         policy   = state.get("posting_policy", "balanced")
-        guidance = _FEED_POLICY_GUIDANCE.get(policy, _FEED_POLICY_GUIDANCE["balanced"])
+        guidance = feed_policy_guidance(policy)
         recientes = recent_bot_posts(self.conn, limit=8)
 
         parts = [
@@ -976,10 +959,7 @@ class ReflectDecideNode:
             except Exception as e:
                 log.warning("ReflectDecideNode: fase de tools falló: %s", e)
 
-        parts.append(
-            "\n---\nRespondé SOLO con JSON válido: 'should_post' (bool), 'reason' (str breve), "
-            "'text' (el skeet a postear, <=250 chars, vacío si should_post=false)."
-        )
+        parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
         system = "\n".join(p for p in parts if p)
 
         try:
@@ -1371,13 +1351,8 @@ class GenerateReplyNode:
         else:
             parts.append("\n---\nNo hay imágenes disponibles en el catálogo.")
 
-        parts.append(
-            "\n---\nRespondé SOLO con JSON válido. "
-            "Campo 'text': tu respuesta (máx 300 chars). "
-            "Campo 'should_update_profile': true si aprendiste algo notable del usuario. "
-            "Campo 'image_search_query': null. Solo poné un valor si el usuario "
-            "explícitamente pide una imagen, meme o foto (ej. 'meme de gato')."
-        )
+        # T23: bloque de formato externalizado en prompts/reply_format.md
+        parts.append("\n---\n" + load_text(PROMPTS_DIR / "reply_format.md"))
         system = "\n".join(parts)
         user   = query
 
@@ -1421,15 +1396,8 @@ class HandleAdminCommandNode:
         self.registry = registry
 
     def run(self, state: MentionState) -> dict:
-        system = (
-            f"{current_datetime_line()}\n\n"
-            "Sos el sistema de comandos de un bot de Bluesky. "
-            "El admin te mandó un comando. Usá la tool apropiada. "
-            "Para /remember: si el dato es sobre el usuario → save_to_user_profile. "
-            "Si es general o sobre la comunidad → save_to_memory. "
-            "Para /debug → get_debug_info. Para /help → get_help. "
-            "Llamá exactamente UNA tool."
-        )
+        # T23: prompt externalizado en prompts/admin_command_prompt.md
+        system = f"{current_datetime_line()}\n\n" + load_text(PROMPTS_DIR / "admin_command_prompt.md")
         user = (
             f"Admin: @{state['author_handle']}\n"
             f"Comando recibido: {state['mention_text']}"

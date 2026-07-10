@@ -1,0 +1,1 @@
+Política CONSERVADORA: posteá SOLO si hay algo genuinamente notable (un tema fuerte del día, un mood claro de la comunidad). Ante la duda, NO postees. La mayoría de las corridas no deberían terminar en un posteo.

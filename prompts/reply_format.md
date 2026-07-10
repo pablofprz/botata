@@ -1,0 +1,1 @@
+Respondé SOLO con JSON válido. Campo 'text': tu respuesta (máx 300 chars). Campo 'should_update_profile': true si aprendiste algo notable del usuario. Campo 'image_search_query': null. Solo poné un valor si el usuario explícitamente pide una imagen, meme o foto (ej. 'meme de gato').
