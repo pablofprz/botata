@@ -624,11 +624,11 @@ class BskyClient:
         return resp.uri
 
 
-    def post(self, text: str, limit: int = 295) -> str:
+    def post(self, text: str, limit: int = 295, image_path: str | None = None) -> str:
         """
-        Post a standalone skeet (no reply). Returns the new post URI.
-        Truncates at the last sentence-ending punctuation before `limit`
-        to avoid cutting mid-word.
+        Post a standalone skeet (no reply), optionally with an attached image.
+        Returns the new post URI. Truncates at the last sentence-ending
+        punctuation before `limit` to avoid cutting mid-word.
         """
         if len(text) > limit:
             cut = text[:limit]
@@ -640,7 +640,11 @@ class BskyClient:
             else:
                 # No punctuation found — cut at last space
                 text = cut[: cut.rfind(" ")] if " " in cut else cut
-        resp = self._client.send_post(text=text)
+        if image_path:
+            resp = self._client.send_image(
+                text=text, image=Path(image_path).read_bytes(), image_alt=text[:100])
+        else:
+            resp = self._client.send_post(text=text)
         return resp.uri
 
     def _extract_text(self, record) -> str:
@@ -824,6 +828,11 @@ class FeedDecision(BaseModel):
         validation_alias=AliasChoices("text", "message", "post"),
         description="El skeet a postear (<=250 chars, rioplatense). Vacío si should_post=False.",
     )
+    image_query: str = Field(
+        default="",
+        description="Opcional: si una imagen del catálogo pega justo con el post, palabras "
+                    "clave para buscarla (ej. 'gato sorprendido'). Vacío si no corresponde imagen.",
+    )
 
 
 # T6 · aprendizajes del feed → memoria/calendario (structured output)
@@ -855,6 +864,7 @@ class FeedState(TypedDict, total=False):
     force_post: bool
     full_backfill: bool
     learn: bool
+    autonomous_images: bool
     # intermedio / salida
     posts: list
     posts_count: int
@@ -863,6 +873,7 @@ class FeedState(TypedDict, total=False):
     learned_events: int
     should_post: bool
     post_text: str
+    image_query: str
     reason: str
     posted_uri: str
 
@@ -1040,6 +1051,17 @@ class ReflectDecideNode:
             except Exception as e:
                 log.warning("ReflectDecideNode: fase de tools falló: %s", e)
 
+        # T12: posteo autónomo de imágenes (off por default). Solo se ofrece si el
+        # feed lo habilita Y hay imágenes en el catálogo.
+        images_on = bool(state.get("autonomous_images")) and \
+            dbmod.get_image_catalog_stats(self.conn)["total"] > 0
+        if images_on:
+            parts.append(
+                "\n---\nTenés un catálogo de imágenes. Si —y SOLO si— una imagen pega justo "
+                "con tu post, poné en 'image_query' palabras clave para buscarla. Si no "
+                "corresponde, dejá 'image_query' vacío (la mayoría de las veces va vacío)."
+            )
+
         parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
         system = "\n".join(p for p in parts if p)
 
@@ -1050,9 +1072,41 @@ class ReflectDecideNode:
             return {"should_post": False, "reason": f"error: {e}"}
 
         should = bool(decision.should_post) or bool(state.get("force_post"))
-        log.info("Feed %s: decisión should_post=%s (%s)",
-                 state["feed_name"], should, decision.reason[:80])
-        return {"should_post": should, "post_text": decision.text, "reason": decision.reason}
+        image_query = decision.image_query if images_on else ""
+        log.info("Feed %s: decisión should_post=%s (%s)%s",
+                 state["feed_name"], should, decision.reason[:80],
+                 f" +img={image_query!r}" if image_query else "")
+        return {"should_post": should, "post_text": decision.text,
+                "reason": decision.reason, "image_query": image_query}
+
+
+_VALID_IMAGE_CATEGORIES = {"meme", "foto", "arte", "captura", "otro"}
+
+
+def resolve_catalog_image(conn: sqlite3.Connection, query: str | None,
+                          *, mark_used: bool = True) -> str | None:
+    """Selecciona la mejor imagen del catálogo para `query`, o None.
+
+    **Guardrail (T12):** nunca devuelve una imagen sin descripción o con categoría
+    inválida — el bot no postea imágenes que no 'entiende'. Compartido por el reply
+    (a pedido) y el loop proactivo (autónomo).
+    """
+    if not query or not query.strip():
+        return None
+    results = dbmod.hybrid_search_image_catalog(conn, query.strip(), limit=1)
+    if not results:
+        log.info("imagen: sin match para %r", query)
+        return None
+    img  = results[0]
+    desc = (img.get("description") or "").strip()
+    cat  = (img.get("category") or "").strip().lower()
+    if not desc or cat not in _VALID_IMAGE_CATEGORIES:
+        log.info("guardrail imagen: descarto %s (desc/categoría inválida)", img.get("file_path"))
+        return None
+    if mark_used:
+        dbmod.mark_image_used(conn, img["id"])
+    log.info("imagen elegida: %r → %s", query, img["file_path"])
+    return img["file_path"]
 
 
 class PostFeedNode:
@@ -1073,9 +1127,14 @@ class PostFeedNode:
         if any(_norm_text(t) == norm for t in recent_bot_posts(self.conn, limit=20)):
             log.info("Feed %s: texto duplicado de un post reciente — skip", state.get("feed_name"))
             return {}
-        uri = self.bsky.post(text)
+        # T12: imagen autónoma (opcional). El guardrail vive en resolve_catalog_image.
+        image_path = None
+        if state.get("autonomous_images") and state.get("image_query"):
+            image_path = resolve_catalog_image(self.conn, state["image_query"])
+        uri = self.bsky.post(text, image_path=image_path)
         log_bot_post(self.conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
-        log.info("Feed %s: posteado %s", state.get("feed_name"), uri)
+        log.info("Feed %s: posteado %s%s", state.get("feed_name"), uri,
+                 " (con imagen)" if image_path else "")
         return {"posted_uri": uri}
 
 
@@ -1139,6 +1198,7 @@ def _run_feed_pass(graph, *, force_post: bool = False, full_backfill: bool = Fal
             "interval_hours": feed.get("interval_hours", 6) if respect_interval else 0,
             "posting_policy": feed.get("posting_policy", "balanced"),
             "learn":          feed.get("learn", True),
+            "autonomous_images": feed.get("autonomous_images", False),
             "force_post":     force_post,
             "full_backfill":  full_backfill,
         }
@@ -1774,17 +1834,8 @@ class GenerateReplyNode:
         }
 
     def _resolve_image(self, search_query: str | None) -> str | None:
-        """Busca una imagen en el catálogo y devuelve su path, o None."""
-        if not search_query:
-            return None
-        results = dbmod.hybrid_search_image_catalog(self.conn, search_query, limit=1)
-        if results:
-            image = results[0]
-            dbmod.mark_image_used(self.conn, image["id"])
-            log.info("Image matched: %s → %s", search_query, image["file_path"])
-            return image["file_path"]
-        log.info("No image found for query: %s", search_query)
-        return None
+        """Busca una imagen en el catálogo (con guardrail T12), o None."""
+        return resolve_catalog_image(self.conn, search_query)
 
 
 class HandleAdminCommandNode:

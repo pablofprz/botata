@@ -11,6 +11,11 @@ archivo sin fila en image_catalog genera una descripción con IMAGE_MODEL
 
 Desacoplado a propósito del scrapeo: scrape_ig.py solo descarga y guarda
 en scraped_items; catalog.py corre después y describe las imágenes.
+
+Carpeta de input MANUAL (T12): dejá imágenes a mano en scrape/pictures/manual/
+y corré 'python catalog.py sync' — se catalogan igual que las scrapeadas
+(platform='manual'). El bot solo postea imágenes catalogadas (con descripción y
+categoría válidas); las que no entiende no las usa.
 """
 from __future__ import annotations
 
@@ -88,10 +93,15 @@ def describe_image(image_path: Path, llm: OpenAI) -> dict:
 
 
 # ─── Comandos ────────────────────────────────────────────────────────────────
+MANUAL_DIR = BASE_DIR / "scrape" / "pictures" / "manual"  # input manual formalizado (T12)
+
+
 def cmd_sync(dry_run: bool = False) -> None:
     """Sincroniza el catálogo: para cada imagen sin catalogar, genera descripción y la inserta."""
     conn = dbmod.init_db()
     llm = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT)
+    # Asegura la carpeta de input manual (T12): lugar conocido para tirar imágenes a mano.
+    MANUAL_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
         uncataloged = dbmod.list_uncataloged_files(conn, BASE_DIR)

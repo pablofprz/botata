@@ -111,10 +111,9 @@ El bot puede contestar sobre lo que él mismo viene posteando/respondiendo, no s
 
 ## M4 · Tools de contenido  `P2`
 
-### T12 · Imágenes autónomas + carpeta manual + guardrail  `tools` `M`
+### T12 · Imágenes autónomas + carpeta manual + guardrail  `tools` `M`  ✅ **HECHO**
 - **Acept.:** además del posteo a pedido (ya existe), el agente puede decidir postear una imagen si el contexto lo amerita — **parámetro configurable** (off por default).
-- Carpeta de **input manual** formalizada (`scrape/pictures/manual/`), catalogada por `catalog.py`.
-- **Guardrail:** el agente NO postea imágenes que no entiende (sin descripción/categoría válida en el catálogo).
+- Impl.: **(autónomo)** `FeedDecision` gana `image_query`; `ReflectDecideNode` lo ofrece SOLO si el feed tiene `autonomous_images: true` (default false) Y hay catálogo; `PostFeedNode` resuelve y adjunta vía `BskyClient.post(..., image_path=)` (ahora soporta imagen con `send_image`). **(manual)** `scrape/pictures/manual/` formalizada — `catalog.py sync` la crea y cataloga (ya escaneaba cualquier subcarpeta de `pictures/`). **(guardrail)** `resolve_catalog_image()` compartido por reply (a pedido) y feed (autónomo): descarta imágenes sin descripción o con categoría fuera de {meme,foto,arte,captura,otro} → el bot no postea lo que no "entiende". Tests: `tests/test_autonomous_images.py` (8).
 
 ### T13 · Tool música Spotify  `tools` `M`
 - **Acept.:** buscar canciones en Spotify a pedido del usuario o por decisión del agente. Portar lógica de `maripobot_deprecated` (`get_random_track_from_playlist`, `generate_track_opinion`). Toggleable.
