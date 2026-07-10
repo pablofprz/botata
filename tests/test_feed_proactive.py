@@ -24,6 +24,9 @@ class FakeBsky:
             {"handle": "user2", "text": "alguien vio la peli nueva?"},
         ]
 
+    def get_feed_posts(self, source_type, identifier, since=None, limit=50):
+        return self.get_list_feed(identifier, since, limit)
+
     def post(self, text, limit=295):
         self.posted.append(text)
         return f"at://bot/post/{len(self.posted)}"

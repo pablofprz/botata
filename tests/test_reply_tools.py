@@ -21,6 +21,9 @@ class FakeBsky:
     def get_list_feed(self, uri, since=None, limit=50):
         return self._posts
 
+    def get_feed_posts(self, source_type, identifier, since=None, limit=50):
+        return self._posts
+
 
 class FakeRouter:
     def __init__(self, reply="Se habló del dólar y de una peli."):

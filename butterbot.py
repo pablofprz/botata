@@ -462,33 +462,28 @@ class BskyClient:
             log.error("Could not resolve handle %s: %s", handle, e)
             return uri
 
-    def get_list_feed(self, list_uri: str, since: datetime | None, limit: int = 50) -> list[dict]:
+    def _paginate_posts(self, fetch_page, label: str, since: datetime | None,
+                        limit: int = 50) -> list[dict]:
+        """Paginación + extracción común a cualquier fuente de feed (T7).
+
+        `fetch_page(cursor, limit)` devuelve una respuesta del SDK con `.feed`
+        (items con `.post`) y opcional `.cursor`. Se detiene al alcanzar posts
+        anteriores a `since`, al quedarse sin cursor, o al tope de páginas.
         """
-        Fetch posts from a Bluesky list feed.
-        Returns posts newer than `since` (if provided) as plain dicts.
-        Paginates automatically until it hits older posts or runs out.
-        """
-        list_uri  = self.resolve_list_uri(list_uri)
-        posts     = []
-        cursor    = None
-        max_pages = 5  # safety cap — avoids infinite loops on huge feeds
+        posts: list[dict] = []
+        cursor            = None
+        max_pages         = 5  # safety cap — avoids infinite loops on huge feeds
 
         for page in range(max_pages):
-            params = {"list": list_uri, "limit": limit}
-            if cursor:
-                params["cursor"] = cursor
-
             try:
-                resp = self._client.app.bsky.feed.get_list_feed(params)
+                resp = fetch_page(cursor, limit)
             except Exception as e:
-                log.error("get_list_feed failed for %s: %s", list_uri, e)
+                log.error("%s failed: %s", label, e)
                 break
 
             if not resp.feed:
-                log.debug("get_list_feed: empty page %d for %s", page, list_uri)
+                log.debug("%s: empty page %d", label, page)
                 break
-
-            log.debug("get_list_feed: page %d — %d items", page, len(resp.feed))
 
             for item in resp.feed:
                 post   = item.post
@@ -502,7 +497,7 @@ class BskyClient:
 
                 # Stop when we reach posts we already processed
                 if since and indexed_at <= since:
-                    log.debug("get_list_feed: reached already-seen posts, stopping")
+                    log.debug("%s: reached already-seen posts, stopping", label)
                     return posts
 
                 text = self._extract_text(post.record)
@@ -518,8 +513,46 @@ class BskyClient:
             if not cursor:
                 break
 
-        log.info("get_list_feed: total %d posts fetched from %s", len(posts), list_uri)
+        log.info("%s: total %d posts fetched", label, len(posts))
         return posts
+
+    def get_list_feed(self, list_uri: str, since: datetime | None, limit: int = 50) -> list[dict]:
+        """Posts de una **lista** de Bluesky (fuente tipo `list`)."""
+        uri = self.resolve_list_uri(list_uri)
+        return self._paginate_posts(
+            lambda cursor, lim: self._client.app.bsky.feed.get_list_feed(
+                {"list": uri, "limit": lim, **({"cursor": cursor} if cursor else {})}),
+            f"get_list_feed[{uri}]", since, limit)
+
+    def get_custom_feed(self, feed_uri: str, since: datetime | None, limit: int = 50) -> list[dict]:
+        """Posts de un **feed generator** / algoritmo custom (fuente tipo `feed`)."""
+        uri = self.resolve_list_uri(feed_uri)  # resuelve handle→DID si hace falta
+        return self._paginate_posts(
+            lambda cursor, lim: self._client.app.bsky.feed.get_feed(
+                {"feed": uri, "limit": lim, **({"cursor": cursor} if cursor else {})}),
+            f"get_custom_feed[{uri}]", since, limit)
+
+    def get_timeline(self, since: datetime | None, limit: int = 50) -> list[dict]:
+        """Home **timeline** del bot: posts de las cuentas que sigue (fuente tipo `following`)."""
+        return self._paginate_posts(
+            lambda cursor, lim: self._client.app.bsky.feed.get_timeline(
+                {"limit": lim, **({"cursor": cursor} if cursor else {})}),
+            "get_timeline", since, limit)
+
+    def get_feed_posts(self, source_type: str, identifier: str | None,
+                       since: datetime | None, limit: int = 50) -> list[dict]:
+        """Dispatcher de fuentes de feed (T7): `list` | `feed` | `following`.
+
+        `identifier` es el at-URI de la lista/feed; se ignora para `following`.
+        Tipo desconocido → cae a `list` con un warning (no rompe el loop).
+        """
+        if source_type == "following":
+            return self.get_timeline(since, limit)
+        if source_type == "feed":
+            return self.get_custom_feed(identifier or "", since, limit)
+        if source_type != "list":
+            log.warning("get_feed_posts: tipo de fuente desconocido '%s' → uso 'list'", source_type)
+        return self.get_list_feed(identifier or "", since, limit)
 
     def reply(self, text: str, parent_uri: str, parent_cid: str,
               root_uri: str, root_cid: str, image_path: str | None = None) -> str:
@@ -769,6 +802,7 @@ class FeedLearnings(BaseModel):
 class FeedState(TypedDict, total=False):
     # entrada
     feed_name: str
+    feed_type: str
     list_uri: str
     interval_hours: int
     posting_policy: str
@@ -811,7 +845,8 @@ class FetchFeedNode:
         since = None if state.get("full_backfill") else (
             datetime.fromisoformat(last_run_str) if last_run_str else None
         )
-        posts = self.bsky.get_list_feed(state["list_uri"], since=since)
+        posts = self.bsky.get_feed_posts(
+            state.get("feed_type", "list"), state.get("list_uri"), since=since)
         save_feed_last_run(self.conn, feed_name)
         log.info("Feed %s: %d posts nuevos", feed_name, len(posts))
         return {"posts": posts, "posts_count": len(posts)}
@@ -1053,7 +1088,8 @@ def _run_feed_pass(graph, *, force_post: bool = False, full_backfill: bool = Fal
             continue
         state: FeedState = {
             "feed_name":      feed["name"],
-            "list_uri":       feed["uri"],
+            "feed_type":      feed.get("type", "list"),
+            "list_uri":       feed.get("uri"),
             "interval_hours": feed.get("interval_hours", 6) if respect_interval else 0,
             "posting_policy": feed.get("posting_policy", "balanced"),
             "learn":          feed.get("learn", True),
@@ -1146,7 +1182,8 @@ def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | 
             return ToolResult(text=f"no conozco un feed llamado '{name}'")
         since = datetime.now(timezone.utc) - timedelta(hours=6)
         try:
-            posts = bsky.get_list_feed(feed["uri"], since=since, limit=50)
+            posts = bsky.get_feed_posts(
+                feed.get("type", "list"), feed.get("uri"), since=since, limit=50)
         except Exception as e:
             log.error("summarize_feed: fetch falló: %s", e)
             return ToolResult(text="no pude leer el feed ahora, probá más tarde")

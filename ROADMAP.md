@@ -63,10 +63,9 @@ Reemplaza el `FeedProcessor` manual por un loop autónomo.
 - Idempotente: no duplica aprendizajes ya guardados (dedup semántico existente).
 - Impl.: `LearnFromFeedNode` en el grafo proactivo (fetch→**learn**→summarize→reflect→post), structured output `FeedLearnings` (facts + events) vía rol `update_profile`. Gate `db.user_exists` (solo perfiles existentes); eventos sin perfil → comunidad. Fechas relativas resueltas con T3. Dedup: `upsert_user_fact` (semántico) + `db.event_exists` (día+dueño+título). Toggle `learn` por feed. `get_list_feed` ahora incluye `uri` (source de los hechos). Tests: `tests/test_feed_learnings.py`.
 
-### T7 · Generalización de fuentes de feed  `proactivity` `M`
-- **Acept.:** config por comunidad soporta 3 tipos de fuente: `list` (actual), `feed` (generator/algoritmo), `following` (home timeline del bot).
-- Cliente Bluesky con método por tipo; `FEEDS[]` declara `type` + identificador.
-- Documentar que hoy solo hay `list`.
+### T7 · Generalización de fuentes de feed  `proactivity` `M`  ✅ **HECHO**
+- **Acept.:** config por comunidad soporta 3 tipos de fuente: `list`, `feed` (generator/algoritmo), `following` (home timeline del bot).
+- Impl.: paginador común `BskyClient._paginate_posts` + un método por tipo (`get_list_feed` / `get_custom_feed` = `app.bsky.feed.get_feed` / `get_timeline` = `app.bsky.feed.get_timeline`) + dispatcher `get_feed_posts(source_type, identifier, since, limit)` (tipo desconocido → cae a `list` con warning). `FEEDS[]` declara `type` (+ `uri`, ignorado en `following`); default `list` para back-compat. Cableado en `FetchFeedNode` (via `feed_type` en `FeedState`), `_run_feed_pass` y la tool `summarize_feed`. Verificado en vivo los 3 tipos (list/following/feed). Tests: `tests/test_feed_sources.py` (5). **Cierra M2.**
 
 ### T23 · Externalizar prompts hardcodeados  `infra` `S`  `P1`  ✅ **HECHO**
 Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`. Principio de diseño (CLAUDE.md): config declarativa, no strings incrustados.
