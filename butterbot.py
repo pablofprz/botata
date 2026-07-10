@@ -1471,6 +1471,107 @@ def _tool_search_music(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text="\n".join(lines))
 
 
+# ─── T14 · Video (YouTube Data API v3, stdlib — headless) ──────────────────────
+_YOUTUBE_API = "https://www.googleapis.com/youtube/v3"
+
+
+def _youtube_get(path: str, params: dict) -> dict:
+    """GET a la YouTube Data API (stdlib). Requiere YOUTUBE_API_KEY en el entorno."""
+    key = os.environ.get("YOUTUBE_API_KEY")
+    url = f"{_YOUTUBE_API}/{path}?" + urllib.parse.urlencode({**params, "key": key})
+    with urllib.request.urlopen(urllib.request.Request(url), timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def youtube_top_videos(query: str | None = None, region: str = "AR",
+                       limit: int = 10) -> list[dict] | None:
+    """Videos vía YouTube Data API. Con `query` → search; sin query → mostPopular de la
+    región. Devuelve [{title, url, channel}] o None si falta YOUTUBE_API_KEY."""
+    if not os.environ.get("YOUTUBE_API_KEY"):
+        return None
+    if query:
+        data = _youtube_get("search", {"part": "snippet", "q": query, "type": "video",
+                                       "maxResults": limit, "regionCode": region})
+        out = []
+        for it in data.get("items", []):
+            vid = (it.get("id") or {}).get("videoId")
+            sn  = it.get("snippet") or {}
+            if vid:
+                out.append({"title": sn.get("title", ""),
+                            "url": f"https://www.youtube.com/watch?v={vid}",
+                            "channel": sn.get("channelTitle", "")})
+        return out
+    data = _youtube_get("videos", {"part": "snippet", "chart": "mostPopular",
+                                   "regionCode": region, "maxResults": limit})
+    return [
+        {"title": (it.get("snippet") or {}).get("title", ""),
+         "url": f"https://www.youtube.com/watch?v={it['id']}",
+         "channel": (it.get("snippet") or {}).get("channelTitle", "")}
+        for it in data.get("items", [])
+    ]
+
+
+def fetch_top_video(conn: sqlite3.Connection | None = None,
+                    query: str | None = None) -> dict | None:
+    """Trae un video (mostPopular AR o búsqueda por `query`) que el bot no haya compartido
+    todavía (dedup contra bot_posts). None si no hay key o nada nuevo."""
+    videos = youtube_top_videos(query)
+    if not videos:
+        return None
+    ya_posteados = " ".join(recent_bot_posts(conn, limit=30)) if conn is not None else ""
+    for v in videos:
+        if v["url"] not in ya_posteados:
+            return v
+    return None
+
+
+def get_youtube_transcript(video_url: str, languages: tuple[str, ...] = ("es", "en")) -> str | None:
+    """Transcript de un video de YouTube (best-effort). Portado de maripobot_deprecated:
+    import lazy de `youtube_transcript_api` (dep opcional) + proxy Webshare si hay
+    credenciales. Si la dep no está o falla (bans de IP, sin transcript), devuelve None."""
+    m = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", video_url)
+    if not m:
+        return None
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        log.debug("youtube_transcript_api no instalado — sin transcript")
+        return None
+    try:
+        wu, wp = os.environ.get("WEBSHARE_USER"), os.environ.get("WEBSHARE_PASSWORD")
+        if wu and wp:
+            from youtube_transcript_api.proxies import WebshareProxyConfig
+            api = YouTubeTranscriptApi(
+                proxy_config=WebshareProxyConfig(proxy_username=wu, proxy_password=wp))
+        else:
+            api = YouTubeTranscriptApi()
+        transcript = api.fetch(m.group(1), languages=list(languages))
+        return " ".join(e.text for e in transcript)
+    except Exception as e:
+        log.debug("youtube transcript falló para %s: %s", video_url, e)
+        return None
+
+
+def _tool_share_video(args: dict, ctx: ToolContext) -> ToolResult:
+    """T14: trae un video de YouTube (mostPopular AR, o búsqueda si viene `query`) +
+    transcript best-effort. La opinión la compone el LLM del nodo (reply/feed)."""
+    if not os.environ.get("YOUTUBE_API_KEY"):
+        return ToolResult(text="los videos no están configurados")
+    query = (args.get("query") or "").strip() or None
+    try:
+        video = fetch_top_video(ctx.conn, query)
+    except Exception as e:
+        log.error("share_video: %s", e)
+        return ToolResult(text="no pude traer un video ahora")
+    if not video:
+        return ToolResult(text="no encontré un video para compartir ahora")
+    text = f"video: {video['title']} — {video['url']} (canal: {video['channel']})"
+    transcript = get_youtube_transcript(video["url"])
+    if transcript:
+        text += f"\ntranscript (para tu comentario, recortado): {transcript[:1500]}"
+    return ToolResult(text=text)
+
+
 def _tool_reset_my_memory(args: dict, ctx: ToolContext) -> ToolResult:
     """T11 `resetme`: borra SOLO la memoria del usuario que lo pide (hechos +
     embeddings + eventos propios). Nunca toca datos de otros; no bloquea."""
@@ -1734,6 +1835,22 @@ def build_tool_registry(config: dict | None = None, *,
             "required": ["query"],
         },
         _tool_search_music,
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
+    )
+    reg.register(
+        "share_video",
+        "Trae un video de YouTube: con `query` busca sobre un tema; sin query trae uno de los "
+        "más populares del momento (Argentina). Incluye el transcript si está disponible. Usala "
+        "cuando un usuario pide un video/algo para ver, o cuando el agente quiere compartir un "
+        "video en el feed. Devuelve título, canal, link y (si hay) transcript para comentar.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Opcional: tema/artista/palabras a buscar. Omitir para lo más popular del momento."}
+            },
+            "required": [],
+        },
+        _tool_share_video,
         {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     if config:
