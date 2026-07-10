@@ -14,9 +14,13 @@ import argparse
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -114,6 +118,7 @@ settings = load_json(SETTINGS_PATH)
 BSKY_HANDLE        : str  = settings["BOT_HANDLE"]
 BSKY_PASSWORD      : str  = os.environ["BSKY_PASSWORD"]
 OPENROUTER_API_KEY : str  = os.environ["OPENROUTER_API_KEY"]
+BRAVE_API_KEY      : str | None = os.environ.get("BRAVE_API_KEY")  # opcional (tool web_search, T8)
 ADMIN_HANDLE       : str  = settings["ADMIN_HANDLE"]
 REASONING_MODEL    : str  = settings.get("REASONING_MODEL", "deepseek/deepseek-r1")
 LITE_MODEL         : str  = settings.get("LITE_MODEL") or REASONING_MODEL
@@ -1280,6 +1285,52 @@ def _tool_get_my_recent_posts(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text="\n".join(lines))
 
 
+_BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+
+
+def _brave_search(query: str, count: int = 5) -> list[dict]:
+    """GET a Brave Search (stdlib, sin deps nuevas). Devuelve [{title, url, description}].
+    Levanta en error de red/HTTP (el handler lo maneja)."""
+    qs  = urllib.parse.urlencode({"q": query, "count": count})
+    req = urllib.request.Request(
+        f"{_BRAVE_ENDPOINT}?{qs}",
+        headers={"X-Subscription-Token": BRAVE_API_KEY or "", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    results = (data.get("web") or {}).get("results") or []
+    strip = lambda s: re.sub(r"<[^>]+>", "", s or "").strip()  # Brave marca términos con <strong>
+    return [
+        {"title": strip(r.get("title")), "url": r.get("url", ""),
+         "description": strip(r.get("description"))}
+        for r in results[:count]
+    ]
+
+
+def _tool_web_search(args: dict, ctx: ToolContext) -> ToolResult:
+    """T8: búsqueda web vía Brave. Degradación graceful si falta la key o falla la API."""
+    if not BRAVE_API_KEY:
+        return ToolResult(text="la búsqueda web no está configurada")
+    query = (args.get("query") or "").strip()
+    if not query:
+        return ToolResult(text="necesito algo para buscar")
+    count = max(1, min(int(args.get("count") or 5), 10))
+    try:
+        results = _brave_search(query, count)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return ToolResult(text="estoy limitado para buscar ahora, probá en un rato")
+        log.error("web_search: HTTP %s para '%s'", e.code, query)
+        return ToolResult(text="no pude buscar ahora")
+    except Exception as e:
+        log.error("web_search: falló '%s': %s", query, e)
+        return ToolResult(text="no pude buscar ahora")
+    if not results:
+        return ToolResult(text=f"no encontré resultados para '{query}'")
+    lines = [f"- {r['title']}: {r['description'].strip()} ({r['url']})" for r in results]
+    return ToolResult(text="\n".join(lines))
+
+
 def _tool_reset_my_memory(args: dict, ctx: ToolContext) -> ToolResult:
     """T11 `resetme`: borra SOLO la memoria del usuario que lo pide (hechos +
     embeddings + eventos propios). Nunca toca datos de otros; no bloquea."""
@@ -1513,6 +1564,22 @@ def build_tool_registry(config: dict | None = None, *,
         {"type": "object", "properties": {}, "required": []},
         _make_block_me_tool(bsky),
         {Scope.REPLY, Scope.ADMIN},
+    )
+    reg.register(
+        "web_search",
+        "Busca información actual en la web (Brave Search). Usala cuando el usuario pide "
+        "buscar algo, pregunta por datos actuales/recientes, o necesitás info que no está "
+        "en tu memoria. Devuelve los primeros resultados con título, resumen y link.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Qué buscar, en lenguaje natural."},
+                "count": {"type": "integer", "description": "Cuántos resultados (default 5, máx 10)."},
+            },
+            "required": ["query"],
+        },
+        _tool_web_search,
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     if config:
         reg.apply_config(config)

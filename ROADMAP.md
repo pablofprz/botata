@@ -77,10 +77,9 @@ Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`.
 
 ## M3 · Tools prioritarias  `P1`
 
-### T8 · Tool de búsqueda (Brave)  `tools` `M`
+### T8 · Tool de búsqueda (Brave)  `tools` `M`  ✅ **HECHO**
 - **Acept.:** integración con Brave Search API; tool `web_search(query)` registrada en T1, toggleable.
-- Se dispara cuando un usuario pide buscar algo (o el agente lo decide en feed_reflection si está en scope).
-- Devuelve top resultados resumidos; maneja rate limit / falta de API key con degradación graceful.
+- Impl.: `web_search` (scopes `reply`+`feed_reflection`+`admin`): GET a Brave vía stdlib (`urllib`, sin deps nuevas), `BRAVE_API_KEY` opcional desde `.env` (gitignored). Devuelve top-N (default 5, máx 10) con título/resumen/link; limpia tags HTML de los snippets. **Degradación graceful:** sin key → "no configurada"; HTTP 429 → "estoy limitado"; otro error → "no pude buscar". Verificado en vivo contra Brave. Tests: `tests/test_web_search.py` (7, GET mockeado). **Cierra M3.**
 
 ### T9 · Tool de calendar  `tools` `M`  ✅ **HECHO**
 - **Acept.:** el agente lee/escribe `events` (T4) como tool.
