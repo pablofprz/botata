@@ -8,6 +8,7 @@ posted/
 scrape/
 state/
 context/users/
+context/feeds/
 context/history.md
 context/timeline.md
 context/perfiles.json
