@@ -927,6 +927,10 @@ def purge_user_memory(
             "DELETE FROM relationships WHERE handle_a = ? OR handle_b = ?", (handle, handle)
         ).rowcount
     if drop_profile:
+        # bot_posts.reply_to_handle → users(handle) es NO ACTION: hay que soltar la
+        # referencia antes de borrar la fila (si no, falla el FK). Se preserva el log
+        # de salida del bot, solo se desvincula del handle.
+        conn.execute("UPDATE bot_posts SET reply_to_handle = NULL WHERE reply_to_handle = ?", (handle,))
         conn.execute("DELETE FROM users WHERE handle = ?", (handle,))
     conn.commit()
     return {"facts": len(fact_ids), "events": events, "relationships": rels}

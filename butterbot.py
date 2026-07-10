@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from atproto import Client
+from atproto import Client, models
 from atproto.exceptions import NetworkError as BskyNetworkError, RequestException as BskyRequestException
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
@@ -359,6 +359,30 @@ class BskyClient:
         self._client.app.bsky.notification.update_seen(
             {"seenAt": datetime.now(timezone.utc).isoformat()}
         )
+
+    def block_user(self, handle: str) -> bool:
+        """Bloquea a un usuario creando el record `app.bsky.graph.block`. True si OK.
+
+        T10: NO se testea en vivo (bloquearía una cuenta real). Verificado solo la
+        forma de la API del SDK; la ejecución real queda pendiente de validar a mano.
+        """
+        profile = self.get_profile(handle)
+        if not profile:
+            log.error("block_user: no pude resolver @%s", handle)
+            return False
+        try:
+            self._client.app.bsky.graph.block.create(
+                self._client.me.did,
+                models.AppBskyGraphBlock.Record(
+                    subject=profile.did,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            log.info("block_user: bloqueado @%s (%s)", handle, profile.did)
+            return True
+        except Exception as e:
+            log.error("block_user: falló bloquear @%s: %s", handle, e)
+            return False
 
     def get_profile(self, handle: str):
         """Fetch the full Bluesky profile for a handle. Returns None on error."""
@@ -1270,6 +1294,27 @@ def _tool_reset_my_memory(args: dict, ctx: ToolContext) -> ToolResult:
     ))
 
 
+def _make_block_me_tool(bsky: "BskyClient | None") -> ToolHandler:
+    """T10 `blockme`: bloquea al usuario que lo pide y borra TODA su memoria
+    (facts + embeddings + events + relationships + perfil). Se cierra sobre bsky."""
+    def _block_me(args: dict, ctx: ToolContext) -> ToolResult:
+        handle = ctx.state.get("author_handle")
+        if not handle:
+            return ToolResult(text="no pude identificar tu cuenta para bloquearte")
+        # Bloquear primero: si falla, NO borramos nada (evita dejar al usuario sin
+        # memoria pero interactuando).
+        if bsky is None or not bsky.block_user(handle):
+            return ToolResult(text="no pude bloquearte ahora, probá de nuevo en un rato (no borré nada)")
+        counts = dbmod.purge_user_memory(
+            ctx.conn, handle, include_relationships=True, drop_profile=True)
+        log.info("blockme: @%s bloqueado + memoria purgada %s", handle, counts)
+        return ToolResult(text=(
+            f"listo, te bloqueé y borré todo lo que sabía de vos "
+            f"({counts['facts']} hechos, {counts['events']} eventos). chau."
+        ))
+    return _block_me
+
+
 def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | None") -> ToolHandler:
     """Handler de `summarize_feed`: resume en vivo los posts recientes de un feed.
     Se cierra sobre bsky+router (no viven en ToolContext). Scope REPLY, toggleable."""
@@ -1457,6 +1502,16 @@ def build_tool_registry(config: dict | None = None, *,
         "Nunca borra datos de otras personas y no bloquea a nadie.",
         {"type": "object", "properties": {}, "required": []},
         _tool_reset_my_memory,
+        {Scope.REPLY, Scope.ADMIN},
+    )
+    reg.register(
+        "block_me",
+        "Bloquea al usuario que te habla Y borra TODA su memoria (hechos, embeddings, "
+        "eventos, relaciones y perfil). Acción destructiva e irreversible. Llamala SOLO "
+        "cuando el usuario pide EXPLÍCITAMENTE que lo bloquees (ej. '/blockme', "
+        "'bloqueame y olvidate de mí'). Nunca bloquea ni borra a terceros.",
+        {"type": "object", "properties": {}, "required": []},
+        _make_block_me_tool(bsky),
         {Scope.REPLY, Scope.ADMIN},
     )
     if config:
