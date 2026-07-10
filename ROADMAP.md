@@ -98,7 +98,12 @@ Un usuario puede pedirle al bot un resumen en vivo del feed de la comunidad.
 - **Acept.:** tool registrada en el framework (T1), **toggleable** por config (`settings.json` → `TOOLS.summarize_feed`, hoy `enabled:true` scope `reply`). No todos los despliegues la querrán habilitada para usuarios.
 - Impl.: `summarize_feed` (scope REPLY) se cierra sobre bsky+router; fetchea la ventana de las últimas 6h del feed principal (o `feed_name`), resume con rol `feed_summary` y **prompt propio** `prompts/summarize_feed_tool_prompt.md` (sin escotilla "NADA": on-demand siempre devuelve algo). `build_tool_registry(config, *, bsky, router)`. **Se le agregó fase de tool_calling a `GenerateReplyNode`** (antes solo `complete`): si hay tools scope REPLY habilitadas, el LLM puede llamarlas y el resultado se inyecta al contexto de la respuesta. Tests: `tests/test_reply_tools.py` (6).
 - **Costo:** con la fase de tools activa, cada reply hace una llamada extra de reasoning (tool phase + generación). Si molesta, se apaga con `enabled:false`.
-- Tapa parcialmente el gap del reply (antes decía "no tengo acceso al feed"); queda pendiente que el bot sepa contestar por su propia actividad/posts, no solo resumir el feed ajeno.
+- Tapa parcialmente el gap del reply (antes decía "no tengo acceso al feed"); el gap de actividad propia lo cierra T25.
+
+### T25 · Tool `get_my_recent_posts` (actividad propia del bot)  `tools` `S`  ✅ **HECHO**
+El bot puede contestar sobre lo que él mismo viene posteando/respondiendo, no solo resumir el feed ajeno.
+- **Acept.:** tool registrada (T1), toggleable; lee `bot_posts` (log de salida) y responde "qué venís diciendo / qué le respondiste a @X".
+- Impl.: helper `recent_bot_activity(conn, limit, reply_to)` + tool `get_my_recent_posts` (scopes `reply`+`admin`, arg opcional `handle` para filtrar a quién respondió). Aprovecha la fase de tool_calling de `GenerateReplyNode` (T24). Prompt admin actualizado. Tests: `tests/test_bot_activity_tool.py` (5).
 
 ---
 

@@ -197,6 +197,23 @@ def recent_bot_posts(conn: sqlite3.Connection, limit: int = 10) -> list[str]:
     return [r[0] for r in rows]
 
 
+def recent_bot_activity(
+    conn: sqlite3.Connection, limit: int = 8, reply_to: str | None = None
+) -> list[dict]:
+    """Actividad reciente del bot (T25: que pueda hablar de lo que hizo).
+
+    Devuelve posts con fecha + a quién le respondió. `reply_to` filtra por handle
+    respondido (ej. "¿qué le contestaste a @X?")."""
+    q      = "SELECT posted_at, text, reply_to_handle, in_reply_to FROM bot_posts WHERE text IS NOT NULL"
+    params: list = []
+    if reply_to:
+        q += " AND reply_to_handle = ?"
+        params.append(reply_to)
+    q += " ORDER BY posted_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(q, tuple(params)).fetchall()]
+
+
 def _norm_text(s: str) -> str:
     """Normaliza para comparación de duplicados: minúsculas, espacios colapsados."""
     return " ".join(s.lower().split())
@@ -1222,6 +1239,23 @@ def _tool_create_event(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text=f"listo, agendé '{title}' para {who} el {when} (id {eid})")
 
 
+def _tool_get_my_recent_posts(args: dict, ctx: ToolContext) -> ToolResult:
+    """T25: el bot consulta su propia actividad reciente (lo que posteó/respondió)."""
+    limit    = int(args.get("limit") or 8)
+    reply_to = (args.get("handle") or "").lstrip("@").strip() or None
+    rows = recent_bot_activity(ctx.conn, limit=limit, reply_to=reply_to)
+    if not rows:
+        if reply_to:
+            return ToolResult(text=f"no encontré posts míos respondiéndole a @{reply_to}")
+        return ToolResult(text="no tengo posts recientes registrados")
+    lines = []
+    for r in rows:
+        when = (r.get("posted_at") or "")[:16].replace("T", " ")
+        tgt  = f" (respuesta a @{r['reply_to_handle']})" if r.get("reply_to_handle") else ""
+        lines.append(f"{when}: {r['text']}{tgt}")
+    return ToolResult(text="\n".join(lines))
+
+
 def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | None") -> ToolHandler:
     """Handler de `summarize_feed`: resume en vivo los posts recientes de un feed.
     Se cierra sobre bsky+router (no viven en ToolContext). Scope REPLY, toggleable."""
@@ -1384,6 +1418,22 @@ def build_tool_registry(config: dict | None = None, *,
         },
         _tool_create_event,
         {Scope.ADMIN},
+    )
+    reg.register(
+        "get_my_recent_posts",
+        "Consulta lo que VOS (el bot) venís posteando y respondiendo últimamente. Usala "
+        "cuando un usuario pregunta qué estuviste diciendo, qué posteaste, de qué hablaste, "
+        "o qué le respondiste a alguien. Opcional: 'handle' para filtrar a quién le respondiste.",
+        {
+            "type": "object",
+            "properties": {
+                "limit":  {"type": "integer", "description": "Cuántos posts traer (default 8)."},
+                "handle": {"type": "string", "description": "Opcional: solo posts que respondieron a este handle (sin @)."},
+            },
+            "required": [],
+        },
+        _tool_get_my_recent_posts,
+        {Scope.REPLY, Scope.ADMIN},
     )
     if config:
         reg.apply_config(config)
