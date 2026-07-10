@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -1391,6 +1392,85 @@ def _tool_web_search(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text="\n".join(lines))
 
 
+# ─── T13 · Música (Spotify, Client Credentials — headless, sin OAuth ni deps) ──
+_SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+_SPOTIFY_API       = "https://api.spotify.com/v1"
+_spotify_token_cache: dict = {"value": None, "exp": 0.0}
+
+
+def _spotify_token() -> str | None:
+    """Access token vía Client Credentials (app-only, playlists públicas). Cacheado."""
+    cid    = os.environ.get("SPOTIFY_CLIENT_ID")
+    secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
+    if not cid or not secret:
+        return None
+    now = time.time()
+    if _spotify_token_cache["value"] and now < _spotify_token_cache["exp"]:
+        return _spotify_token_cache["value"]
+    auth = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+    data = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
+    req  = urllib.request.Request(
+        _SPOTIFY_TOKEN_URL, data=data,
+        headers={"Authorization": f"Basic {auth}",
+                 "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        tok = json.loads(resp.read().decode("utf-8"))
+    _spotify_token_cache["value"] = tok["access_token"]
+    _spotify_token_cache["exp"]   = now + tok.get("expires_in", 3600) - 60
+    return tok["access_token"]
+
+
+def _spotify_get(path: str, token: str, params: dict | None = None) -> dict:
+    url = f"{_SPOTIFY_API}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def search_spotify_tracks(query: str, limit: int = 5, market: str = "AR") -> list[dict] | None:
+    """Busca temas en Spotify (endpoint /search, app-only Client Credentials — headless,
+    sin OAuth). Devuelve [{title, artist, album, url}] o None si no hay credenciales.
+
+    Se usa /search en vez del endpoint de playlists porque Spotify bloquea (403) la
+    lectura de tracks de playlist con Client Credentials; /search sí está permitido.
+    """
+    token = _spotify_token()
+    if not token:
+        return None
+    data  = _spotify_get("/search", token,
+                        {"q": query, "type": "track", "limit": limit, "market": market})
+    items = (data.get("tracks") or {}).get("items") or []
+    return [
+        {
+            "title":  t["name"],
+            "artist": ", ".join(a["name"] for a in t["artists"]),
+            "album":  t["album"]["name"],
+            "url":    t["external_urls"]["spotify"],
+        }
+        for t in items
+    ]
+
+
+def _tool_search_music(args: dict, ctx: ToolContext) -> ToolResult:
+    """T13: busca temas en Spotify por consulta (canción/artista/vibe) y devuelve
+    título+artista+link. La opinión la compone el LLM del nodo (reply/feed)."""
+    query = (args.get("query") or "").strip()
+    if not query:
+        return ToolResult(text="necesito una canción, artista o vibe para buscar")
+    if not (os.environ.get("SPOTIFY_CLIENT_ID") and os.environ.get("SPOTIFY_CLIENT_SECRET")):
+        return ToolResult(text="la música no está configurada")
+    try:
+        tracks = search_spotify_tracks(query, limit=5)
+    except Exception as e:
+        log.error("search_music: %s", e)
+        return ToolResult(text="no pude buscar música ahora")
+    if not tracks:
+        return ToolResult(text=f"no encontré temas para '{query}'")
+    lines = [f"- {t['title']} — {t['artist']} ({t['url']})" for t in tracks]
+    return ToolResult(text="\n".join(lines))
+
+
 def _tool_reset_my_memory(args: dict, ctx: ToolContext) -> ToolResult:
     """T11 `resetme`: borra SOLO la memoria del usuario que lo pide (hechos +
     embeddings + eventos propios). Nunca toca datos de otros; no bloquea."""
@@ -1639,6 +1719,21 @@ def build_tool_registry(config: dict | None = None, *,
             "required": ["query"],
         },
         _tool_web_search,
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
+    )
+    reg.register(
+        "search_music",
+        "Busca canciones en Spotify por consulta (título, artista o vibe) y devuelve los "
+        "primeros resultados con título, artista y link. Usala cuando un usuario pide música, "
+        "una canción o un artista, o cuando el agente quiere compartir un tema en el feed.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Qué buscar: canción, artista, o un vibe (ej. 'rock nacional melancólico')."}
+            },
+            "required": ["query"],
+        },
+        _tool_search_music,
         {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     if config:
