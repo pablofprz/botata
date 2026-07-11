@@ -161,9 +161,10 @@ Butterbot consume MCP servers externos como tools; cada conector futuro pasa de 
   * **Navegador: innecesario** mientras RSS siga vivo (queda como plan C).
   * JSON público (`hot.json`): 403 sin auth — muerto, confirma T14.
 
-### T18 · Reddit ingestion (MCP server)  `scraper` `M`
+### T18 · Reddit ingestion (MCP server)  `scraper` `M`  ✅ **HECHO**
 - **Acept.:** MCP server `reddit` (FastMCP, stdio) **vía RSS** (decisión T17). Solo lectura de subs, sin postear. Reemplaza el stub `RedditSource`; butterbot lo consume vía T29.
 - Requisitos del diseño (de las mediciones de T17): **rate limiter interno ≥61s entre requests** (global al server, con cola o cache corto); parser **Atom** (stdlib `xml`, el `fetch_rss` de T15 parsea RSS 2.0 — extender o duplicar); UA descriptivo fijo; degradación graceful ante 429 (respetar `x-ratelimit-reset`).
+- Impl.: `mcp_servers/reddit_server.py` (primer server real sobre la plantilla T29; carpeta nueva `mcp_servers/`). Tool única `get_subreddit_posts(subreddit, sort, time_window, limit)` — acepta multireddit `a+b`; sorts hot/new/top/rising; devuelve JSON title/url/author/published/summary. `_fetch` serializa con lock: espera bloqueante hasta el slot de 61s, cache TTL 10 min por URL, retry único ante 429 si `Retry-After` ≤ 90s. Validación estricta de subreddit/sort/window (anti path-traversal). Declarado en `settings.json` → MCP con **`enabled:false`** (`call_timeout_s:90` porque una llamada puede esperar el slot) — el admin lo prende. Stub `RedditSource` borrado de `sources.py`. **Verificado en vivo** (top diario de r/argentina por el pipeline completo T29→T18). Tests: `tests/test_reddit_server.py` (11: parsing/URLs/limiter/cache sin red + spawn E2E).
 
 ### T19 · Scraper X (MCP server)  `scraper` `L`
 - **Acept.:** X no tiene API libre → vía navegador o investigar otra. MCP server `x` independiente; reemplaza el stub `TwitterSource`.

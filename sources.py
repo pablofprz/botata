@@ -376,17 +376,10 @@ _DEFAULT_UA = (
 )
 
 
-# ─── Ganchos: Reddit / X (interfaz lista, sin implementar) ───────────────────
-class RedditSource(Source):
-    platform = "reddit"
-
-    def fetch_recent(self, target: str, limit: int) -> list[SourceItem]:
-        raise NotImplementedError(
-            "Reddit: preferir la API oficial (PRAW) antes que navegador — es estable "
-            "y gratis. Adaptador pendiente."
-        )
-
-
+# ─── Ganchos: X (interfaz lista, sin implementar) ────────────────────────────
+# Reddit ya NO va por Source: es un MCP server (mcp_servers/reddit_server.py,
+# T18) que butterbot consume vía el cliente MCP (T29). X seguirá el mismo
+# camino cuando se implemente (T19).
 class TwitterSource(Source):
     platform = "twitter"
 
