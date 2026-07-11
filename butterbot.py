@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+from html import unescape as _html_unescape
 import sqlite3
 import sys
 import time
@@ -353,6 +354,97 @@ class MentionState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
+# Rich text: facets de link + tarjeta de preview (embed external)
+# ---------------------------------------------------------------------------
+# Bluesky no autodetecta links: un URL en texto plano no es clickable ni genera
+# preview. Hay que declarar facets (para el link) y un embed external (la tarjeta
+# con título/descripción/miniatura, vía OpenGraph del sitio). Genérico: sirve para
+# cualquier link que el bot incluya (Spotify, YouTube, noticias, web).
+
+# URL http(s) hasta el primer espacio; recortamos puntuación de cierre al final.
+_URL_RE = re.compile(r"https?://[^\s]+")
+_OG_UA = "Mozilla/5.0 (compatible; butterbot/1.0; +https://bsky.app)"
+
+
+def _find_urls_with_offsets(text: str) -> list[tuple[str, int, int]]:
+    """URLs en `text` con offsets en BYTES UTF-8 (lo que exige facet.index de Bluesky)."""
+    out: list[tuple[str, int, int]] = []
+    for m in _URL_RE.finditer(text):
+        url = m.group(0).rstrip(").,;]'\"")  # no tragarse puntuación de cierre
+        byte_start = len(text[: m.start()].encode("utf-8"))
+        byte_end = byte_start + len(url.encode("utf-8"))
+        out.append((url, byte_start, byte_end))
+    return out
+
+
+def build_link_facets(text: str):
+    """Facets de tipo link para cada URL del texto → el URL queda clickable."""
+    facets = []
+    for url, bs, be in _find_urls_with_offsets(text):
+        facets.append(
+            models.AppBskyRichtextFacet.Main(
+                features=[models.AppBskyRichtextFacet.Link(uri=url)],
+                index=models.AppBskyRichtextFacet.ByteSlice(byte_start=bs, byte_end=be),
+            )
+        )
+    return facets
+
+
+def _meta_content(html: str, prop: str) -> str | None:
+    """Extrae el content de un <meta property|name="prop"> (orden de atributos indistinto)."""
+    p = re.escape(prop)
+    for pat in (
+        rf'<meta[^>]+(?:property|name)=["\']{p}["\'][^>]+content=["\']([^"\']*)["\']',
+        rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{p}["\']',
+    ):
+        m = re.search(pat, html, re.I)
+        if m:
+            return _html_unescape(m.group(1)).strip()
+    return None
+
+
+def _youtube_oembed(url: str) -> dict | None:
+    """YouTube sirve una página de consentimiento sin OG tags a los bots; su oEmbed
+    devuelve título, canal y miniatura sin scrapear. Devuelve {title, description, image}."""
+    if not re.search(r"(youtube\.com/watch|youtu\.be/)", url):
+        return None
+    try:
+        api = "https://www.youtube.com/oembed?" + urllib.parse.urlencode({"url": url, "format": "json"})
+        req = urllib.request.Request(api, headers={"User-Agent": _OG_UA})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore"))
+    except Exception as e:
+        log.debug("YouTube oEmbed falló %s: %s", url, e)
+        return None
+    return {"title": data.get("title") or url,
+            "description": data.get("author_name") or "",
+            "image": data.get("thumbnail_url")}
+
+
+def _fetch_og_card(url: str) -> dict | None:
+    """Baja el OpenGraph del link (best-effort, stdlib). Devuelve {title, description, image}."""
+    yt = _youtube_oembed(url)
+    if yt:
+        return yt
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _OG_UA})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            if "html" not in (resp.headers.get("Content-Type") or "").lower():
+                return None
+            html = resp.read(200_000).decode("utf-8", "ignore")
+    except Exception as e:
+        log.debug("OG fetch falló %s: %s", url, e)
+        return None
+    title = _meta_content(html, "og:title") or _meta_content(html, "twitter:title")
+    desc = _meta_content(html, "og:description") or _meta_content(html, "twitter:description") or ""
+    image = _meta_content(html, "og:image") or _meta_content(html, "twitter:image")
+    if not title:
+        m = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        title = _html_unescape(m.group(1)).strip() if m else url
+    return {"title": title, "description": desc, "image": image}
+
+
+# ---------------------------------------------------------------------------
 # Bluesky client
 # ---------------------------------------------------------------------------
 
@@ -625,6 +717,26 @@ class BskyClient:
             log.warning("get_feed_posts: tipo de fuente desconocido '%s' → uso 'list'", source_type)
         return self.get_list_feed(identifier or "", since, limit)
 
+    def _external_embed(self, url: str):
+        """Tarjeta de preview (embed external) para `url`: baja OG + sube la miniatura
+        como blob. Best-effort: si algo falla, devuelve None (se postea sin tarjeta)."""
+        card = _fetch_og_card(url)
+        if not card:
+            return None
+        thumb = None
+        if card.get("image"):
+            try:
+                req = urllib.request.Request(card["image"], headers={"User-Agent": _OG_UA})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    thumb = self._client.upload_blob(r.read(2_000_000)).blob
+            except Exception as e:
+                log.debug("thumb upload falló %s: %s", card["image"], e)
+        external = models.AppBskyEmbedExternal.External(
+            uri=url, title=(card["title"] or url)[:300], description=(card["description"] or "")[:1000],
+            thumb=thumb,
+        )
+        return models.AppBskyEmbedExternal.Main(external=external)
+
     def reply(self, text: str, parent_uri: str, parent_cid: str,
               root_uri: str, root_cid: str, image_path: str | None = None) -> str:
         """
@@ -632,20 +744,26 @@ class BskyClient:
         parent = immediate post being replied to.
         root   = original post that started the thread.
         """
+        text = text[:300]
         reply_to = {
             "root"  : {"uri": root_uri,   "cid": root_cid},
             "parent": {"uri": parent_uri, "cid": parent_cid},
         }
+        facets = build_link_facets(text) or None
         if image_path:
             img_bytes = Path(image_path).read_bytes()
             resp = self._client.send_image(
-                text=text[:300],
+                text=text,
                 image=img_bytes,
                 image_alt=text[:100],
                 reply_to=reply_to,
+                facets=facets,
             )
         else:
-            resp = self._client.send_post(text=text[:300], reply_to=reply_to)
+            # Tarjeta de preview del primer link (Bluesky admite un solo embed).
+            urls = _find_urls_with_offsets(text)
+            embed = self._external_embed(urls[0][0]) if urls else None
+            resp = self._client.send_post(text=text, reply_to=reply_to, facets=facets, embed=embed)
         return resp.uri
 
 
@@ -665,11 +783,14 @@ class BskyClient:
             else:
                 # No punctuation found — cut at last space
                 text = cut[: cut.rfind(" ")] if " " in cut else cut
+        facets = build_link_facets(text) or None
         if image_path:
             resp = self._client.send_image(
-                text=text, image=Path(image_path).read_bytes(), image_alt=text[:100])
+                text=text, image=Path(image_path).read_bytes(), image_alt=text[:100], facets=facets)
         else:
-            resp = self._client.send_post(text=text)
+            urls = _find_urls_with_offsets(text)
+            embed = self._external_embed(urls[0][0]) if urls else None
+            resp = self._client.send_post(text=text, facets=facets, embed=embed)
         return resp.uri
 
     def _extract_text(self, record) -> str:
@@ -2196,17 +2317,24 @@ class GenerateReplyNode:
         if self.registry is not None:
             reply_tools = self.registry.openai_schemas(Scope.REPLY)
             if reply_tools:
-                tool_system = "\n".join(parts) + (
-                    "\n---\nSi para responder necesitás información en vivo (por ejemplo, "
-                    "resumir el feed de la comunidad) llamá a la tool apropiada. Si no hace "
-                    "falta, no llames ninguna."
-                )
+                tool_names = [t["function"]["name"] for t in reply_tools]
+                log.info("GenerateReplyNode: fase de tools con %d disponibles: %s",
+                         len(tool_names), ", ".join(tool_names))
+                # System liviano y enfocado en decidir tools (como el nodo admin);
+                # NO el volcado de persona, que empuja al modelo a charlar en vez de
+                # llamar una tool. El SOUL completo se usa en la fase 2 (el reply real).
+                tool_system = f"{current_datetime_line()}\n\n" + load_text(PROMPTS_DIR / "reply_tools_prompt.md")
                 try:
-                    _, tool_calls = self.llm.call_with_tools(tool_system, query, reply_tools)
+                    text_out, tool_calls = self.llm.call_with_tools(tool_system, query, reply_tools)
+                    if not tool_calls:
+                        log.info("GenerateReplyNode: el modelo NO llamó ninguna tool; "
+                                 "respondió texto: %r", (text_out or "")[:200])
                     for call in tool_calls or []:
                         cname = call.function.name
                         cargs = json.loads(call.function.arguments)
+                        log.info("GenerateReplyNode: llamando tool %s con args %s", cname, cargs)
                         outcome = self.registry.execute(cname, cargs, ToolContext(state=state, conn=self.conn))
+                        log.info("GenerateReplyNode: resultado de %s: %r", cname, (outcome.text or "")[:200])
                         parts.append(f"\n---\nResultado de {cname}: {outcome.text}")
                 except Exception as e:
                     log.warning("GenerateReplyNode: fase de tools falló: %s", e)
