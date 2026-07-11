@@ -132,6 +132,7 @@ OPENAI_ENDPOINT    : str  = settings.get("OPENAI_ENDPOINT", "https://openrouter.
 POLL_INTERVAL      : int  = settings.get("POLL_INTERVAL_SECONDS", 60)
 FEEDS_CONFIG       : list = settings.get("FEEDS", [])
 TOOLS_CONFIG       : dict = settings.get("TOOLS", {})
+MCP_CONFIG         : dict = settings.get("MCP", {})
 MODELS_CONFIG      : dict | None = settings.get("MODELS")
 
 
@@ -1378,7 +1379,7 @@ def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None
     db       = init_db()
     bsky     = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
     router   = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router)
+    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
     graph    = build_feed_graph(router, bsky, db, registry)
     _run_feed_pass(graph, force_post=force_post, full_backfill=full_backfill,
                    respect_interval=False)
@@ -1961,12 +1962,17 @@ def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | 
 
 def build_tool_registry(config: dict | None = None, *,
                         bsky: "BskyClient | None" = None,
-                        router: "ModelRouter | None" = None) -> ToolRegistry:
+                        router: "ModelRouter | None" = None,
+                        mcp_config: dict | None = None) -> ToolRegistry:
     """Registra las tools concretas y aplica overrides de settings.json → sección TOOLS.
 
     Las tools de memoria/imágenes son scope ADMIN. `summarize_feed` es scope REPLY
     (usuarios) y se cierra sobre bsky+router para resumir el feed en vivo; se
     activa/desactiva por config como cualquier otra tool.
+
+    `mcp_config` (settings.json → MCP, T29): conecta MCP servers externos y
+    registra sus tools ANTES de `apply_config`, así la sección TOOLS también
+    las puede overridear. Import lazy: sin config MCP el SDK ni se carga.
     """
     reg = ToolRegistry()
     reg.register(
@@ -2175,6 +2181,10 @@ def build_tool_registry(config: dict | None = None, *,
         _tool_get_news,
         {Scope.REPLY, Scope.ADMIN},
     )
+    if mcp_config:
+        import mcp_tools  # lazy: solo si hay servers MCP configurados
+        n = mcp_tools.register_mcp_tools(reg, mcp_config)
+        log.info("MCP: %d tool(s) externas registradas", n)
     if config:
         reg.apply_config(config)
     return reg
@@ -2631,7 +2641,7 @@ def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
                                                 → update_profile → END
     Cada nodo recibe un RoleLLM ligado a su rol; el router hace fallback por endpoint.
     """
-    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router)
+    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
     log.info("Tool registry: %s", ", ".join(registry.names()) or "(vacío)")
 
     classify       = ClassifyNode(RoleLLM(router, "classify"))
@@ -2749,7 +2759,7 @@ def run(mode: str) -> None:
     log.info("Router de modelos: %s", router.describe())
 
     graph      = build_graph(router, bsky, db)
-    registry   = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router)
+    registry   = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
     feed_graph = build_feed_graph(router, bsky, db, registry)
 
     log.info("Graph compiled. Polling every %ds. Admin: %s", POLL_INTERVAL, ADMIN_HANDLE)

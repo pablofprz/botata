@@ -26,6 +26,8 @@ dependencies = [
     "patchright>=1.44",  # playwright parcheado (stealth) — camino browser de IG
     # Scraping de Instagram vía API privada mobile (sin navegador, sin fingerprint)
     "instagrapi>=2.0",
+    # Cliente MCP: conectores externos como tools (T29)
+    "mcp>=1.28",
 ]
 
 [project.optional-dependencies]
@@ -40,7 +42,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["butterbot", "db"]
+py-modules = ["butterbot", "db", "mcp_tools"]
 
 # --- ruff: tipado estricto, sin opinionated noise ---------------------------
 [tool.ruff]

@@ -139,13 +139,14 @@ El bot puede contestar sobre lo que él mismo viene posteando/respondiendo, no s
 (T17–T20) nacen como **MCP servers** independientes (procesos stdio, deps y crashes
 aislados, reutilizables desde otros agentes), no como módulos internos de butterbot.
 
-### T29 · Cliente MCP → ToolRegistry  `infra` `M`  *(primero de M5)*
+### T29 · Cliente MCP → ToolRegistry  `infra` `M`  *(primero de M5)*  ✅ **HECHO**
 Butterbot consume MCP servers externos como tools; cada conector futuro pasa de "tarea" a "línea de config".
 - **Acept.:** módulo `mcp_tools.py` (SDK oficial `mcp`): al arranque lee `settings.json` → sección `MCP` (`{server: {transport: stdio|http, command/url, enabled, scopes, tool_filter}}`), conecta, hace `tools/list` y registra cada tool en el `ToolRegistry` (T1) con handler proxy a `tools/call`.
 - Nombres prefijados por server (`reddit_top_posts`) para evitar colisiones. Puente async→sync contenido en el módulo (event loop en thread de fondo).
 - **Seguridad (regla dura):** tools MCP nacen con scope `admin`; promover a `reply`/`feed_reflection` es opt-in explícito por tool en config — el bot es público y scope reply = superficie de prompt injection.
 - Degradación graceful: server caído al arranque → se loguea y se omite (no tira el bot); error en `tools/call` → `ToolResult` de error, no excepción.
 - El calendario interno (`events`, T4/T9) sigue nativo — dominio core acoplado a la DB. Calendarios externos (ej. Google Calendar) = server MCP de terceros vía config, sin código.
+- Impl.: `mcp_tools.py` (infra genérica estilo `tools.py`, no conoce butterbot). `MCPBridge` = event loop en thread daemon; **cada server vive en una task dedicada** que entra/sale de sus propios context managers (los cancel scopes de anyio no cruzan tasks — gotcha del SDK). Sesiones quedan abiertas; reuso si el mismo proceso construye dos registries (run() lo hace); `shutdown()` vía `atexit`. Registro **antes** de `apply_config` → la sección `TOOLS` overridea tools MCP por nombre prefijado. Import lazy: sin sección `MCP` el SDK ni se carga. Handler proxy **jamás lanza** (el call site admin ejecuta sin try/except); v1 texto-only (content blocks de imagen = pendiente). `tests/mcp_echo_server.py` = plantilla FastMCP para los servers de T18–T20. Verificado en vivo (registro + execute + server roto omitido). Tests: `tests/test_mcp_tools.py` (13, unit + E2E stdio real).
 
 ### T16 · Tool de navegador agéntica  `tools` `M`
 - **Acept.:** el usuario puede mandar el bot a una página y que acceda. **OFF por default**, con **aviso de riesgo** explícito al activarla.
