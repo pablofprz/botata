@@ -150,8 +150,10 @@ Butterbot consume MCP servers externos como tools; cada conector futuro pasa de 
 
 ### T16 · Tool de navegador agéntica  `tools` `M`
 - **Acept.:** el usuario puede mandar el bot a una página y que acceda. **OFF por default**, con **aviso de riesgo** explícito al activarla.
-- Guardrails: allowlist/denylist de dominios, límite de acciones, sin descarga/ejecución arbitraria. Reusa `browser.py`.
+- Guardrails: allowlist/denylist de dominios, límite de acciones, sin descarga/ejecución arbitraria.
 - **Servida como MCP server** (misma fragilidad/deps pesadas que los scrapers); butterbot la consume vía T29.
+- **DECISIÓN (investigación 2026-07-11): reusar `@playwright/mcp` de Microsoft — cero código propio.** Verificado en vivo vía el cliente T29 (spawn `npx @playwright/mcp --headless --isolated --allowed-origins ...`): navegación OK y dominio fuera de la allowlist bloqueado (`ERR_BLOCKED_BY_CLIENT`) con error graceful. Los guardrails de la acept. mapean 1:1 a flags oficiales (`--allowed-origins`/`--blocked-origins`, `--headless`, `--isolated`, file access restringido a workspace) + `tool_filter` de T29 para recortar el tool set (25+ tools → navigate/snapshot/close). Requiere **Node 18+** (dev OK v24; verificar en Linux Mint prod). `browser.py`/patchright NO se toca: es la capa *stealth con sesión logueada* para T19/T20 — problema distinto (Playwright MCP no es stealth).
+- **Pendiente para cerrar T16:** resolver que el snapshot vuelva inline (la versión actual lo escribe a archivo `.playwright-mcp/*.yml` y devuelve un link — el LLM necesita el contenido en el ToolResult); config final en settings.json (off) + aviso de riesgo documentado.
 
 ### T17 · Reddit — spike de API  `scraper` `S`  ✅ **HECHO**
 - **Acept.:** investigar viabilidad de la API oficial (PRAW/OAuth read-only) hoy — Reddit devuelve 403 sin auth (visto en T14). Documentar decisión: API / RSS / navegador.
