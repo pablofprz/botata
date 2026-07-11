@@ -27,8 +27,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import httpx
 from atproto import Client, models
 from atproto.exceptions import NetworkError as BskyNetworkError, RequestException as BskyRequestException
+from atproto_client.request import Request as AtprotoRequest
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 from pydantic import AliasChoices, BaseModel, Field
@@ -450,9 +452,25 @@ def _fetch_og_card(url: str) -> dict | None:
 
 class BskyClient:
 
+    # El default de httpx (5s connect) es muy justo para la red de prod;
+    # un ConnectTimeout transitorio en el arranque no debe matar el proceso.
+    _LOGIN_RETRIES = 4
+    _LOGIN_BACKOFF = 5  # segundos, exponencial: 5, 10, 20, 40
+
     def __init__(self, handle: str, password: str):
-        self._client = Client()
-        self._client.login(handle, password)
+        request = AtprotoRequest(timeout=httpx.Timeout(30.0, connect=15.0))
+        self._client = Client(request=request)
+        for attempt in range(1, self._LOGIN_RETRIES + 1):
+            try:
+                self._client.login(handle, password)
+                break
+            except BskyNetworkError as e:
+                if attempt == self._LOGIN_RETRIES:
+                    raise
+                wait = self._LOGIN_BACKOFF * (2 ** (attempt - 1))
+                log.warning("Bluesky login failed (%s), retry %d/%d in %ds",
+                            type(e).__name__, attempt, self._LOGIN_RETRIES, wait)
+                time.sleep(wait)
         log.info("Logged in as %s", handle)
 
     def get_mentions(self) -> list[dict]:
