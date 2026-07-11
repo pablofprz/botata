@@ -153,11 +153,17 @@ Butterbot consume MCP servers externos como tools; cada conector futuro pasa de 
 - Guardrails: allowlist/denylist de dominios, límite de acciones, sin descarga/ejecución arbitraria. Reusa `browser.py`.
 - **Servida como MCP server** (misma fragilidad/deps pesadas que los scrapers); butterbot la consume vía T29.
 
-### T17 · Reddit — spike de API  `scraper` `S`
+### T17 · Reddit — spike de API  `scraper` `S`  ✅ **HECHO**
 - **Acept.:** investigar viabilidad de la API oficial (PRAW/OAuth read-only) hoy — Reddit devuelve 403 sin auth (visto en T14). Documentar decisión: API / RSS / navegador.
+- **DECISIÓN: RSS.** Verificado en vivo (2026-07-11) + fuentes:
+  * **API OAuth: descartada.** Desde fines de 2025 las apps nuevas pasan por aprobación manual (Responsible Builder Policy); proyectos personales/hobby son la categoría más rechazada, sin SLA (días a semanas, o silencio). Free tier teórico: 100 QPM no-comercial — irrelevante si no aprueban la app. No hay app preexistente de maripobot (usaba RSS). Reevaluar solo si Reddit afloja el gate.
+  * **RSS: funciona hoy sin credenciales.** `https://www.reddit.com/r/{sub}/{sort}/.rss` (Atom, no RSS 2.0) devuelve 200 con UA descriptivo; soporta sorts (`new`, `top/.rss?t=week`) y multireddit (`sub1+sub2`). **Límite duro medido:** 1 request/min por IP, GLOBAL (headers `x-ratelimit-remaining=0.0` tras 1 req; 429 inmediato al segundo hit; confirmado por reportes públicos de junio 2026). Compatible con el patrón butterbot: pases espaciados por `interval_hours`, pocas fuentes, ≥61s entre requests dentro de un pase.
+  * **Navegador: innecesario** mientras RSS siga vivo (queda como plan C).
+  * JSON público (`hot.json`): 403 sin auth — muerto, confirma T14.
 
 ### T18 · Reddit ingestion (MCP server)  `scraper` `M`
-- **Acept.:** MCP server `reddit` (FastMCP, stdio) según el resultado de T17. Solo lectura de subs, sin postear. Reemplaza el stub `RedditSource`; butterbot lo consume vía T29.
+- **Acept.:** MCP server `reddit` (FastMCP, stdio) **vía RSS** (decisión T17). Solo lectura de subs, sin postear. Reemplaza el stub `RedditSource`; butterbot lo consume vía T29.
+- Requisitos del diseño (de las mediciones de T17): **rate limiter interno ≥61s entre requests** (global al server, con cola o cache corto); parser **Atom** (stdlib `xml`, el `fetch_rss` de T15 parsea RSS 2.0 — extender o duplicar); UA descriptivo fijo; degradación graceful ante 429 (respetar `x-ratelimit-reset`).
 
 ### T19 · Scraper X (MCP server)  `scraper` `L`
 - **Acept.:** X no tiene API libre → vía navegador o investigar otra. MCP server `x` independiente; reemplaza el stub `TwitterSource`.
