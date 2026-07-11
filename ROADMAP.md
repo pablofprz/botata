@@ -133,27 +133,69 @@ El bot puede contestar sobre lo que él mismo viene posteando/respondiendo, no s
 
 ---
 
-## M5 · Browser & scrapers  `P2`
+## M5 · MCP, browser & scrapers  `P2`
+
+**Decisión (admin):** el cliente MCP (T29) va **antes** que los scrapers. Los scrapers
+(T17–T20) nacen como **MCP servers** independientes (procesos stdio, deps y crashes
+aislados, reutilizables desde otros agentes), no como módulos internos de butterbot.
+
+### T29 · Cliente MCP → ToolRegistry  `infra` `M`  *(primero de M5)*
+Butterbot consume MCP servers externos como tools; cada conector futuro pasa de "tarea" a "línea de config".
+- **Acept.:** módulo `mcp_tools.py` (SDK oficial `mcp`): al arranque lee `settings.json` → sección `MCP` (`{server: {transport: stdio|http, command/url, enabled, scopes, tool_filter}}`), conecta, hace `tools/list` y registra cada tool en el `ToolRegistry` (T1) con handler proxy a `tools/call`.
+- Nombres prefijados por server (`reddit_top_posts`) para evitar colisiones. Puente async→sync contenido en el módulo (event loop en thread de fondo).
+- **Seguridad (regla dura):** tools MCP nacen con scope `admin`; promover a `reply`/`feed_reflection` es opt-in explícito por tool en config — el bot es público y scope reply = superficie de prompt injection.
+- Degradación graceful: server caído al arranque → se loguea y se omite (no tira el bot); error en `tools/call` → `ToolResult` de error, no excepción.
+- El calendario interno (`events`, T4/T9) sigue nativo — dominio core acoplado a la DB. Calendarios externos (ej. Google Calendar) = server MCP de terceros vía config, sin código.
 
 ### T16 · Tool de navegador agéntica  `tools` `M`
 - **Acept.:** el usuario puede mandar el bot a una página y que acceda. **OFF por default**, con **aviso de riesgo** explícito al activarla.
 - Guardrails: allowlist/denylist de dominios, límite de acciones, sin descarga/ejecución arbitraria. Reusa `browser.py`.
+- **Servida como MCP server** (misma fragilidad/deps pesadas que los scrapers); butterbot la consume vía T29.
 
 ### T17 · Reddit — spike de API  `scraper` `S`
-- **Acept.:** investigar viabilidad de la API oficial (PRAW/OAuth read-only) hoy. Documentar decisión: API / RSS / navegador.
+- **Acept.:** investigar viabilidad de la API oficial (PRAW/OAuth read-only) hoy — Reddit devuelve 403 sin auth (visto en T14). Documentar decisión: API / RSS / navegador.
 
-### T18 · Reddit ingestion  `scraper` `M`
-- **Acept.:** implementar `RedditSource` (hoy stub) según el resultado de T17. Solo lectura de subs, sin postear.
+### T18 · Reddit ingestion (MCP server)  `scraper` `M`
+- **Acept.:** MCP server `reddit` (FastMCP, stdio) según el resultado de T17. Solo lectura de subs, sin postear. Reemplaza el stub `RedditSource`; butterbot lo consume vía T29.
 
-### T19 · Scraper X  `scraper` `L`
-- **Acept.:** X no tiene API libre → vía navegador (`browser.py`) o investigar otra. `TwitterSource` (hoy stub).
+### T19 · Scraper X (MCP server)  `scraper` `L`
+- **Acept.:** X no tiene API libre → vía navegador o investigar otra. MCP server `x` independiente; reemplaza el stub `TwitterSource`.
 
-### T20 · Hardening scraper IG  `scraper` `M`
-- **Acept.:** robustecer `scrape_ig.py` / `ig_api.py` (manejo de sesión, reintentos, config de cuentas objetivo).
+### T20 · Hardening scraper IG (MCP server)  `scraper` `M`
+- **Acept.:** robustecer `scrape_ig.py` / `ig_api.py` (manejo de sesión, reintentos, config de cuentas objetivo) y envolverlo como MCP server `ig`.
 
 ---
 
-## M6 · Después  `P3`
+## M6 · Núcleo agéntico  `P2`  *(post-Bluesky funcional, PRE-multicanal)*
+
+Endurecer el núcleo del agente antes de tocar otra plataforma. El software crece
+orgánicamente: primero un core sólido en Bluesky, después se suman canales (M7).
+
+### T26 · Workspace de archivos de comportamiento (skills)  `infra` `M`
+Capacidades definidas en markdown, editables sin tocar código (patrón OpenClaw/Claude skills; extiende SOUL.md + prompts de T23).
+- **Acept.:** carpeta `skills/` con archivos `*.md` (frontmatter: nombre + descripción + cuándo aplica; cuerpo: instrucciones). Se cargan en runtime.
+- El agente decide qué skill aplicar según contexto (inyección selectiva en el system prompt — no todas siempre, para no quemar contexto).
+- Toggleable por skill en config. Agregar/editar una skill = editar un `.md`, sin redeploy.
+- Caso de uso objetivo: el admin (o a futuro un moderador) define "cómo responder sobre X" declarativamente.
+
+### T27 · Heartbeat generalizado (scheduler unificado)  `proactivity` `M`
+Generaliza el loop proactivo: hoy feed (T5), noticias (T15) y eventos son pases hardcodeados en `run()`.
+- **Acept.:** registro de tareas periódicas (`{name, interval, enabled, handler}`) donde feed-pass, news-pass y chequeo de eventos del día son entradas; agregar una tarea nueva no toca el loop.
+- Pase "heartbeat" opcional: el agente lee pendientes (eventos de hoy T4/T9, recordatorios) y **decide** si tiene algo que decir — misma filosofía agéntica que `ReflectDecideNode`, sin scheduling rígido.
+- Config declarativa en `settings.json`; cursores en `feed_cursors` (patrón `news:{host}` ya existente).
+
+---
+
+## M7 · Multi-canal  `P3`  *(solo con el agente Bluesky completamente listo)*
+
+### T28 · Abstracción Channel (gateway multi-plataforma)  `infra` `L`
+- **Acept.:** interfaz `Channel` (mentions/post/reply/perfil de autor, sobre de mensaje normalizado) de la que `BskyChannel` es la primera implementación. El grafo langgraph no sabe en qué plataforma habla.
+- **Orden de expansión decidido:** Bluesky → Mastodon → Discord → Telegram → WhatsApp. Un canal nuevo = una implementación de `Channel` + config; cero cambios en el núcleo.
+- Incluye revisar el modelo de sesión: en Bluesky la conversación es el thread (se reconstruye por `get_post_thread`); en Discord/Telegram hace falta estado de conversación persistente por canal/chat.
+
+---
+
+## M8 · Después  `P3`
 
 ### T21 · Descarga de videos IG  `scraper` `M`
 - **Acept.:** extender el scraper IG para bajar videos (hoy se filtran). Baja prioridad.
