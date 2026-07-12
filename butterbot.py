@@ -40,6 +40,7 @@ import db as dbmod  # módulo de persistencia local (la var `db` es la conexión
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
 from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope  # framework de tools
 from skills import skills_prompt_block, get_skill_body  # workspace de skills (T26)
+from scheduler import PeriodicTask, apply_tasks_config, run_due  # tareas periódicas (T27)
 from router import ModelRouter, RoleLLM, build_router  # router de modelos + fallbacks
 
 # ---------------------------------------------------------------------------
@@ -135,6 +136,7 @@ POLL_INTERVAL      : int  = settings.get("POLL_INTERVAL_SECONDS", 60)
 FEEDS_CONFIG       : list = settings.get("FEEDS", [])
 TOOLS_CONFIG       : dict = settings.get("TOOLS", {})
 MCP_CONFIG         : dict = settings.get("MCP", {})
+TASKS_CONFIG       : dict = settings.get("TASKS", {})
 MODELS_CONFIG      : dict | None = settings.get("MODELS")
 
 
@@ -1507,6 +1509,78 @@ def run_news_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Heartbeat (T27): pase agéntico de calendario
+# ---------------------------------------------------------------------------
+
+def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
+                       conn: sqlite3.Connection) -> None:
+    """Mira los eventos de hoy/próximos y DECIDE si vale la pena decir algo.
+
+    Misma filosofía que ReflectDecideNode: decisión del agente, sin cron rígido.
+    Sin eventos → return sin tocar el LLM (costo cero). El intervalo lo gatea el
+    scheduler (cursor `task:heartbeat`), no esta función.
+    """
+    hoy      = dbmod.events_today(conn)
+    proximos = [e for e in dbmod.upcoming_events(conn, limit=5)
+                if e["id"] not in {h["id"] for h in hoy}]
+    if not hoy and not proximos:
+        log.info("heartbeat: sin eventos — nada que decir")
+        return
+
+    def _fmt(e: dict) -> str:
+        owner = f" (de @{e['handle']})" if e.get("handle") else " (comunidad)"
+        return f"- {e['event_at']}: {e['title']}{owner}" + (
+            f" — {e['description']}" if e.get("description") else "")
+
+    soul = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
+    parts = [soul, f"\n---\n{current_datetime_line()}",
+             f"\n---\n{load_text(PROMPTS_DIR / 'heartbeat_prompt.md')}"]
+    skills_block = skills_prompt_block(SKILLS_DIR, Scope.FEED_REFLECTION)
+    if skills_block:
+        parts.append(f"\n---\n{skills_block}")
+    if hoy:
+        parts.append("\n---\nEventos de HOY:\n" + "\n".join(_fmt(e) for e in hoy))
+    if proximos:
+        parts.append("\n---\nEventos próximos:\n" + "\n".join(_fmt(e) for e in proximos))
+    recientes = recent_bot_posts(conn, limit=10)
+    if recientes:
+        parts.append("\n---\nYa posteaste esto recientemente (NO lo repitas):\n"
+                     + "\n".join(f"- {t}" for t in recientes))
+    parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
+    system = "\n".join(p for p in parts if p)
+
+    llm = RoleLLM(router, "feed_opinion")
+    try:
+        decision = llm.complete(system, "¿Hay algo que valga la pena decir hoy?", FeedDecision)
+    except Exception as e:
+        log.error("heartbeat: %s", e)
+        return
+    log.info("heartbeat: should_post=%s (%s)", decision.should_post, decision.reason[:80])
+    if not decision.should_post:
+        return
+    text = (decision.text or "").strip()
+    if not text:
+        log.info("heartbeat: should_post sin texto — skip")
+        return
+    norm = _norm_text(text)
+    if any(_norm_text(t) == norm for t in recent_bot_posts(conn, limit=20)):
+        log.info("heartbeat: texto duplicado de un post reciente — skip")
+        return
+    uri = bsky.post(text)
+    log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
+    log.info("heartbeat: posteado %s", uri)
+
+
+def run_heartbeat_loop() -> None:
+    """Pase único de heartbeat desde CLI (`--heartbeat`). Ignora intervalo y toggle."""
+    db     = init_db()
+    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    run_heartbeat_pass(bsky, router, db)
+    log.info("Heartbeat pass completo.")
+
+
+# ---------------------------------------------------------------------------
 # Tools concretas
 # Los handlers reciben (args, ctx) y devuelven un ToolResult. ctx.state es el
 # MentionState y ctx.conn la conexión sqlite. Se cierran sobre los globals del
@@ -2807,40 +2881,48 @@ def run(mode: str) -> None:
     # Reprocesar mentions trancados del run anterior antes de entrar al loop.
     retry_stuck_mentions(graph, db, bsky, mode)
 
+    # --- T27: registro de tareas periódicas. interval_hours=0 = cada iteración
+    # (la tarea se auto-gatea por dentro); >0 = gate del scheduler vía cursor
+    # `task:{name}`. Agregar una tarea nueva = una entrada acá + TASKS en settings.
+    tasks = [
+        PeriodicTask("feed",      lambda: _run_feed_pass(feed_graph, respect_interval=True)),
+        PeriodicTask("news",      lambda: run_news_pass(bsky, router, db, respect_interval=True)),
+        PeriodicTask("mentions",  lambda: _poll_mentions(graph, db, bsky, mode)),
+        PeriodicTask("heartbeat", lambda: run_heartbeat_pass(bsky, router, db),
+                     interval_hours=12, enabled=False),  # outward-facing: el admin lo prende
+    ]
+    apply_tasks_config(tasks, TASKS_CONFIG)
+    log.info("Tareas: %s", ", ".join(
+        f"{t.name}{'(off)' if not t.enabled else ''}" for t in tasks))
+
     while True:
         try:
-            # --- Loop proactivo de feed (T5/T6): corre solo cuando toca el intervalo ---
-            _run_feed_pass(feed_graph, respect_interval=True)
-
-            # --- Noticias RSS (T15): postea lo nuevo por fuente (respeta intervalo) ---
-            run_news_pass(bsky, router, db, respect_interval=True)
-
-            # --- Mention polling ---
-            mentions = [m for m in bsky.get_mentions() if not has_replied(db, m["uri"])]
-            if mentions:
-                log.info("Found %d mention(s) to process", len(mentions))
-                for mention in mentions:
-                    ctx, root_uri, root_cid = bsky.get_thread_info(mention["uri"], mention["cid"])
-                    mention["thread_context"]  = ctx
-                    mention["thread_root_uri"] = root_uri
-                    mention["thread_root_cid"] = root_cid
-                    process_mention(graph, db, mention, mode)
-                # mark_all_read is UI hygiene only (keeps Polci's notif tab clean);
-                # it no longer gates dedup — the DB does.
-                bsky.mark_all_read()
-
+            run_due(
+                tasks,
+                get_last=lambda name: get_feed_last_run(db, name),
+                save_last=lambda name: save_feed_last_run(db, name),
+                network_errors=(BskyNetworkError, BskyRequestException),
+            )
         except KeyboardInterrupt:
             log.info("Shutting down.")
             break
-        except (BskyNetworkError, BskyRequestException) as e:
-            # Transient Bluesky/server hiccups (502/503/504, timeouts, connection
-            # errors). Don't log a scary traceback — just warn and retry next cycle.
-            # 400/401 (real bugs / auth) fall through to the generic handler below.
-            log.warning("Transient Bluesky error (will retry next cycle): %s", e)
-        except Exception as e:
-            log.error("Unhandled error: %s", e, exc_info=True)
-
         time.sleep(POLL_INTERVAL)
+
+
+def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -> None:
+    """Poll de menciones (extraído del loop en T27; comportamiento idéntico)."""
+    mentions = [m for m in bsky.get_mentions() if not has_replied(db, m["uri"])]
+    if mentions:
+        log.info("Found %d mention(s) to process", len(mentions))
+        for mention in mentions:
+            ctx, root_uri, root_cid = bsky.get_thread_info(mention["uri"], mention["cid"])
+            mention["thread_context"]  = ctx
+            mention["thread_root_uri"] = root_uri
+            mention["thread_root_cid"] = root_cid
+            process_mention(graph, db, mention, mode)
+        # mark_all_read is UI hygiene only (keeps Polci's notif tab clean);
+        # it no longer gates dedup — the DB does.
+        bsky.mark_all_read()
 
 
 # ---------------------------------------------------------------------------
@@ -2885,6 +2967,12 @@ if __name__ == "__main__":
         help="T15: run the RSS news pass once (post what's new per source) and exit. "
              "Requires NEWS_ENABLED=true in settings.json.",
     )
+    parser.add_argument(
+        "--heartbeat",
+        action="store_true",
+        help="T27: run the calendar heartbeat pass once (agent decides whether to post) "
+             "and exit. Ignores the scheduler interval and the TASKS toggle.",
+    )
     args = parser.parse_args()
 
     if args.proactive:
@@ -2892,6 +2980,9 @@ if __name__ == "__main__":
 
     elif args.news:
         run_news_loop()
+
+    elif args.heartbeat:
+        run_heartbeat_loop()
 
     elif args.fetch_feeds:
         db        = init_db()
