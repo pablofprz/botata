@@ -39,6 +39,7 @@ from typing_extensions import TypedDict
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
 from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope  # framework de tools
+from skills import skills_prompt_block, get_skill_body  # workspace de skills (T26)
 from router import ModelRouter, RoleLLM, build_router  # router de modelos + fallbacks
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,7 @@ BASE_DIR    = Path(__file__).parent
 CONFIG_DIR  = BASE_DIR / "config"
 CONTEXT_DIR = BASE_DIR / "context"
 PROMPTS_DIR = BASE_DIR / "prompts"
+SKILLS_DIR  = BASE_DIR / "skills"   # T26: workspace de skills en markdown
 POSTED_DIR  = BASE_DIR / "posted"
 FEEDS_DIR   = CONTEXT_DIR / "feeds"
 
@@ -1188,6 +1190,10 @@ class ReflectDecideNode:
             f"\n---\n{reflect}" if reflect else "",
             f"\n---\n{guidance}",
         ]
+        # T26: skills scope feed_reflection (inline + índice on-demand)
+        skills_block = skills_prompt_block(SKILLS_DIR, Scope.FEED_REFLECTION)
+        if skills_block:
+            parts.append(f"\n---\n{skills_block}")
         if recientes:
             parts.append(
                 "\n---\nYa posteaste esto recientemente (NO lo repitas ni parafrasees):\n"
@@ -1538,6 +1544,15 @@ def _tool_get_help(args: dict, ctx: ToolContext) -> ToolResult:
         "comandos: /remember <texto>, /bloques (quién te bloquea, vía ClearSky), "
         "/imagen <búsqueda>, /debug, /help"
     ))
+
+
+def _tool_use_skill(args: dict, ctx: ToolContext) -> ToolResult:
+    """T26: carga el cuerpo de una skill on-demand (índice en el system prompt)."""
+    name = (args.get("name") or "").strip()
+    body = get_skill_body(SKILLS_DIR, name)
+    if body is None:
+        return ToolResult(text=f"[skill desconocida o deshabilitada: {name}]")
+    return ToolResult(text=body)
 
 
 def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
@@ -2181,6 +2196,20 @@ def build_tool_registry(config: dict | None = None, *,
         _tool_get_news,
         {Scope.REPLY, Scope.ADMIN},
     )
+    reg.register(
+        "use_skill",
+        "Carga las instrucciones de una skill del bot por nombre. Usala cuando el tema "
+        "de la conversación coincida con una skill del índice de tu system prompt.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Nombre exacto de la skill (del índice)."}
+            },
+            "required": ["name"],
+        },
+        _tool_use_skill,
+        {Scope.REPLY, Scope.FEED_REFLECTION},
+    )
     if mcp_config:
         import mcp_tools  # lazy: solo si hay servers MCP configurados
         n = mcp_tools.register_mcp_tools(reg, mcp_config)
@@ -2324,6 +2353,11 @@ class GenerateReplyNode:
         if lessons:
             parts.append("\n---\nLecciones de comportamiento:\n" + "\n".join(f"- {t}" for _, t in lessons))
 
+        # T26: skills — inline las marcadas + índice on-demand (use_skill)
+        skills_block = skills_prompt_block(SKILLS_DIR, Scope.REPLY)
+        if skills_block:
+            parts.append(f"\n---\n{skills_block}")
+
         # Resumen del catálogo de imágenes
         cat_stats = dbmod.get_image_catalog_stats(self.conn)
         if cat_stats["total"] > 0:
@@ -2405,6 +2439,11 @@ class HandleAdminCommandNode:
     def run(self, state: MentionState) -> dict:
         # T23: prompt externalizado en prompts/admin_command_prompt.md
         system = f"{current_datetime_line()}\n\n" + load_text(PROMPTS_DIR / "admin_command_prompt.md")
+        # T26: skills scope admin — todo inline (este flujo ejecuta UNA tool y
+        # usa su resultado como respuesta: use_skill no encadenaría)
+        skills_block = skills_prompt_block(SKILLS_DIR, Scope.ADMIN, all_inline=True)
+        if skills_block:
+            system += f"\n\n---\n{skills_block}"
         user = (
             f"Admin: @{state['author_handle']}\n"
             f"Comando recibido: {state['mention_text']}"

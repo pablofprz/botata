@@ -182,12 +182,13 @@ Butterbot consume MCP servers externos como tools; cada conector futuro pasa de 
 Endurecer el núcleo del agente antes de tocar otra plataforma. El software crece
 orgánicamente: primero un core sólido en Bluesky, después se suman canales (M7).
 
-### T26 · Workspace de archivos de comportamiento (skills)  `infra` `M`
+### T26 · Workspace de archivos de comportamiento (skills)  `infra` `M`  ✅ **HECHO**
 Capacidades definidas en markdown, editables sin tocar código (patrón OpenClaw/Claude skills; extiende SOUL.md + prompts de T23).
 - **Acept.:** carpeta `skills/` con archivos `*.md` (frontmatter: nombre + descripción + cuándo aplica; cuerpo: instrucciones). Se cargan en runtime.
 - El agente decide qué skill aplicar según contexto (inyección selectiva en el system prompt — no todas siempre, para no quemar contexto).
 - Toggleable por skill en config. Agregar/editar una skill = editar un `.md`, sin redeploy.
 - Caso de uso objetivo: el admin (o a futuro un moderador) define "cómo responder sobre X" declarativamente.
+- Impl.: `skills.py` (infra genérica estilo tools.py; parser frontmatter stdlib, sin pyyaml). **Selección = índice + on-demand:** el system prompt lleva un índice liviano (`name: description`); el agente carga el cuerpo con la tool **`use_skill(name)`** (fase de tools T24) — cumple "inyección selectiva". Frontmatter: `name`/`description` (obligatorios), `scopes` (default los 3), `enabled` (default true), `inline` (fuerza cuerpo al prompt, para skills que el agente no sabría pedir). **El frontmatter ES la config** (sin sección en settings.json). **Excepción admin:** todo inline (`all_inline=True`) porque ese flujo ejecuta UNA tool y usa su resultado como respuesta. Inyectado en los 3 nodos (reply tras lecciones · feed antes de tools · admin al system). Relectura por pase (patrón SOUL/MEMORY) → **edición en caliente** verificada en vivo (habilitar skill editando el .md, sin reiniciar). `skills/README.md` documenta formato + aviso de seguridad (una skill = quien la escribió); `skills/ejemplo.md` (enabled:false) de plantilla. Tests: `tests/test_skills.py` (14).
 
 ### T27 · Heartbeat generalizado (scheduler unificado)  `proactivity` `M`
 Generaliza el loop proactivo: hoy feed (T5), noticias (T15) y eventos son pases hardcodeados en `run()`.
