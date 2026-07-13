@@ -295,11 +295,18 @@ class MentionClassification(BaseModel):
     is_admin_command: bool = Field(
         alias="is_command",
         default=False,
-        description="True if the message is a bot command starting with / (e.g. /remember, /debug, /help)",
+        description=(
+            "True if the message is a bot command: starts with '/' (e.g. /remember, /debug) "
+            "OR is an instruction about the bot's own configuration/behavior/memory "
+            "(turn features on/off, change settings, show config, remember something)."
+        ),
     )
     command: str | None = Field(
         default=None,
-        description="Command name without the slash, e.g. 'remember', 'debug', 'help'. None if not a command.",
+        description=(
+            "Command name without the slash (e.g. 'remember', 'debug'), or 'config' for "
+            "natural-language configuration instructions. None if not a command."
+        ),
     )
     skip: bool = Field(
         default=False,
@@ -2582,16 +2589,10 @@ class ClassifyNode:
         self.llm = llm
 
     def run(self, state: MentionState) -> dict:
-        system = (
-            "You are a classifier for a Bluesky bot. "
-            "Return JSON. A command starts with '/' (e.g. /remember, /debug, /help). "
-            "For commands, set is_command=true and command=<name without slash, lowercase>. "
-            "Set skip=true only for spam or self-mentions. "
-            "Set is_block_query=true ONLY for explicit block-list questions: '/bloques', "
-            "'/blocks', 'quién me bloquea', 'quien me bloquea', 'me tienen bloqueado', "
-            "'a quién bloqueo', 'who blocks me'. Be conservative — when in doubt, false. "
-            "Respond ONLY with valid JSON."
-        )
+        # T23: prompt en prompts/classify_prompt.md. Reconoce comandos con '/' Y
+        # órdenes en lenguaje natural sobre config/comportamiento (T30) — el gate
+        # de admin lo aplica route_after_classify, no este nodo.
+        system = load_text(PROMPTS_DIR / "classify_prompt.md")
         try:
             result = self.llm.complete(system, f"Mention: {state['mention_text']}", MentionClassification)
         except Exception as e:
@@ -2803,6 +2804,7 @@ class HandleAdminCommandNode:
         self.registry = registry
 
     def run(self, state: MentionState) -> dict:
+        log.info("Admin command de @%s: %r", state["author_handle"], state["mention_text"])
         # T23: prompt externalizado en prompts/admin_command_prompt.md
         system = f"{current_datetime_line()}\n\n" + load_text(PROMPTS_DIR / "admin_command_prompt.md")
         # T26: skills scope admin — todo inline (este flujo ejecuta UNA tool y
