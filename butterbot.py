@@ -2627,7 +2627,13 @@ class LoadContextNode:
             "SELECT bio_raw, bio_interp FROM users WHERE handle = ?", (handle,)
         ).fetchone()
         if row["bio_raw"] is None and row["bio_interp"] is None:
-            self._ingest_bio(handle)
+            try:
+                self._ingest_bio(handle)
+            except Exception as e:
+                # La bio es enriquecimiento: jamás debe bloquear el reply (y menos
+                # el arranque, vía retry_stuck_mentions).
+                log.error("ingest_bio @%s falló (%s: %s) — sigo sin bio",
+                          handle, type(e).__name__, e)
 
         return {}  # el contexto relevante se recupera en GenerateReplyNode
 
@@ -2638,6 +2644,17 @@ class LoadContextNode:
         profile = self.bsky.get_profile(handle)
         if not profile:
             return
+        # ¿El DID ya vive en otra fila? → el usuario se cambió el handle (el DID es
+        # estable): migrar su memoria a este handle antes del UPDATE (users.did es
+        # UNIQUE; sin esto, IntegrityError).
+        old = self.conn.execute(
+            "SELECT handle FROM users WHERE did = ? AND handle != ?",
+            (profile.did, handle),
+        ).fetchone()
+        if old:
+            moved = dbmod.migrate_user_handle(self.conn, old["handle"], handle)
+            log.info("handle cambiado: @%s → @%s (mismo DID) — migrados %d facts, %d events",
+                     old["handle"], handle, moved["facts"], moved["events"])
         bio = profile.description or ""
         interp = self._extract_from_bio(handle, bio) if bio else ""
         bio_interp = None if (not interp or interp.upper() == "NADA") else interp
@@ -3135,7 +3152,13 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
             log.warning("Could not refetch %s (deleted?) — marking ignored", r["uri"])
             update_status(db, r["uri"], "ignored")
             continue
-        process_mention(graph, db, mention, mode)
+        try:
+            process_mention(graph, db, mention, mode)
+        except Exception as e:
+            # Un retry que explota no puede matar el arranque: queda 'failed'
+            # (o 'pending'→'failed' en el próximo arranque) y se reintenta después.
+            log.error("retry de %s falló (%s: %s) — sigo con el resto",
+                      r["uri"], type(e).__name__, e, exc_info=True)
 
 
 def run(mode: str) -> None:

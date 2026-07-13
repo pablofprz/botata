@@ -944,6 +944,44 @@ def purge_user_memory(
     return {"facts": len(fact_ids), "events": events, "relationships": rels}
 
 
+def migrate_user_handle(conn: sqlite3.Connection, old_handle: str, new_handle: str) -> dict[str, int]:
+    """El usuario se cambió el handle en Bluesky (mismo DID): mueve TODA su memoria
+    de `old_handle` a `new_handle` y borra la fila vieja de `users`.
+
+    Precondición: la fila de `new_handle` ya existe en `users` (LoadContextNode la
+    crea al ver la mención). Los vectores de `user_facts_vec` están particionados
+    por handle y vec0 no updatea `partition_key` in place → se releen los embeddings
+    y se reinsertan con la partición nueva (sin re-embeber). Devuelve conteos.
+    """
+    fact_ids = [r[0] for r in conn.execute(
+        "SELECT id FROM user_facts WHERE handle = ?", (old_handle,)).fetchall()]
+    for fid in fact_ids:
+        row = conn.execute(
+            "SELECT embedding FROM user_facts_vec WHERE rowid = ?", (fid,)).fetchone()
+        conn.execute("DELETE FROM user_facts_vec WHERE rowid = ?", (fid,))
+        if row is not None:
+            conn.execute(
+                "INSERT INTO user_facts_vec(rowid, embedding, partition_key) VALUES (?, ?, ?)",
+                (fid, row[0], new_handle),
+            )
+    conn.execute("UPDATE user_facts SET handle = ? WHERE handle = ?", (new_handle, old_handle))
+    events = conn.execute(
+        "UPDATE events SET handle = ? WHERE handle = ?", (new_handle, old_handle)).rowcount
+    # relationships tiene PK (a, b, kind): si ya existe la arista con el handle nuevo,
+    # la vieja se descarta (OR IGNORE + delete de las sobrantes).
+    conn.execute("UPDATE OR IGNORE relationships SET handle_a = ? WHERE handle_a = ?",
+                 (new_handle, old_handle))
+    conn.execute("UPDATE OR IGNORE relationships SET handle_b = ? WHERE handle_b = ?",
+                 (new_handle, old_handle))
+    conn.execute("DELETE FROM relationships WHERE handle_a = ? OR handle_b = ?",
+                 (old_handle, old_handle))
+    conn.execute("UPDATE bot_posts SET reply_to_handle = ? WHERE reply_to_handle = ?",
+                 (new_handle, old_handle))
+    conn.execute("DELETE FROM users WHERE handle = ?", (old_handle,))
+    conn.commit()
+    return {"facts": len(fact_ids), "events": events}
+
+
 # ─── posted_news: dedup de items RSS ya posteados (T15) ───────────────────────
 def news_item_posted(conn: sqlite3.Connection, item_id: str) -> bool:
     """True si el item RSS (por link/guid) ya fue posteado."""
