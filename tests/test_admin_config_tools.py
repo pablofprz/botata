@@ -38,6 +38,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "MCP_CONFIG", json.loads(json.dumps(settings["MCP"])))
     monkeypatch.setattr(b, "NEWS_ENABLED", False)
     tasks = [PeriodicTask("feed", lambda: None),
+             PeriodicTask("mentions", lambda: None),
              PeriodicTask("heartbeat", lambda: None, interval_hours=12, enabled=False)]
     monkeypatch.setattr(b, "_RUNTIME_TASKS", tasks)
     reg = b.build_tool_registry()
@@ -133,12 +134,58 @@ def test_set_mcp_solo_persiste(env):
     assert b.MCP_CONFIG["reddit"]["enabled"] is True                 # visible en get
 
 
-# ─── guard de claves protegidas ──────────────────────────────────────────────
+# ─── locks (análisis de superficie, pedido del admin) ────────────────────────
 def test_guard_claves_prohibidas(env, monkeypatch):
     tmp, reg, _ = env
     errs = b._persist_settings_delta(lambda s: s.update(ADMIN_HANDLE="atacante.com"))
     assert errs and "prohibido" in errs[0]
     assert _disk(tmp)["ADMIN_HANDLE"] == "ppolci.com"
+
+
+def test_guard_endpoint_legacy_prohibido(env):
+    tmp, _, _ = env
+    errs = b._persist_settings_delta(lambda s: s.update(OPENAI_ENDPOINT="https://atacante.com/v1"))
+    assert errs and "OPENAI_ENDPOINT" in errs[0]
+    assert "OPENAI_ENDPOINT" not in _disk(tmp)
+
+
+def test_lock_tools_de_config_intocables(env):
+    tmp, reg, _ = env
+    out = reg.execute("set_tool_config", {"tool": "set_tool_config", "enabled": False}, _CTX)
+    assert "anti-lockout" in out.text
+    assert reg.get("set_tool_config").enabled is True
+    # y el guard también lo frena aunque un handler futuro lo intente:
+    errs = b._persist_settings_delta(
+        lambda s: s.setdefault("TOOLS", {}).update(get_bot_config={"enabled": False}))
+    assert errs and "configuración" in errs[0]
+
+
+def test_lock_no_ampliar_scopes_publicos(env):
+    tmp, reg, _ = env
+    antes = reg.get("save_to_memory").scopes            # admin-only
+    out = reg.execute("set_tool_config",
+                      {"tool": "save_to_memory", "scopes": ["reply", "admin"]}, _CTX)
+    assert "AGREGAR scopes públicos" in out.text
+    assert reg.get("save_to_memory").scopes == antes    # intacto
+    assert not _disk(tmp)["TOOLS"]                      # disco intacto
+    # guard directo (defensa en profundidad):
+    errs = b._persist_settings_delta(
+        lambda s: s.setdefault("TOOLS", {}).update(save_to_memory={"scopes": ["reply"]}))
+    assert errs and "ampliar scopes públicos" in errs[0]
+
+
+def test_lock_reducir_scopes_si_se_puede(env):
+    tmp, reg, _ = env
+    out = reg.execute("set_tool_config", {"tool": "web_search", "scopes": ["admin"]}, _CTX)
+    assert "aplicado en vivo" in out.text               # quitar reply/feed: permitido
+    assert reg.get("web_search").scopes == frozenset({"admin"})
+
+
+def test_lock_mentions_no_se_apaga(env):
+    tmp, reg, _ = env
+    out = reg.execute("set_task_config", {"task": "mentions", "enabled": False}, _CTX)
+    assert "anti-lockout" in out.text
+    assert "TASKS" not in _disk(tmp) or "mentions" not in _disk(tmp).get("TASKS", {})
 
 
 # ─── get_bot_config ──────────────────────────────────────────────────────────

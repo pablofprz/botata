@@ -1507,33 +1507,61 @@ def run_news_pass(bsky: BskyClient, router: ModelRouter, db: sqlite3.Connection,
 # para que "prendé el heartbeat" aplique sin reiniciar.
 _RUNTIME_TASKS: list[PeriodicTask] = []
 
-# Claves que JAMÁS se cambian desde un post (lock-out/secuestro). Defensa en
-# profundidad: aunque un handler futuro lo intente, el guard lo rechaza.
-_PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "MODELS")
+# Claves que JAMÁS se cambian desde un post. Identidad (lock-out/secuestro) y
+# endpoints/modelos (redirigir el tráfico LLM = exfiltración de prompts+memoria).
+# Defensa en profundidad: aunque un handler futuro lo intente, el guard rechaza.
+_PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "MODELS", "OPENAI_ENDPOINT",
+                       "REASONING_MODEL", "LITE_MODEL", "IMAGE_MODEL",
+                       "SPOTIFY_REDIRECT_URI")
+
+# Las tools de config no se tocan a sí mismas (anti auto-lockout / escalación).
+_CONFIG_TOOL_NAMES = frozenset({
+    "get_bot_config", "set_tool_config", "set_task_config",
+    "set_feed_config", "set_news_enabled", "set_mcp_enabled",
+})
+
+# Regla: por comando solo se REDUCE exposición. Agregar estos scopes = solo UI.
+_PUBLIC_SCOPES = frozenset({Scope.REPLY, Scope.FEED_REFLECTION})
+
+
+def _delta_guard(before: dict, after: dict) -> list[str]:
+    """Rechaza deltas que un comando jamás debe poder hacer (defensa en profundidad)."""
+    for key in _PROTECTED_SETTINGS:
+        if before.get(key) != after.get(key):
+            return [f"cambio prohibido: {key} solo se toca desde la UI/archivos"]
+    def _strip(cfg: dict) -> dict:
+        return {k: v for k, v in (cfg or {}).items() if k != "enabled"}
+    if ({n: _strip(c) for n, c in before.get("MCP", {}).items()} !=
+            {n: _strip(c) for n, c in after.get("MCP", {}).items()}):
+        return ["cambio prohibido: la estructura de los servers MCP solo se edita en la UI"]
+    bt, at = before.get("TOOLS", {}), after.get("TOOLS", {})
+    for name in _CONFIG_TOOL_NAMES:
+        if bt.get(name) != at.get(name):
+            return [f"cambio prohibido: la tool de configuración '{name}' no se toca por comando"]
+    for name, cfg in at.items():
+        added = set(cfg.get("scopes", [])) - set((bt.get(name) or {}).get("scopes", []))
+        publica = added & _PUBLIC_SCOPES
+        if publica:
+            return [f"cambio prohibido: ampliar scopes públicos de '{name}' "
+                    f"({sorted(publica)}) requiere la UI"]
+    return []
 
 
 def _persist_settings_delta(apply: "Callable[[dict], None]") -> list[str]:
     """Lee settings.json fresco, aplica el delta, valida y escribe atómico (T22).
 
     Releer del disco evita pisar cambios hechos por la UI mientras el bot corre.
-    Devuelve lista de errores ([] = ok). El guard de claves protegidas rechaza
-    cualquier delta que toque identidad, modelos o la ESTRUCTURA de MCP (su
-    `enabled` sí se puede).
+    Devuelve lista de errores ([] = ok). `_delta_guard` rechaza lo que un comando
+    jamás debe poder hacer; los validadores de T22 chequean el resto.
     """
     from config_ui import ConfigStore  # lazy: evita el costo en el arranque normal
     store = ConfigStore(BASE_DIR)
     current = json.loads(store.settings_path.read_text(encoding="utf-8"))
-
-    def _snapshot(s: dict) -> str:
-        mcp_struct = {name: {k: v for k, v in (cfg or {}).items() if k != "enabled"}
-                      for name, cfg in s.get("MCP", {}).items()}
-        return json.dumps({**{k: s.get(k) for k in _PROTECTED_SETTINGS},
-                           "_mcp": mcp_struct}, sort_keys=True, ensure_ascii=False)
-
-    before = _snapshot(current)
+    original = json.loads(json.dumps(current))
     apply(current)
-    if _snapshot(current) != before:
-        return ["cambio prohibido: identidad/modelos/estructura MCP no se tocan por comando"]
+    errs = _delta_guard(original, current)
+    if errs:
+        return errs
     return store.write_settings(current)
 
 
@@ -2376,7 +2404,16 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
         tool = reg.get(name)
         if tool is None:
             return ToolResult(text=f"tool desconocida: '{name}'. Válidas: {', '.join(reg.names())}")
+        if name in _CONFIG_TOOL_NAMES:
+            return ToolResult(text=f"'{name}' es una tool de configuración: no se toca "
+                              "por comando (anti-lockout). Usá la UI (config_ui.py).")
         enabled, scopes = _as_bool(args.get("enabled")), args.get("scopes")
+        if scopes is not None:
+            ampliados = (set(scopes) - set(tool.scopes)) & _PUBLIC_SCOPES
+            if ampliados:
+                return ToolResult(text=f"no puedo AGREGAR scopes públicos ({sorted(ampliados)}) "
+                                  "por comando — por acá solo se reduce exposición. "
+                                  "Para ampliar, usá la UI (config_ui.py).")
 
         def delta(s: dict) -> None:
             cfg = s.setdefault("TOOLS", {}).setdefault(name, {})
@@ -2403,6 +2440,9 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
         if name not in known:
             return ToolResult(text=f"tarea desconocida: '{name}'. Válidas: {', '.join(known)}")
         enabled = _as_bool(args.get("enabled"))
+        if name == "mentions" and enabled is False:
+            return ToolResult(text="no puedo apagar 'mentions' por comando: es el canal "
+                              "de estos mismos comandos (anti-lockout). Usá la UI.")
         interval = args.get("interval_hours")
 
         def delta(s: dict) -> None:

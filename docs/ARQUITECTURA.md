@@ -299,9 +299,13 @@ Tools actuales (por scope predominante): `web_search` (Brave), `get_upcoming_eve
 scope `admin` (`get_bot_config` + `set_{tool,task,feed}_config`, `set_news_enabled`,
 `set_mcp_enabled`). Doble efecto: persisten a settings.json (validado + atómico, releyendo
 el disco para no pisar a la UI de T22) y aplican **en vivo** sobre los objetos que el loop
-consulta. Regla de seguridad: identidad (`BOT_HANDLE`/`ADMIN_HANDLE`), `MODELS` y la
-estructura de MCP son **intocables por post** (guard en `_persist_settings_delta`) — un
-mensaje jamás puede sacarte el control del bot.
+consulta. **Locks** (doble capa: handler + `_delta_guard` en la persistencia) — regla
+general: *por comando solo se reduce exposición, nunca se amplía*: identidad
+(`BOT_HANDLE`/`ADMIN_HANDLE`), `MODELS` + endpoints/modelos legacy (anti-exfiltración:
+redirigir el endpoint LLM filtrarían prompts y memoria), estructura de MCP, las tools de
+config a sí mismas (anti auto-lockout), la tarea `mentions` (es el canal de los comandos)
+y **agregar scopes `reply`/`feed_reflection` a cualquier tool** — ampliar la superficie
+pública se hace solo desde la UI local.
 
 ## 9. Skills (skills.py, T26)
 
