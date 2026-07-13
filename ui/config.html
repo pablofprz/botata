@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>butterbot · config</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2a2e38; --text: #d7dae0;
+    --dim: #8b91a0; --accent: #e8a33d; --ok: #4caf7d; --err: #e05c5c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, sans-serif; display: flex; min-height: 100vh; }
+  nav { width: 180px; padding: 20px 0; border-right: 1px solid var(--line);
+        position: sticky; top: 0; height: 100vh; flex-shrink: 0; }
+  nav h1 { font-size: 15px; margin: 0 0 14px 20px; color: var(--accent); }
+  nav a { display: block; padding: 7px 20px; color: var(--dim); text-decoration: none; }
+  nav a:hover, nav a.active { color: var(--text); background: var(--panel); }
+  main { flex: 1; padding: 24px 32px 80px; max-width: 880px; }
+  section { margin-bottom: 36px; }
+  h2 { font-size: 16px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  .hint { color: var(--dim); font-size: 12.5px; margin: 4px 0 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 14px 16px; margin-bottom: 10px; }
+  label { display: block; color: var(--dim); font-size: 12px; margin-top: 8px; }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%; max-width: 420px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 5px; padding: 6px 9px; margin-top: 2px; }
+  input[type=checkbox] { accent-color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line);
+           font-size: 13px; }
+  th { color: var(--dim); font-weight: 500; }
+  button { background: var(--accent); color: #14161a; border: 0; border-radius: 5px;
+           padding: 7px 16px; font-weight: 600; cursor: pointer; margin-top: 12px; }
+  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+  button.danger { background: transparent; color: var(--err); border: 1px solid var(--err);
+                  padding: 2px 9px; margin: 0; font-weight: 400; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 9px; }
+  .badge.on  { background: #1d3328; color: var(--ok); }
+  .badge.off { background: #3a2024; color: var(--err); }
+  .warn { color: var(--accent); font-size: 12px; }
+  #toast { position: fixed; bottom: 18px; right: 18px; padding: 10px 18px; border-radius: 7px;
+           background: var(--panel); border: 1px solid var(--line); display: none; max-width: 440px;
+           white-space: pre-wrap; }
+  #toast.ok { border-color: var(--ok); } #toast.err { border-color: var(--err); }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: end; }
+  .row > div { flex: 1; min-width: 150px; }
+</style>
+</head>
+<body>
+<nav>
+  <h1>🤖 butterbot</h1>
+  <a href="#identidad">Identidad</a>
+  <a href="#credenciales">Credenciales</a>
+  <a href="#modelos">Modelos</a>
+  <a href="#feeds">Feeds</a>
+  <a href="#tools">Tools</a>
+  <a href="#tareas">Tareas</a>
+  <a href="#mcp">MCP</a>
+  <a href="#noticias">Noticias</a>
+  <a href="#skills">Skills</a>
+</nav>
+<main>
+  <p class="hint">⚠️ Los cambios en settings, credenciales y noticias requieren <b>reiniciar el bot</b>.
+     Las skills se recargan solas.</p>
+
+  <section id="identidad"><h2>Identidad</h2><div class="card" id="c-identidad"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="credenciales"><h2>Credenciales (.env)</h2>
+    <p class="hint">Write-only: los valores actuales nunca se muestran. Campo vacío = no tocar.</p>
+    <div class="card" id="c-env"></div>
+    <button onclick="saveEnv()">Guardar credenciales</button></section>
+
+  <section id="modelos"><h2>Modelos (router)</h2>
+    <p class="hint">Endpoints → aliases (cadenas de fallback en orden) → roles.</p>
+    <div id="c-modelos"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="feeds"><h2>Feeds proactivos</h2><div id="c-feeds"></div>
+    <button class="ghost" onclick="addFeed()">+ feed</button>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="tools"><h2>Tools</h2>
+    <p class="hint">⚠️ scope <b>reply</b> = invocable por cualquier usuario del bot público.</p>
+    <div class="card" id="c-tools"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="tareas"><h2>Tareas periódicas</h2><div class="card" id="c-tasks"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="mcp"><h2>Servers MCP</h2>
+    <p class="hint">Conectores externos. Las tools MCP nacen scope admin (regla T29).</p>
+    <div id="c-mcp"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="noticias"><h2>Noticias RSS</h2><div class="card" id="c-newsmaster"></div>
+    <div id="c-news"></div>
+    <button class="ghost" onclick="addNews()">+ fuente</button>
+    <button onclick="saveNews()">Guardar fuentes</button></section>
+
+  <section id="skills"><h2>Skills</h2>
+    <p class="hint">Toggle instantáneo (hot-reload). El contenido se edita en <code>skills/*.md</code>.</p>
+    <div class="card" id="c-skills"></div></section>
+</main>
+<div id="toast"></div>
+
+<script>
+const SCOPES = ["reply", "feed_reflection", "admin"];
+let S = null;   // settings (mutado en vivo por los inputs)
+let NEWS = [];
+let ENV_KEYS = {};
+let SKILLS = [];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function toast(msg, ok = true) {
+  const t = $("toast");
+  t.textContent = msg; t.className = ok ? "ok" : "err"; t.style.display = "block";
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", ok ? 2500 : 8000);
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} :
+    { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data.errors || ["error"]).join("\n"));
+  return data;
+}
+
+// ─── Render ──────────────────────────────────────────────────────────────
+function textInput(obj, key, label, type = "text") {
+  const id = "i" + Math.random().toString(36).slice(2);
+  setTimeout(() => $(id)?.addEventListener("input", e => {
+    obj[key] = type === "number" ? Number(e.target.value) : e.target.value;
+  }));
+  return `<label>${esc(label)}<input id="${id}" type="${type}" value="${esc(obj[key] ?? "")}"></label>`;
+}
+function check(obj, key, label, dflt = false) {
+  const id = "i" + Math.random().toString(36).slice(2);
+  setTimeout(() => $(id)?.addEventListener("change", e => { obj[key] = e.target.checked; }));
+  return `<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px">
+    <input id="${id}" type="checkbox" ${ (obj[key] ?? dflt) ? "checked" : ""}> ${esc(label)}</label>`;
+}
+function selectInput(obj, key, label, options, dflt) {
+  const id = "i" + Math.random().toString(36).slice(2);
+  setTimeout(() => $(id)?.addEventListener("change", e => { obj[key] = e.target.value; }));
+  const cur = obj[key] ?? dflt;
+  return `<label>${esc(label)}<select id="${id}">${options.map(o =>
+    `<option ${o === cur ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`;
+}
+
+function render() {
+  $("c-identidad").innerHTML = `<div class="row">
+    <div>${textInput(S, "BOT_HANDLE", "Handle del bot")}</div>
+    <div>${textInput(S, "ADMIN_HANDLE", "Handle del admin")}</div>
+    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll (segundos)", "number")}</div>
+    <div>${textInput(S, "OPENROUTER_DAILY_BUDGET_USD", "Budget diario USD", "number")}</div></div>`;
+
+  $("c-env").innerHTML = Object.entries(ENV_KEYS).map(([k, set]) => `
+    <div class="row" style="align-items:center;margin-bottom:4px">
+      <div style="max-width:230px"><code>${esc(k)}</code></div>
+      <div><span class="badge ${set ? "on" : "off"}">${set ? "seteada" : "falta"}</span></div>
+      <div><input type="password" data-env="${esc(k)}" placeholder="(sin cambios)"></div>
+    </div>`).join("");
+
+  renderModels(); renderFeeds(); renderTools(); renderTasks(); renderMcp(); renderNews(); renderSkills();
+}
+
+function renderModels() {
+  const m = S.MODELS ?? (S.MODELS = {endpoints: {}, aliases: {}, roles: {}});
+  let html = `<div class="card"><b>Endpoints</b><table><tr><th>nombre</th><th>base_url</th><th>api key</th></tr>`;
+  for (const [name, ep] of Object.entries(m.endpoints))
+    html += `<tr><td><code>${esc(name)}</code></td><td>${textInput(ep, "base_url", "")}</td>
+             <td>${textInput(ep, ep.api_key_env !== undefined ? "api_key_env" : "api_key",
+                             ep.api_key_env !== undefined ? "env var" : "valor fijo")}</td></tr>`;
+  html += `</table></div><div class="card"><b>Aliases</b> <span class="hint">(orden = prioridad de fallback)</span>`;
+  for (const [alias, chain] of Object.entries(m.aliases)) {
+    html += `<table><tr><th colspan="2"><code>${esc(alias)}</code></th></tr>`;
+    chain.forEach((hop, i) => {
+      html += `<tr><td style="width:200px">${selectInput(hop, "endpoint", i === 0 ? "endpoint" : "",
+               Object.keys(m.endpoints), hop.endpoint)}</td>
+               <td>${textInput(hop, "model", i === 0 ? "model" : "")}</td></tr>`;
+    });
+    html += `</table>`;
+  }
+  html += `</div><div class="card"><b>Roles</b><table>`;
+  for (const [role] of Object.entries(m.roles))
+    html += `<tr><td><code>${esc(role)}</code></td><td>${selectInput(m.roles, role, "",
+             Object.keys(m.aliases), m.roles[role])}</td></tr>`;
+  html += `</table></div>`;
+  $("c-modelos").innerHTML = html;
+}
+
+function renderFeeds() {
+  $("c-feeds").innerHTML = (S.FEEDS ?? []).map((f, i) => `<div class="card">
+    <div class="row">
+      <div>${textInput(f, "name", "nombre")}</div>
+      <div>${selectInput(f, "type", "tipo", ["list", "feed", "following"], "list")}</div>
+      <div>${textInput(f, "interval_hours", "intervalo (h)", "number")}</div>
+      <div>${selectInput(f, "posting_policy", "política", ["conservative", "balanced", "active"], "balanced")}</div>
+    </div>
+    ${textInput(f, "uri", "URI (at://...) — no aplica a following")}
+    <div style="margin-top:8px">${check(f, "enabled", "activo", true)}${check(f, "learn", "aprender", true)}
+      ${check(f, "autonomous_images", "imágenes autónomas")}
+      <button class="danger" onclick="S.FEEDS.splice(${i},1);render()">borrar</button></div>
+  </div>`).join("") || `<p class="hint">sin feeds</p>`;
+}
+
+function renderTools() {
+  const tools = S.TOOLS ?? {};
+  let html = `<table><tr><th>tool</th><th>on</th>${SCOPES.map(s => `<th>${s}</th>`).join("")}</tr>`;
+  for (const [name, cfg] of Object.entries(tools)) {
+    if (!Array.isArray(cfg.scopes)) cfg.scopes = [];
+    const scopeCell = (sc) => {
+      const id = "i" + Math.random().toString(36).slice(2);
+      setTimeout(() => $(id)?.addEventListener("change", e => {
+        cfg.scopes = e.target.checked ? [...new Set([...cfg.scopes, sc])]
+                                      : cfg.scopes.filter(x => x !== sc);
+        if (sc === "reply" && e.target.checked) toast("⚠️ " + name + " ahora es invocable por usuarios", true);
+      }));
+      return `<td><input id="${id}" type="checkbox" ${cfg.scopes.includes(sc) ? "checked" : ""}></td>`;
+    };
+    html += `<tr><td><code>${esc(name)}</code></td><td>${check(cfg, "enabled", "", true)}</td>
+             ${SCOPES.map(scopeCell).join("")}</tr>`;
+  }
+  $("c-tools").innerHTML = html + "</table>";
+}
+
+function renderTasks() {
+  const tasks = S.TASKS ?? (S.TASKS = {});
+  let html = `<table><tr><th>tarea</th><th>on</th><th>intervalo (h; 0 = cada ciclo)</th></tr>`;
+  for (const [name, cfg] of Object.entries(tasks))
+    html += `<tr><td><code>${esc(name)}</code></td><td>${check(cfg, "enabled", "", true)}</td>
+             <td>${"interval_hours" in cfg ? textInput(cfg, "interval_hours", "", "number") : "<span class='hint'>auto-gateada</span>"}</td></tr>`;
+  $("c-tasks").innerHTML = html + "</table>";
+}
+
+function renderMcp() {
+  $("c-mcp").innerHTML = Object.entries(S.MCP ?? {}).map(([name, cfg]) => `<div class="card">
+    <b><code>${esc(name)}</code></b>
+    <div class="row">
+      <div>${selectInput(cfg, "transport", "transport", ["stdio", "http"], "stdio")}</div>
+      <div>${textInput(cfg, "command", "command (stdio)")}</div>
+      <div>${textInput(cfg, "url", "url (http)")}</div>
+      <div>${textInput(cfg, "call_timeout_s", "timeout call (s)", "number")}</div>
+    </div>
+    <label>args (separados por espacio)<input type="text" value="${esc((cfg.args ?? []).join(" "))}"
+      data-mcp-args="${esc(name)}"></label>
+    <div style="margin-top:8px">${check(cfg, "enabled", "activo", true)}</div>
+  </div>`).join("") || `<p class="hint">sin servers MCP</p>`;
+  document.querySelectorAll("[data-mcp-args]").forEach(el =>
+    el.addEventListener("change", e => {
+      S.MCP[el.dataset.mcpArgs].args = e.target.value.split(/\s+/).filter(Boolean);
+    }));
+}
+
+function renderNews() {
+  $("c-newsmaster").innerHTML = check(S, "NEWS_ENABLED", "NEWS_ENABLED (master; sin esto no se postea nada)", false);
+  $("c-news").innerHTML = NEWS.map((src, i) => `<div class="card">
+    ${textInput(src, "url", "URL del RSS")}
+    <div class="row">
+      <div>${textInput(src, "title", "título")}</div>
+      <div>${textInput(src, "category", "categoría")}</div>
+      <div>${selectInput(src, "mode", "modo", ["comment", "post"], "comment")}</div>
+      <div>${textInput(src, "interval_hours", "intervalo (h)", "number")}</div>
+    </div>
+    ${textInput(src, "description", "descripción")}
+    <div style="margin-top:8px">${check(src, "enabled", "activa", true)}
+      <button class="danger" onclick="NEWS.splice(${i},1);render()">borrar</button></div>
+  </div>`).join("") || `<p class="hint">sin fuentes</p>`;
+}
+
+function renderSkills() {
+  $("c-skills").innerHTML = SKILLS.map(sk => {
+    const id = "i" + Math.random().toString(36).slice(2);
+    setTimeout(() => $(id)?.addEventListener("change", async e => {
+      try {
+        await api("/api/skills", {name: sk.name, enabled: e.target.checked});
+        toast(`skill ${sk.name} → ${e.target.checked ? "ON" : "OFF"} (en caliente)`);
+      } catch (err) { toast(err.message, false); e.target.checked = !e.target.checked; }
+    }));
+    return `<div class="row" style="align-items:center;margin-bottom:6px">
+      <div style="max-width:40px"><input id="${id}" type="checkbox" ${sk.enabled ? "checked" : ""}></div>
+      <div style="max-width:180px"><code>${esc(sk.name)}</code>${sk.inline ? ' <span class="badge on">inline</span>' : ""}</div>
+      <div>${esc(sk.description)} <span class="hint">(${esc(sk.scopes) || "todos los scopes"} · ${esc(sk.file)})</span></div>
+    </div>`;
+  }).join("") || `<p class="hint">sin skills — creá un .md en skills/</p>`;
+}
+
+// ─── Acciones ────────────────────────────────────────────────────────────
+function addFeed() { (S.FEEDS ??= []).push({name: "", type: "list", uri: "", interval_hours: 6,
+  enabled: false, posting_policy: "balanced", learn: true, autonomous_images: false}); render(); }
+function addNews() { NEWS.push({url: "", title: "", description: "", category: "",
+  mode: "comment", enabled: false, interval_hours: 6}); render(); }
+
+async function saveSettings() {
+  try { await api("/api/settings", S); toast("settings guardado ✓ — reiniciá el bot para aplicar"); }
+  catch (e) { toast(e.message, false); }
+}
+async function saveNews() {
+  try { await api("/api/news", NEWS); toast("fuentes guardadas ✓ — reiniciá el bot"); }
+  catch (e) { toast(e.message, false); }
+}
+async function saveEnv() {
+  const updates = {};
+  document.querySelectorAll("[data-env]").forEach(el => { if (el.value.trim()) updates[el.dataset.env] = el.value.trim(); });
+  if (!Object.keys(updates).length) { toast("nada que actualizar"); return; }
+  try {
+    await api("/api/env", updates);
+    toast("credenciales actualizadas ✓ — reiniciá el bot");
+    document.querySelectorAll("[data-env]").forEach(el => el.value = "");
+    load();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function load() {
+  const data = await api("/api/config");
+  S = data.settings; NEWS = data.news; ENV_KEYS = data.env_keys; SKILLS = data.skills;
+  render();
+}
+load().catch(e => toast("no pude cargar la config: " + e.message, false));
+</script>
+</body>
+</html>

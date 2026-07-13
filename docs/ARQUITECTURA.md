@@ -36,6 +36,7 @@ ig_api.py           ← Instagram vía API privada mobile (alternativa sin naveg
 clearsky.py         ← "quién me bloquea" (API pública de ClearSky)
 catalog.py          ← CLI: cataloga imágenes scrapeadas con un modelo de visión
 mem_admin.py        ← CLI: administrar la memoria (facts/lecciones) a mano
+config_ui.py + ui/  ← panel web local (127.0.0.1) para editar settings/.env/news/skills (T22)
 migrate_maripobot.py← migración one-off desde el bot viejo (idempotente)
 prompts/            ← todos los prompts del sistema (T23: nunca inline en .py)
 skills/             ← skills en markdown, editables en caliente
@@ -423,6 +424,11 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
   `--proactive [--force-post]` (pase de feed one-shot) · `--news` · `--heartbeat` ·
   `--fetch-feeds [--backfill]` · `--post-summary <feed>`. Satélites: `mem_admin.py`,
   `catalog.py`, `scrape_ig.py`, `migrate_maripobot.py`.
+- **Panel de configuración** (`python config_ui.py`, T22): UI web solo-localhost (stdlib,
+  cero deps) sobre settings.json/.env/news_sites.json/skills. Credenciales write-only
+  (la API nunca devuelve valores), validación server-side, escrituras atómicas con `.bak`.
+  Settings/.env/news requieren reiniciar el bot; el toggle de skills es hot-reload.
+  Es la UI del núcleo: las futuras UIs por canal serán interfaces separadas.
 - **Credenciales**: nunca en el repo (verificado: `.env` y `config/{bluesky,instagram}.json`
   jamás entraron al historial). Viven en el repo hermano privado `butterbot-secrets` con
   scripts `pull`/`push`.

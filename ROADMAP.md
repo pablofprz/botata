@@ -213,6 +213,7 @@ Generaliza el loop proactivo: hoy feed (T5), noticias (T15) y eventos son pases 
 ### T21 · Descarga de videos IG  `scraper` `M`
 - **Acept.:** extender el scraper IG para bajar videos (hoy se filtran). Baja prioridad.
 
-### T22 · UI de configuración  `ui` `L`
+### T22 · UI de configuración  `ui` `L`  ✅ **HECHO** *(adelantada pre-M7 por decisión del admin)*
 - **Acept.:** UI gráfica para: credenciales de Bluesky, modelo(s), tipo de comunidad (feeds/listas/timeline), y toggles de tools.
-- **Última a propósito:** es un front sobre un schema de config que todavía se está estabilizando (T1/T2/T7).
+- ~~Última a propósito~~ **Adelantada (2026-07-12):** el schema de config ya se estabilizó (TOOLS/TASKS/MCP/FEEDS/MODELS) y la pila de toggles justificaba la UI ya. Criterio del admin: **esta es la UI del núcleo**; las futuras UIs por canal (Discord, etc.) serán interfaces separadas — no una UI para todo.
+- Impl.: `config_ui.py` (stdlib puro: `http.server`, cero deps) + `ui/config.html` (una página, vanilla JS, dark). **Solo localhost** (bind 127.0.0.1; `python config_ui.py [--port] [--no-browser]`). Secciones: identidad · credenciales (.env **write-only**: la API jamás devuelve valores, solo qué claves están seteadas; input vacío = no tocar) · modelos (endpoints/aliases/roles) · feeds · tools (enabled + scopes con ⚠️ al promover a reply) · tareas · MCP · noticias (master + fuentes) · skills (toggle hot-reload que reescribe el frontmatter). **Validación server-side antes de escribir** (scopes/tipos/políticas/aliases huérfanos → 400 con detalle, no toca el archivo); escrituras atómicas (`tmp` + `os.replace`) con backup `.bak`. Verificado en vivo por browser: toggle de skill → frontmatter en disco → restaurado; settings inválido → 400 visible; round-trip del settings re-serializado → el bot importa igual. Tests: `tests/test_config_ui.py` (18). Suite: 189.
