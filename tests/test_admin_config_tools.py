@@ -41,6 +41,7 @@ def env(tmp_path, monkeypatch):
              PeriodicTask("mentions", lambda: None),
              PeriodicTask("heartbeat", lambda: None, interval_hours=12, enabled=False)]
     monkeypatch.setattr(b, "_RUNTIME_TASKS", tasks)
+    monkeypatch.setattr(b, "HEARTBEAT_PATH", tmp_path / "context" / "HEARTBEAT.md")
     reg = b.build_tool_registry()
     return tmp_path, reg, tasks
 
@@ -123,6 +124,40 @@ def test_set_news(env):
     assert "activadas" in out.text
     assert b.NEWS_ENABLED is True
     assert _disk(tmp)["NEWS_ENABLED"] is True
+
+
+# ─── set_heartbeat (todo-en-uno: instrucciones + frecuencia + on/off) ────────
+def test_set_heartbeat_completo(env):
+    tmp, reg, tasks = env
+    out = reg.execute("set_heartbeat", {
+        "instructions": "suplicale a un usuario random que te dé dulce de batata",
+        "interval_hours": 0.0833, "enabled": True}, _CTX)
+    assert "dulce de batata" in out.text and "5 minutos" in out.text
+    assert "aplicado en vivo" in out.text
+    hb = next(t for t in tasks if t.name == "heartbeat")
+    assert hb.enabled is True and abs(hb.interval_hours - 0.0833) < 1e-6   # vivo
+    assert _disk(tmp)["TASKS"]["heartbeat"]["enabled"] is True             # disco
+    assert "dulce de batata" in b.HEARTBEAT_PATH.read_text(encoding="utf-8")
+
+
+def test_set_heartbeat_borrar_instrucciones(env):
+    _, reg, _ = env
+    reg.execute("set_heartbeat", {"instructions": "algo"}, _CTX)
+    out = reg.execute("set_heartbeat", {"instructions": ""}, _CTX)
+    assert "borré" in out.text
+    assert b.HEARTBEAT_PATH.read_text(encoding="utf-8") == ""
+
+
+def test_set_heartbeat_sin_args(env):
+    _, reg, _ = env
+    out = reg.execute("set_heartbeat", {}, _CTX)
+    assert "decime qué" in out.text
+
+
+def test_set_heartbeat_es_config_tool_protegida(env):
+    _, reg, _ = env
+    out = reg.execute("set_tool_config", {"tool": "set_heartbeat", "enabled": False}, _CTX)
+    assert "anti-lockout" in out.text
 
 
 # ─── set_mcp_enabled ─────────────────────────────────────────────────────────

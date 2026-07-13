@@ -69,9 +69,10 @@ FEEDS_DIR   = CONTEXT_DIR / "feeds"
 POSTED_DIR.mkdir(exist_ok=True)
 FEEDS_DIR.mkdir(exist_ok=True)
 
-DB_PATH       = POSTED_DIR  / "butterbot.db"
-SETTINGS_PATH = CONFIG_DIR  / "settings.json"
-MEMORY_PATH   = CONTEXT_DIR / "MEMORY.md"
+DB_PATH        = POSTED_DIR  / "butterbot.db"
+SETTINGS_PATH  = CONFIG_DIR  / "settings.json"
+MEMORY_PATH    = CONTEXT_DIR / "MEMORY.md"
+HEARTBEAT_PATH = CONTEXT_DIR / "HEARTBEAT.md"  # instrucciones vigentes del admin para el heartbeat
 
 # ---------------------------------------------------------------------------
 # Config
@@ -1524,8 +1525,16 @@ _PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "MODELS", "OPENAI_ENDPOINT"
 # Las tools de config no se tocan a sí mismas (anti auto-lockout / escalación).
 _CONFIG_TOOL_NAMES = frozenset({
     "get_bot_config", "set_tool_config", "set_task_config",
-    "set_feed_config", "set_news_enabled", "set_mcp_enabled",
+    "set_feed_config", "set_news_enabled", "set_mcp_enabled", "set_heartbeat",
 })
+
+
+def _fmt_interval(hours: float) -> str:
+    if hours <= 0:
+        return "en cada ciclo"
+    if hours < 1:
+        return f"cada {round(hours * 60)} minutos"
+    return f"cada {hours:g} hora{'s' if hours != 1 else ''}"
 
 # Regla: por comando solo se REDUCE exposición. Agregar estos scopes = solo UI.
 _PUBLIC_SCOPES = frozenset({Scope.REPLY, Scope.FEED_REFLECTION})
@@ -1596,17 +1605,20 @@ def run_news_loop() -> None:
 
 def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
                        conn: sqlite3.Connection) -> None:
-    """Mira los eventos de hoy/próximos y DECIDE si vale la pena decir algo.
+    """Mira los eventos de hoy/próximos + las instrucciones vigentes del admin
+    (context/HEARTBEAT.md, editables por comando vía set_heartbeat) y DECIDE si
+    vale la pena decir algo.
 
     Misma filosofía que ReflectDecideNode: decisión del agente, sin cron rígido.
-    Sin eventos → return sin tocar el LLM (costo cero). El intervalo lo gatea el
-    scheduler (cursor `task:heartbeat`), no esta función.
+    Sin eventos NI instrucciones → return sin tocar el LLM (costo cero). El
+    intervalo lo gatea el scheduler (cursor `task:heartbeat`), no esta función.
     """
+    instrucciones = load_text(HEARTBEAT_PATH).strip()
     hoy      = dbmod.events_today(conn)
     proximos = [e for e in dbmod.upcoming_events(conn, limit=5)
                 if e["id"] not in {h["id"] for h in hoy}]
-    if not hoy and not proximos:
-        log.info("heartbeat: sin eventos — nada que decir")
+    if not hoy and not proximos and not instrucciones:
+        log.info("heartbeat: sin eventos ni instrucciones — nada que decir")
         return
 
     def _fmt(e: dict) -> str:
@@ -1620,6 +1632,9 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
     skills_block = skills_prompt_block(SKILLS_DIR, Scope.FEED_REFLECTION)
     if skills_block:
         parts.append(f"\n---\n{skills_block}")
+    if instrucciones:
+        parts.append("\n---\nINSTRUCCIONES VIGENTES del admin para este pase "
+                     "(tu tarea principal ahora):\n" + instrucciones)
     if hoy:
         parts.append("\n---\nEventos de HOY:\n" + "\n".join(_fmt(e) for e in hoy))
     if proximos:
@@ -2401,6 +2416,9 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             f"({f.get('posting_policy', 'balanced')}, {f.get('interval_hours', 6)}h)"
             for f in FEEDS_CONFIG))
         lines.append(f"noticias (NEWS_ENABLED): {'on' if NEWS_ENABLED else 'off'}")
+        hb_inst = load_text(HEARTBEAT_PATH).strip()
+        lines.append("instrucciones del heartbeat: "
+                     + (f"«{hb_inst[:120]}»" if hb_inst else "ninguna (solo calendario)"))
         lines.append("mcp: " + (", ".join(
             f"{name}={'on' if cfg.get('enabled', True) else 'off'}"
             for name, cfg in MCP_CONFIG.items()) or "sin servers"))
@@ -2469,10 +2487,52 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                 if interval is not None:
                     t.interval_hours = float(interval)
                 live = " — aplicado en vivo y"
-        return ToolResult(text=f"tarea {name}: "
-                          + (f"enabled={enabled} " if enabled is not None else "")
-                          + (f"cada {interval}h" if interval is not None else "")
+        estado = ("la prendí" if enabled else "la apagué") if enabled is not None else "la ajusté"
+        return ToolResult(text=f"listo, tarea {name}: {estado}"
+                          + (f", corre {_fmt_interval(float(interval))}" if interval is not None else "")
                           + f"{live} guardado")
+
+    def _set_heartbeat(args: dict, ctx: ToolContext) -> ToolResult:
+        """Todo-en-uno del heartbeat: instrucciones + frecuencia + on/off en UNA
+        llamada (el flujo admin ejecuta una sola tool; un pedido compuesto tipo
+        'cada 5 minutos hacé X' no debe perder la mitad)."""
+        instructions = args.get("instructions")
+        interval = args.get("interval_hours")
+        enabled = _as_bool(args.get("enabled"))
+        if instructions is None and interval is None and enabled is None:
+            return ToolResult(text="decime qué cambio del heartbeat: instrucciones, "
+                              "frecuencia y/o prendido/apagado")
+        if interval is not None or enabled is not None:
+            def delta(s: dict) -> None:
+                cfg = s.setdefault("TASKS", {}).setdefault("heartbeat", {})
+                if enabled is not None:
+                    cfg["enabled"] = enabled
+                if interval is not None:
+                    cfg["interval_hours"] = float(interval)
+            errs = _persist_settings_delta(delta)
+            if errs:
+                return ToolResult(text="no apliqué nada: " + "; ".join(errs))
+            for t in _RUNTIME_TASKS:
+                if t.name == "heartbeat":
+                    if enabled is not None:
+                        t.enabled = enabled
+                    if interval is not None:
+                        t.interval_hours = float(interval)
+        if instructions is not None:
+            text = instructions.strip()
+            HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_PATH.write_text(text + "\n" if text else "", encoding="utf-8")
+        partes = ["dale, heartbeat actualizado:"]
+        if enabled is not None:
+            partes.append("prendido" if enabled else "apagado")
+        if interval is not None:
+            partes.append(_fmt_interval(float(interval)))
+        if instructions is not None:
+            corto = (instructions.strip()[:140] + "…") if len(instructions.strip()) > 140 else instructions.strip()
+            partes.append(f"y la instrucción vigente es: «{corto}»" if corto
+                          else "y borré las instrucciones (vuelvo a solo calendario)")
+        partes.append("— aplicado en vivo y guardado")
+        return ToolResult(text=" ".join(partes))
 
     def _set_feed_config(args: dict, ctx: ToolContext) -> ToolResult:
         name = (args.get("name") or "").strip()
@@ -2549,12 +2609,25 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                                 "enum": ["reply", "feed_reflection", "admin"]}},
                  }, "required": ["tool"]}, _set_tool_config, {Scope.ADMIN})
     reg.register("set_task_config",
-                 "Prende/apaga una tarea periódica (feed, news, mentions, heartbeat) o cambia su intervalo en horas.",
+                 "Prende/apaga una tarea periódica (feed, news, mentions) o cambia su intervalo en horas. "
+                 "Para el heartbeat usá set_heartbeat.",
                  {**_obj, "properties": {
                      "task": {"type": "string"},
                      "enabled": {"type": "boolean"},
                      "interval_hours": {"type": "number"},
                  }, "required": ["task"]}, _set_task_config, {Scope.ADMIN})
+    reg.register("set_heartbeat",
+                 "Configura el heartbeat COMPLETO en una sola llamada: qué debe hacer en cada pase "
+                 "(instructions, en lenguaje natural), cada cuánto corre (interval_hours; 5 minutos "
+                 "= 0.0833) y si está prendido (enabled). Usala para CUALQUIER pedido sobre el "
+                 "heartbeat; si el admin da una instrucción de qué hacer, casi siempre enabled=true.",
+                 {**_obj, "properties": {
+                     "instructions": {"type": "string",
+                                      "description": "Qué debe hacer el bot en cada pase, en lenguaje "
+                                                     "natural. String vacío = borrar (vuelve a solo calendario)."},
+                     "interval_hours": {"type": "number"},
+                     "enabled": {"type": "boolean"},
+                 }}, _set_heartbeat, {Scope.ADMIN})
     reg.register("set_feed_config",
                  "Ajusta un feed proactivo: enabled, intervalo en horas y/o política de posteo.",
                  {**_obj, "properties": {

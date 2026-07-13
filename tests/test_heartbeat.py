@@ -25,6 +25,12 @@ def conn(tmp_path):
     return c
 
 
+@pytest.fixture(autouse=True)
+def _hb_path(tmp_path, monkeypatch):
+    """Aísla HEARTBEAT.md del archivo real del repo."""
+    monkeypatch.setattr(b, "HEARTBEAT_PATH", tmp_path / "HEARTBEAT.md")
+
+
 class FakeBsky:
     def __init__(self):
         self.posts = []
@@ -97,6 +103,25 @@ def test_texto_vacio_no_postea(conn, monkeypatch):
     bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=True, text="  "))
     _run(conn, bsky, llm, monkeypatch)
     assert bsky.posts == []
+
+
+def test_instrucciones_sin_eventos_llama_llm(conn, monkeypatch):
+    """Con instrucciones vigentes, el pase corre aunque no haya eventos."""
+    b.HEARTBEAT_PATH.write_text(
+        "suplicale a un usuario random que te dé dulce de batata\n", encoding="utf-8")
+    decision = b.FeedDecision(should_post=True, reason="batata", text="alguien tiene batata? 🙏")
+    bsky, llm = FakeBsky(), FakeLLM(decision)
+    _run(conn, bsky, llm, monkeypatch)
+    assert llm.calls == 1
+    assert "INSTRUCCIONES VIGENTES" in llm.last_system
+    assert "dulce de batata" in llm.last_system
+    assert bsky.posts == ["alguien tiene batata? 🙏"]
+
+
+def test_sin_eventos_ni_instrucciones_no_llama(conn, monkeypatch):
+    bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=True, text="x"))
+    _run(conn, bsky, llm, monkeypatch)
+    assert llm.calls == 0 and bsky.posts == []
 
 
 def test_error_del_llm_es_graceful(conn, monkeypatch):
