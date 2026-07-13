@@ -200,3 +200,6 @@ __marimo__/
 
 # Playwright MCP — artefactos del server browser (snapshots, sesiones)
 .playwright-mcp/
+
+# Backups de las escrituras atómicas (config UI T22 / comandos de admin T30)
+*.bak

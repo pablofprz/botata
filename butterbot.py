@@ -38,7 +38,7 @@ from typing_extensions import TypedDict
 
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
-from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope  # framework de tools
+from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope, ALL_SCOPES  # framework de tools
 from skills import skills_prompt_block, get_skill_body  # workspace de skills (T26)
 from scheduler import PeriodicTask, apply_tasks_config, run_due  # tareas periódicas (T27)
 from router import ModelRouter, RoleLLM, build_router  # router de modelos + fallbacks
@@ -1499,6 +1499,53 @@ def run_news_pass(bsky: BskyClient, router: ModelRouter, db: sqlite3.Connection,
                 log.info("news %s: item posteado %s", src["host"], uri)
 
 
+# ---------------------------------------------------------------------------
+# Config por comandos de admin (T30)
+# ---------------------------------------------------------------------------
+
+# Lista viva de tareas del loop (la llena run()); las tools de config la mutan
+# para que "prendé el heartbeat" aplique sin reiniciar.
+_RUNTIME_TASKS: list[PeriodicTask] = []
+
+# Claves que JAMÁS se cambian desde un post (lock-out/secuestro). Defensa en
+# profundidad: aunque un handler futuro lo intente, el guard lo rechaza.
+_PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "MODELS")
+
+
+def _persist_settings_delta(apply: "Callable[[dict], None]") -> list[str]:
+    """Lee settings.json fresco, aplica el delta, valida y escribe atómico (T22).
+
+    Releer del disco evita pisar cambios hechos por la UI mientras el bot corre.
+    Devuelve lista de errores ([] = ok). El guard de claves protegidas rechaza
+    cualquier delta que toque identidad, modelos o la ESTRUCTURA de MCP (su
+    `enabled` sí se puede).
+    """
+    from config_ui import ConfigStore  # lazy: evita el costo en el arranque normal
+    store = ConfigStore(BASE_DIR)
+    current = json.loads(store.settings_path.read_text(encoding="utf-8"))
+
+    def _snapshot(s: dict) -> str:
+        mcp_struct = {name: {k: v for k, v in (cfg or {}).items() if k != "enabled"}
+                      for name, cfg in s.get("MCP", {}).items()}
+        return json.dumps({**{k: s.get(k) for k in _PROTECTED_SETTINGS},
+                           "_mcp": mcp_struct}, sort_keys=True, ensure_ascii=False)
+
+    before = _snapshot(current)
+    apply(current)
+    if _snapshot(current) != before:
+        return ["cambio prohibido: identidad/modelos/estructura MCP no se tocan por comando"]
+    return store.write_settings(current)
+
+
+def _as_bool(value) -> bool | None:
+    """Coerción tolerante para args del LLM ('true'/'false'/bool). None si no vino."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "sí", "si", "on")
+
+
 def run_news_loop() -> None:
     """Pase único del pipeline de noticias desde CLI (`--news`). Ignora el intervalo."""
     db     = init_db()
@@ -2284,6 +2331,7 @@ def build_tool_registry(config: dict | None = None, *,
         _tool_use_skill,
         {Scope.REPLY, Scope.FEED_REFLECTION},
     )
+    _register_admin_config_tools(reg)  # T30: config por comandos de admin
     if mcp_config:
         import mcp_tools  # lazy: solo si hay servers MCP configurados
         n = mcp_tools.register_mcp_tools(reg, mcp_config)
@@ -2291,6 +2339,193 @@ def build_tool_registry(config: dict | None = None, *,
     if config:
         reg.apply_config(config)
     return reg
+
+
+def _register_admin_config_tools(reg: ToolRegistry) -> None:
+    """T30: tools scope ADMIN para ajustar la config desde la plataforma.
+
+    Doble efecto: persistir a settings.json (validado, atómico — T22) y aplicar
+    en vivo sobre los objetos que el loop consulta. Orden: persistir PRIMERO
+    (si la validación rechaza, el runtime no se toca).
+    """
+
+    def _get_bot_config(args: dict, ctx: ToolContext) -> ToolResult:
+        lines = ["config actual:"]
+        off = [n for n in reg.names() if not reg.get(n).enabled]
+        lines.append("tools apagadas: " + (", ".join(off) or "ninguna"))
+        risky = [n for n in reg.names()
+                 if reg.get(n).enabled and Scope.REPLY in reg.get(n).scopes]
+        lines.append("tools con scope reply (públicas): " + ", ".join(sorted(risky)))
+        if _RUNTIME_TASKS:
+            lines.append("tareas: " + ", ".join(
+                f"{t.name}={'on' if t.enabled else 'off'}"
+                + (f" cada {t.interval_hours}h" if t.interval_hours else "")
+                for t in _RUNTIME_TASKS))
+        lines.append("feeds: " + ", ".join(
+            f"{f['name']}={'on' if f.get('enabled', True) else 'off'} "
+            f"({f.get('posting_policy', 'balanced')}, {f.get('interval_hours', 6)}h)"
+            for f in FEEDS_CONFIG))
+        lines.append(f"noticias (NEWS_ENABLED): {'on' if NEWS_ENABLED else 'off'}")
+        lines.append("mcp: " + (", ".join(
+            f"{name}={'on' if cfg.get('enabled', True) else 'off'}"
+            for name, cfg in MCP_CONFIG.items()) or "sin servers"))
+        return ToolResult(text="\n".join(lines))
+
+    def _set_tool_config(args: dict, ctx: ToolContext) -> ToolResult:
+        name = (args.get("tool") or "").strip()
+        tool = reg.get(name)
+        if tool is None:
+            return ToolResult(text=f"tool desconocida: '{name}'. Válidas: {', '.join(reg.names())}")
+        enabled, scopes = _as_bool(args.get("enabled")), args.get("scopes")
+
+        def delta(s: dict) -> None:
+            cfg = s.setdefault("TOOLS", {}).setdefault(name, {})
+            if enabled is not None:
+                cfg["enabled"] = enabled
+            if scopes is not None:
+                cfg["scopes"] = list(scopes)
+        errs = _persist_settings_delta(delta)
+        if errs:
+            return ToolResult(text="no apliqué nada: " + "; ".join(errs))
+        if enabled is not None:
+            tool.enabled = enabled
+        if scopes is not None:
+            tool.scopes = frozenset(set(scopes) & ALL_SCOPES)
+        return ToolResult(text=f"tool {name}: "
+                          + (f"enabled={enabled} " if enabled is not None else "")
+                          + (f"scopes={sorted(tool.scopes)}" if scopes is not None else "")
+                          + " — aplicado en vivo y guardado")
+
+    def _set_task_config(args: dict, ctx: ToolContext) -> ToolResult:
+        name = (args.get("task") or "").strip()
+        known = ([t.name for t in _RUNTIME_TASKS] or list(TASKS_CONFIG)
+                 or ["feed", "news", "mentions", "heartbeat"])
+        if name not in known:
+            return ToolResult(text=f"tarea desconocida: '{name}'. Válidas: {', '.join(known)}")
+        enabled = _as_bool(args.get("enabled"))
+        interval = args.get("interval_hours")
+
+        def delta(s: dict) -> None:
+            cfg = s.setdefault("TASKS", {}).setdefault(name, {})
+            if enabled is not None:
+                cfg["enabled"] = enabled
+            if interval is not None:
+                cfg["interval_hours"] = float(interval)
+        errs = _persist_settings_delta(delta)
+        if errs:
+            return ToolResult(text="no apliqué nada: " + "; ".join(errs))
+        live = ""
+        for t in _RUNTIME_TASKS:
+            if t.name == name:
+                if enabled is not None:
+                    t.enabled = enabled
+                if interval is not None:
+                    t.interval_hours = float(interval)
+                live = " — aplicado en vivo y"
+        return ToolResult(text=f"tarea {name}: "
+                          + (f"enabled={enabled} " if enabled is not None else "")
+                          + (f"cada {interval}h" if interval is not None else "")
+                          + f"{live} guardado")
+
+    def _set_feed_config(args: dict, ctx: ToolContext) -> ToolResult:
+        name = (args.get("name") or "").strip()
+        live_feed = next((f for f in FEEDS_CONFIG if f.get("name") == name), None)
+        if live_feed is None:
+            return ToolResult(text=f"feed desconocido: '{name}'. Válidos: "
+                              + ", ".join(f.get("name", "?") for f in FEEDS_CONFIG))
+        enabled = _as_bool(args.get("enabled"))
+        interval, policy = args.get("interval_hours"), args.get("posting_policy")
+
+        def delta(s: dict) -> None:
+            for f in s.get("FEEDS", []):
+                if f.get("name") == name:
+                    if enabled is not None:
+                        f["enabled"] = enabled
+                    if interval is not None:
+                        f["interval_hours"] = float(interval)
+                    if policy is not None:
+                        f["posting_policy"] = policy
+        errs = _persist_settings_delta(delta)
+        if errs:
+            return ToolResult(text="no apliqué nada: " + "; ".join(errs))
+        if enabled is not None:
+            live_feed["enabled"] = enabled
+        if interval is not None:
+            live_feed["interval_hours"] = float(interval)
+        if policy is not None:
+            live_feed["posting_policy"] = policy
+        return ToolResult(text=f"feed {name} actualizado — aplicado en vivo y guardado")
+
+    def _set_news_enabled(args: dict, ctx: ToolContext) -> ToolResult:
+        enabled = _as_bool(args.get("enabled"))
+        if enabled is None:
+            return ToolResult(text="falta el argumento enabled (true/false)")
+
+        def delta(s: dict) -> None:
+            s["NEWS_ENABLED"] = enabled
+        errs = _persist_settings_delta(delta)
+        if errs:
+            return ToolResult(text="no apliqué nada: " + "; ".join(errs))
+        global NEWS_ENABLED
+        NEWS_ENABLED = enabled
+        return ToolResult(text=f"noticias {'activadas' if enabled else 'desactivadas'} "
+                          "— aplicado en vivo y guardado")
+
+    def _set_mcp_enabled(args: dict, ctx: ToolContext) -> ToolResult:
+        name = (args.get("server") or "").strip()
+        if name not in MCP_CONFIG:
+            return ToolResult(text=f"server MCP desconocido: '{name}'. Válidos: "
+                              + (", ".join(MCP_CONFIG) or "ninguno"))
+        enabled = _as_bool(args.get("enabled"))
+        if enabled is None:
+            return ToolResult(text="falta el argumento enabled (true/false)")
+
+        def delta(s: dict) -> None:
+            s.setdefault("MCP", {}).setdefault(name, {})["enabled"] = enabled
+        errs = _persist_settings_delta(delta)
+        if errs:
+            return ToolResult(text="no apliqué nada: " + "; ".join(errs))
+        MCP_CONFIG.setdefault(name, {})["enabled"] = enabled
+        return ToolResult(text=f"server MCP {name}: enabled={enabled} — guardado; "
+                          "REINICIÁ el bot para que aplique (spawn de procesos)")
+
+    _obj = {"type": "object"}
+    reg.register("get_bot_config",
+                 "Muestra la configuración actual del bot (tools, tareas, feeds, noticias, MCP).",
+                 {**_obj, "properties": {}}, _get_bot_config, {Scope.ADMIN})
+    reg.register("set_tool_config",
+                 "Prende/apaga una tool del bot o cambia sus scopes. Cambio en vivo + persistido.",
+                 {**_obj, "properties": {
+                     "tool": {"type": "string", "description": "Nombre exacto de la tool."},
+                     "enabled": {"type": "boolean"},
+                     "scopes": {"type": "array", "items": {"type": "string",
+                                "enum": ["reply", "feed_reflection", "admin"]}},
+                 }, "required": ["tool"]}, _set_tool_config, {Scope.ADMIN})
+    reg.register("set_task_config",
+                 "Prende/apaga una tarea periódica (feed, news, mentions, heartbeat) o cambia su intervalo en horas.",
+                 {**_obj, "properties": {
+                     "task": {"type": "string"},
+                     "enabled": {"type": "boolean"},
+                     "interval_hours": {"type": "number"},
+                 }, "required": ["task"]}, _set_task_config, {Scope.ADMIN})
+    reg.register("set_feed_config",
+                 "Ajusta un feed proactivo: enabled, intervalo en horas y/o política de posteo.",
+                 {**_obj, "properties": {
+                     "name": {"type": "string"},
+                     "enabled": {"type": "boolean"},
+                     "interval_hours": {"type": "number"},
+                     "posting_policy": {"type": "string",
+                                        "enum": ["conservative", "balanced", "active"]},
+                 }, "required": ["name"]}, _set_feed_config, {Scope.ADMIN})
+    reg.register("set_news_enabled",
+                 "Prende/apaga el posteo de noticias RSS (master switch NEWS_ENABLED).",
+                 {**_obj, "properties": {"enabled": {"type": "boolean"}},
+                  "required": ["enabled"]}, _set_news_enabled, {Scope.ADMIN})
+    reg.register("set_mcp_enabled",
+                 "Habilita/deshabilita un server MCP (reddit, browser). Requiere reiniciar el bot.",
+                 {**_obj, "properties": {"server": {"type": "string"},
+                                          "enabled": {"type": "boolean"}},
+                  "required": ["server", "enabled"]}, _set_mcp_enabled, {Scope.ADMIN})
 
 
 # ---------------------------------------------------------------------------
@@ -2892,6 +3127,7 @@ def run(mode: str) -> None:
                      interval_hours=12, enabled=False),  # outward-facing: el admin lo prende
     ]
     apply_tasks_config(tasks, TASKS_CONFIG)
+    _RUNTIME_TASKS[:] = tasks  # T30: las tools de config del admin mutan esta lista en vivo
     log.info("Tareas: %s", ", ".join(
         f"{t.name}{'(off)' if not t.enabled else ''}" for t in tasks))
 

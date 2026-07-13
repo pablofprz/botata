@@ -295,6 +295,14 @@ Tools actuales (por scope predominante): `web_search` (Brave), `get_upcoming_eve
 `block_me` (reply); `save_to_user_profile` / `save_to_memory` / `search_images` /
 `get_debug_info` / `get_help` (admin).
 
+**Config por comandos (T30):** el admin ajusta la configuración desde Bluesky con 6 tools
+scope `admin` (`get_bot_config` + `set_{tool,task,feed}_config`, `set_news_enabled`,
+`set_mcp_enabled`). Doble efecto: persisten a settings.json (validado + atómico, releyendo
+el disco para no pisar a la UI de T22) y aplican **en vivo** sobre los objetos que el loop
+consulta. Regla de seguridad: identidad (`BOT_HANDLE`/`ADMIN_HANDLE`), `MODELS` y la
+estructura de MCP son **intocables por post** (guard en `_persist_settings_delta`) — un
+mensaje jamás puede sacarte el control del bot.
+
 ## 9. Skills (skills.py, T26)
 
 Comportamiento **temático** en `skills/*.md`, editable en caliente (la carpeta se relee en
