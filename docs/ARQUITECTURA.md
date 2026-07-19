@@ -474,7 +474,8 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 - **Prompt nuevo**: siempre archivo en `prompts/`, cargado con `load_text` (T23).
 - **Canal nuevo (M7, futuro)**: extraer de `BskyClient` la interfaz `Channel`
   (mentions/post/reply/thread/perfil normalizado); el grafo no debe saber en qué red habla.
-  El orden decidido: Bluesky → Mastodon → Discord → Telegram → WhatsApp.
+  Alcance decidido (2026-07-19): SOLO Bluesky → Mastodon → Discord (Pleroma/Akkoma
+  gratis vía Mastodon API si sobra tiempo; el resto descartado — ver ROADMAP T28).
 
 ## 17. Límites conocidos y deuda deliberada
 

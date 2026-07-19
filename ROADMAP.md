@@ -211,8 +211,10 @@ El admin ajusta la config del bot **desde Bluesky** ("@bot prendé el heartbeat 
 
 ### T28 · Abstracción Channel (gateway multi-plataforma)  `infra` `L`
 - **Acept.:** interfaz `Channel` (mentions/post/reply/perfil de autor, sobre de mensaje normalizado) de la que `BskyChannel` es la primera implementación. El grafo langgraph no sabe en qué plataforma habla.
-- **Orden de expansión decidido:** Bluesky → Mastodon → Discord → Telegram → WhatsApp. Un canal nuevo = una implementación de `Channel` + config; cero cambios en el núcleo.
-- Incluye revisar el modelo de sesión: en Bluesky la conversación es el thread (se reconstruye por `get_post_thread`); en Discord/Telegram hace falta estado de conversación persistente por canal/chat.
+- **Alcance decidido (discusión 2026-07-19): SOLO Mastodon y Discord.** Orden: Bluesky → **Mastodon** (port de mayor fidelidad: mención→reply, timeline local = feed comunitario, bios, flag `bot` oficial, `Mastodon.py`) → **Discord** (bots ciudadanos de primera clase vía API oficial, pero mayor impedance mismatch: sin feed ni bios ricas, modelo push/gateway vs poll — es donde la abstracción se estresa de verdad). Telegram/WhatsApp salen del plan por ahora. **Regla de diseño: T28 se diseña mirando SOLO estos dos casos reales**, no plataformas hipotéticas.
+- **Si sobra tiempo:** Pleroma/Akkoma (forks del fediverso que implementan la Mastodon client API) deberían andar **gratis** sobre el canal Mastodon — solo testear, cero código. Nada más que eso.
+- **Evaluado y DESCARTADO como canal (2026-07-19):** Misskey/Sharkey (API propia no-Mastodon, comunidades ES inexistentes) · Pixelfed/Friendica (engagement flaco / comunidades minúsculas) · PeerTube, Piefed, Skylight (sin grafo conversacional) · Ghost/WordPress/WhiteWind (long-form: serían un feature "digest", no un canal). **No son canales sino otra cosa** (backlog, sin prioridad): Lemmy = *fuente* estilo Reddit-RSS para Membrilla, jamás canal (comunidades hostiles a bots LLM); Mobilizon y Smoke Signal = *integraciones del calendario* (T4/T9) — Smoke Signal sería casi gratis (misma sesión atproto, otro lexicon).
+- Incluye revisar el modelo de sesión: en Bluesky la conversación es el thread (se reconstruye por `get_post_thread`); en Discord hace falta estado de conversación persistente por canal/chat.
 
 ---
 
