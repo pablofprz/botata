@@ -204,5 +204,8 @@ __marimo__/
 # Backups de las escrituras atómicas (config UI T22 / comandos de admin T30)
 *.bak
 
-# Instrucciones runtime del heartbeat (las escribe el comando set_heartbeat)
-context/HEARTBEAT.md
+# Override runtime del heartbeat (lo escribe el comando set_heartbeat; auxiliar)
+context/heartbeat_override.md
+
+# Dump legible de la memoria (parse_memory.py) — data de usuarios, como la DB
+parsed_memory/
