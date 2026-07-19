@@ -1,12 +1,12 @@
-# Trae la DB canónica desde la nube a posted/butterbot.db (respaldando la local).
+# Trae la DB canónica desde la nube a posted/botata.db (respaldando la local).
 # Uso:  .\scripts\db-restore.ps1                 (remote 'gdrive' por default)
 param(
     [string]$Remote = "butterbotdb",
-    [string]$RemotePath = "butterbot/butterbot.db"
+    [string]$RemotePath = "butterbot/butterbot.db"  # remote SIN renombrar: el Drive es storage, botata.db local ↔ butterbot.db remoto
 )
 $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
-$db = Join-Path $repo "posted\butterbot.db"
+$db = Join-Path $repo "posted\botata.db"
 New-Item -ItemType Directory -Force -Path (Split-Path $db) | Out-Null
 
 if (Test-Path $db) {

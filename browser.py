@@ -1,6 +1,6 @@
 """browser.py — capa de navegador reusable (Patchright, perfil persistente).
 
-Cimiento del scraping agéntico de butterbot. NO sabe de plataformas: abre páginas
+Cimiento del scraping agéntico de botata. NO sabe de plataformas: abre páginas
 y devuelve su contenido renderizado. La navegación y extracción específica de cada
 sitio vive en los adaptadores de `sources.py`.
 
@@ -23,7 +23,7 @@ from typing import Any
 
 from patchright.sync_api import BrowserContext, sync_playwright
 
-log = logging.getLogger("butterbot.browser")
+log = logging.getLogger("botata.browser")
 
 # UA realista de Chrome en Windows — evita el default de Playwright, que es señal de bot.
 _DEFAULT_UA = (

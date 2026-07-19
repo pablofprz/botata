@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ.setdefault("BSKY_PASSWORD", "dummy")  # butterbot lo lee a nivel módulo
+os.environ.setdefault("BSKY_PASSWORD", "dummy")  # botata lo lee a nivel módulo
 
-import butterbot as b  # noqa: E402
+import botata as b  # noqa: E402
 import db as d  # noqa: E402
 
 

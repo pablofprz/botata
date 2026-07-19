@@ -25,7 +25,7 @@ El frontmatter ES la config (no hay sección SKILLS en settings.json): archivo
 autodescriptivo que el admin/moderador edita entero. Los archivos se releen en
 cada pase (mismo patrón sin cache que SOUL/MEMORY) → edición en caliente.
 
-Infra genérica estilo tools.py: no conoce butterbot.
+Infra genérica estilo tools.py: no conoce botata.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from pathlib import Path
 
 from tools import ALL_SCOPES
 
-log = logging.getLogger("butterbot.skills")
+log = logging.getLogger("botata.skills")
 
 _DEFAULT_SCOPES: frozenset[str] = frozenset(ALL_SCOPES)
 

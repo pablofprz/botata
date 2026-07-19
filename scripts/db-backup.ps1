@@ -1,18 +1,18 @@
-# Snapshot consistente de posted/butterbot.db y subida a la nube vía rclone.
+# Snapshot consistente de posted/botata.db y subida a la nube vía rclone.
 # Requiere rclone configurado con un remote (ver scripts/README.md).
 # Uso:  .\scripts\db-backup.ps1                 (remote 'gdrive' por default)
 #       .\scripts\db-backup.ps1 -Remote dropbox
 param(
     [string]$Remote = "butterbotdb",
-    [string]$RemotePath = "butterbot/butterbot.db"
+    [string]$RemotePath = "butterbot/butterbot.db"  # remote SIN renombrar: el Drive es storage, botata.db local ↔ butterbot.db remoto
 )
 $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 $py = Join-Path $repo ".venv\Scripts\python.exe"
 if (-not (Test-Path $py)) { $py = "python" }
 
-$db   = Join-Path $repo "posted\butterbot.db"
-$snap = Join-Path $env:TEMP "butterbot.snapshot.db"
+$db   = Join-Path $repo "posted\botata.db"
+$snap = Join-Path $env:TEMP "botata.snapshot.db"
 if (-not (Test-Path $db)) { throw "no existe la DB: $db" }
 
 & $py (Join-Path $PSScriptRoot "db_snapshot.py") $db $snap

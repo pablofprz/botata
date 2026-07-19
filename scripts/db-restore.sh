@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Trae la DB canónica desde la nube a posted/butterbot.db (respaldando la local).
+# Trae la DB canónica desde la nube a posted/botata.db (respaldando la local).
 # Uso:  ./scripts/db-restore.sh [remote] [remote_path]
 set -euo pipefail
 REMOTE="${1:-butterbotdb}"
 REMOTE_PATH="${2:-butterbot/butterbot.db}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-DB="$REPO/posted/butterbot.db"
+DB="$REPO/posted/botata.db"
 mkdir -p "$(dirname "$DB")"
 
 if [ -f "$DB" ]; then

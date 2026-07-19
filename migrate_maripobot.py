@@ -1,4 +1,4 @@
-"""migrate_maripobot.py — migración one-off de la data de maripobot a butterbot.db.
+"""migrate_maripobot.py — migración one-off de la data de maripobot a botata.db.
 
 Source: maripobot_deprecated/context/ (la data viva completa).
   - perfiles.json + users/*.md  → users + user_facts
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import db
 
-log = logging.getLogger("butterbot.migrate")
+log = logging.getLogger("botata.migrate")
 
 BASE_DIR = Path(__file__).parent
 SRC_DIR = BASE_DIR / "maripobot_deprecated" / "context"
@@ -139,6 +139,6 @@ def migrate(conn: sqlite3.Connection) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    conn = db.init_db()  # crea tablas nuevas (IF NOT EXISTS) sobre butterbot.db real
+    conn = db.init_db()  # crea tablas nuevas (IF NOT EXISTS) sobre botata.db real
     migrate(conn)
     conn.close()

@@ -8,7 +8,7 @@ Dos modos de cadencia:
 - `interval_hours = 0` (default): corre en CADA iteración — para pases que ya
   se auto-gatean por dentro (feed por-feed, news por-fuente, poll de menciones).
 - `interval_hours > 0`: gate a nivel scheduler vía cursor `task:{name}` en
-  `feed_cursors` (helpers get/save inyectados para no acoplar a butterbot).
+  `feed_cursors` (helpers get/save inyectados para no acoplar a botata).
 
 Aislamiento de errores POR TAREA: una tarea que explota no frena a las demás.
 KeyboardInterrupt es BaseException → atraviesa y corta el loop, como siempre.
@@ -16,7 +16,7 @@ KeyboardInterrupt es BaseException → atraviesa y corta el loop, como siempre.
 Config declarativa: settings.json → sección TASKS (`{name: {enabled,
 interval_hours}}`, patrón TOOLS) vía `apply_tasks_config`.
 
-Infra genérica: no conoce butterbot ni la DB (recibe callables).
+Infra genérica: no conoce botata ni la DB (recibe callables).
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
-log = logging.getLogger("butterbot.scheduler")
+log = logging.getLogger("botata.scheduler")
 
 
 @dataclass

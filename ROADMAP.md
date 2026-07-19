@@ -1,4 +1,4 @@
-# Butterbot — Roadmap
+# Botata — Roadmap
 
 Refundación del bot comunitario de Bluesky sobre langgraph + SQLite. Este documento es
 la **fuente de verdad** de las funciones a construir, ordenadas por fase y prioridad.
@@ -37,7 +37,7 @@ Selección de modelo por función, endpoint-agnóstico, con fallbacks.
 
 ### T3 · El bot sabe la fecha  `infra` `S`  *(quick win)*  ✅ **HECHO**
 - **Acept.:** cada contexto de reasoning (reply, feed-reflection, admin) recibe la fecha/hora actual (TZ America/Argentina/Buenos_Aires) inyectada en el system prompt.
-- Impl.: helper `current_datetime_line()` en `butterbot.py` (ZoneInfo + fallback UTC-3, `tzdata` en deps). Inyectado en reply, admin, feed_summary, feed_opinion y update_profile. Fija el bug de fecha alucinada (el bot leía fechas de MEMORY.md como "hoy").
+- Impl.: helper `current_datetime_line()` en `botata.py` (ZoneInfo + fallback UTC-3, `tzdata` en deps). Inyectado en reply, admin, feed_summary, feed_opinion y update_profile. Fija el bug de fecha alucinada (el bot leía fechas de MEMORY.md como "hoy").
 
 ### T4 · Schema de eventos/calendario  `infra` `S`  ✅ **HECHO**
 - **Acept.:** tabla `events(id, handle?, title, description, event_at, kind, source, created_at)` + índices por fecha y handle.
@@ -54,7 +54,7 @@ Reemplaza el `FeedProcessor` manual por un loop autónomo.
 - Cada corrida: lee posts dentro de una ventana temporal → resume → el **agente decide** si postea (autónomo) o no; parámetro para forzar posteo.
 - La decisión considera temática y "mood"; puede lanzar tools **whitelisted por scope `feed_reflection`** (T1).
 - Deduplica contra `bot_posts`; respeta presupuesto (router T2). Sin scheduling rígido tipo cron.
-- Impl.: grafo langgraph `build_feed_graph` (fetch→summarize→reflect→post) en `butterbot.py`. `ReflectDecideNode` es el núcleo agéntico (structured output `FeedDecision`, tool_calling scope feed_reflection, política de posteo configurable conservative|balanced|active). Config por feed: `enabled` + `posting_policy` + `interval_hours`. CLI `--proactive [--force-post] [--backfill]`. Dedup normalizado contra `bot_posts`. Tests: `tests/test_feed_proactive.py`.
+- Impl.: grafo langgraph `build_feed_graph` (fetch→summarize→reflect→post) en `botata.py`. `ReflectDecideNode` es el núcleo agéntico (structured output `FeedDecision`, tool_calling scope feed_reflection, política de posteo configurable conservative|balanced|active). Config por feed: `enabled` + `posting_policy` + `interval_hours`. CLI `--proactive [--force-post] [--backfill]`. Dedup normalizado contra `bot_posts`. Tests: `tests/test_feed_proactive.py`.
 
 ### T6 · Aprendizajes del feed → memoria/calendario  `proactivity` `M`  ✅ **HECHO**
 - **Acept.:** tras leer el feed, el agente decide (o no) extraer aprendizajes.
@@ -69,7 +69,7 @@ Reemplaza el `FeedProcessor` manual por un loop autónomo.
 
 ### T23 · Externalizar prompts hardcodeados  `infra` `S`  `P1`  ✅ **HECHO**
 Todo prompt debe vivir en `prompts/*.md` (o config), nunca hardcodeado en `.py`. Principio de diseño (CLAUDE.md): config declarativa, no strings incrustados.
-- **Acept.:** mover a archivos los prompts incrustados en `butterbot.py`; cargarlos con `load_text(PROMPTS_DIR / ...)` como ya hacían `reflect_feed_prompt.md` / SOUL.
+- **Acept.:** mover a archivos los prompts incrustados en `botata.py`; cargarlos con `load_text(PROMPTS_DIR / ...)` como ya hacían `reflect_feed_prompt.md` / SOUL.
 - Impl.: externalizados a `prompts/` — guía de posteo por política → `feed_policy_{conservative,balanced,active}.md` (helper `feed_policy_guidance()` con fallback a balanced); resumen de feed → `feed_summary_prompt.md`; formato JSON de `ReflectDecideNode` → `feed_decision_format.md`; system prompt de `HandleAdminCommandNode` → `admin_command_prompt.md`; bloque de formato de `GenerateReplyNode` → `reply_format.md`. 31 tests verdes.
 - **Quedan inline a propósito** (no son prompts fijos sino armado dinámico): labels de secciones del reply (memoria/hechos/lecciones/catálogo, interpolan data), instrucción condicional de force-post y hint de tools en `ReflectDecideNode`, y el path legacy `FeedProcessor.post_opinion`.
 
@@ -137,21 +137,21 @@ El bot puede contestar sobre lo que él mismo viene posteando/respondiendo, no s
 
 **Decisión (admin):** el cliente MCP (T29) va **antes** que los scrapers. Los scrapers
 (T17–T20) nacen como **MCP servers** independientes (procesos stdio, deps y crashes
-aislados, reutilizables desde otros agentes), no como módulos internos de butterbot.
+aislados, reutilizables desde otros agentes), no como módulos internos de Botata.
 
 ### T29 · Cliente MCP → ToolRegistry  `infra` `M`  *(primero de M5)*  ✅ **HECHO**
-Butterbot consume MCP servers externos como tools; cada conector futuro pasa de "tarea" a "línea de config".
+Botata consume MCP servers externos como tools; cada conector futuro pasa de "tarea" a "línea de config".
 - **Acept.:** módulo `mcp_tools.py` (SDK oficial `mcp`): al arranque lee `settings.json` → sección `MCP` (`{server: {transport: stdio|http, command/url, enabled, scopes, tool_filter}}`), conecta, hace `tools/list` y registra cada tool en el `ToolRegistry` (T1) con handler proxy a `tools/call`.
 - Nombres prefijados por server (`reddit_top_posts`) para evitar colisiones. Puente async→sync contenido en el módulo (event loop en thread de fondo).
 - **Seguridad (regla dura):** tools MCP nacen con scope `admin`; promover a `reply`/`feed_reflection` es opt-in explícito por tool en config — el bot es público y scope reply = superficie de prompt injection.
 - Degradación graceful: server caído al arranque → se loguea y se omite (no tira el bot); error en `tools/call` → `ToolResult` de error, no excepción.
 - El calendario interno (`events`, T4/T9) sigue nativo — dominio core acoplado a la DB. Calendarios externos (ej. Google Calendar) = server MCP de terceros vía config, sin código.
-- Impl.: `mcp_tools.py` (infra genérica estilo `tools.py`, no conoce butterbot). `MCPBridge` = event loop en thread daemon; **cada server vive en una task dedicada** que entra/sale de sus propios context managers (los cancel scopes de anyio no cruzan tasks — gotcha del SDK). Sesiones quedan abiertas; reuso si el mismo proceso construye dos registries (run() lo hace); `shutdown()` vía `atexit`. Registro **antes** de `apply_config` → la sección `TOOLS` overridea tools MCP por nombre prefijado. Import lazy: sin sección `MCP` el SDK ni se carga. Handler proxy **jamás lanza** (el call site admin ejecuta sin try/except); v1 texto-only (content blocks de imagen = pendiente). `tests/mcp_echo_server.py` = plantilla FastMCP para los servers de T18–T20. Verificado en vivo (registro + execute + server roto omitido). Tests: `tests/test_mcp_tools.py` (13, unit + E2E stdio real).
+- Impl.: `mcp_tools.py` (infra genérica estilo `tools.py`, no conoce Botata). `MCPBridge` = event loop en thread daemon; **cada server vive en una task dedicada** que entra/sale de sus propios context managers (los cancel scopes de anyio no cruzan tasks — gotcha del SDK). Sesiones quedan abiertas; reuso si el mismo proceso construye dos registries (run() lo hace); `shutdown()` vía `atexit`. Registro **antes** de `apply_config` → la sección `TOOLS` overridea tools MCP por nombre prefijado. Import lazy: sin sección `MCP` el SDK ni se carga. Handler proxy **jamás lanza** (el call site admin ejecuta sin try/except); v1 texto-only (content blocks de imagen = pendiente). `tests/mcp_echo_server.py` = plantilla FastMCP para los servers de T18–T20. Verificado en vivo (registro + execute + server roto omitido). Tests: `tests/test_mcp_tools.py` (13, unit + E2E stdio real).
 
 ### T16 · Tool de navegador agéntica  `tools` `M`  ✅ **HECHO**
 - **Acept.:** el usuario puede mandar el bot a una página y que acceda. **OFF por default**, con **aviso de riesgo** explícito al activarla.
 - Guardrails: allowlist/denylist de dominios, límite de acciones, sin descarga/ejecución arbitraria.
-- **Servida como MCP server** (misma fragilidad/deps pesadas que los scrapers); butterbot la consume vía T29.
+- **Servida como MCP server** (misma fragilidad/deps pesadas que los scrapers); Botata la consume vía T29.
 - **DECISIÓN (investigación 2026-07-11): reusar `@playwright/mcp` de Microsoft — cero código propio.** Verificado en vivo vía el cliente T29 (spawn `npx @playwright/mcp --headless --isolated --allowed-origins ...`): navegación OK y dominio fuera de la allowlist bloqueado (`ERR_BLOCKED_BY_CLIENT`) con error graceful. Los guardrails de la acept. mapean 1:1 a flags oficiales (`--allowed-origins`/`--blocked-origins`, `--headless`, `--isolated`, file access restringido a workspace) + `tool_filter` de T29 para recortar el tool set (25+ tools → navigate/snapshot/close). Requiere **Node 18+** (dev OK v24; verificar en Linux Mint prod). `browser.py`/patchright NO se toca: es la capa *stealth con sesión logueada* para T19/T20 — problema distinto (Playwright MCP no es stealth).
 - Impl.: **cero código** — server `browser` declarado en `settings.json` → MCP (`npx @playwright/mcp@latest --headless --isolated`, `tool_filter` a navigate/navigate_back/snapshot/close, **`enabled:false`**). El snapshot inline se resolvió solo: la tool `browser_snapshot` devuelve el árbol de accesibilidad en YAML dentro del ToolResult (el link-a-archivo era solo la respuesta de `navigate`); flujo del LLM = navigate → snapshot. Verificado en vivo por el camino real (`build_tool_registry` + Wikipedia es). Scope `admin` (default T29).
 - **⚠️ AVISO DE RIESGO (leer antes de prender `enabled:true`):** el LLM navega cualquier URL que le pidan. Con scope `admin` (default) solo el admin puede mandarlo; **si se promueve a `reply`, cualquier usuario puede dirigir el navegador del bot** → prompt injection vía contenido web + SSRF-lite (URLs internas). Para scope reply: agregar `--allowed-origins "https://sitio1;https://sitio2"` a los args (allowlist dura, verificada: bloquea con `ERR_BLOCKED_BY_CLIENT`) y/o `--blocked-origins`. `--isolated` (perfil en RAM, sin cookies persistentes) ya viene en la config. **Prod:** requiere Node 18+ en el Linux Mint (dev: v24 OK) — la primera corrida de `npx` descarga el paquete.
@@ -160,20 +160,22 @@ Butterbot consume MCP servers externos como tools; cada conector futuro pasa de 
 - **Acept.:** investigar viabilidad de la API oficial (PRAW/OAuth read-only) hoy — Reddit devuelve 403 sin auth (visto en T14). Documentar decisión: API / RSS / navegador.
 - **DECISIÓN: RSS.** Verificado en vivo (2026-07-11) + fuentes:
   * **API OAuth: descartada.** Desde fines de 2025 las apps nuevas pasan por aprobación manual (Responsible Builder Policy); proyectos personales/hobby son la categoría más rechazada, sin SLA (días a semanas, o silencio). Free tier teórico: 100 QPM no-comercial — irrelevante si no aprueban la app. No hay app preexistente de maripobot (usaba RSS). Reevaluar solo si Reddit afloja el gate.
-  * **RSS: funciona hoy sin credenciales.** `https://www.reddit.com/r/{sub}/{sort}/.rss` (Atom, no RSS 2.0) devuelve 200 con UA descriptivo; soporta sorts (`new`, `top/.rss?t=week`) y multireddit (`sub1+sub2`). **Límite duro medido:** 1 request/min por IP, GLOBAL (headers `x-ratelimit-remaining=0.0` tras 1 req; 429 inmediato al segundo hit; confirmado por reportes públicos de junio 2026). Compatible con el patrón butterbot: pases espaciados por `interval_hours`, pocas fuentes, ≥61s entre requests dentro de un pase.
+  * **RSS: funciona hoy sin credenciales.** `https://www.reddit.com/r/{sub}/{sort}/.rss` (Atom, no RSS 2.0) devuelve 200 con UA descriptivo; soporta sorts (`new`, `top/.rss?t=week`) y multireddit (`sub1+sub2`). **Límite duro medido:** 1 request/min por IP, GLOBAL (headers `x-ratelimit-remaining=0.0` tras 1 req; 429 inmediato al segundo hit; confirmado por reportes públicos de junio 2026). Compatible con el patrón Botata: pases espaciados por `interval_hours`, pocas fuentes, ≥61s entre requests dentro de un pase.
   * **Navegador: innecesario** mientras RSS siga vivo (queda como plan C).
   * JSON público (`hot.json`): 403 sin auth — muerto, confirma T14.
 
 ### T18 · Reddit ingestion (MCP server)  `scraper` `M`  ✅ **HECHO**
-- **Acept.:** MCP server `reddit` (FastMCP, stdio) **vía RSS** (decisión T17). Solo lectura de subs, sin postear. Reemplaza el stub `RedditSource`; butterbot lo consume vía T29.
+- **Acept.:** MCP server `reddit` (FastMCP, stdio) **vía RSS** (decisión T17). Solo lectura de subs, sin postear. Reemplaza el stub `RedditSource`; Botata lo consume vía T29.
 - Requisitos del diseño (de las mediciones de T17): **rate limiter interno ≥61s entre requests** (global al server, con cola o cache corto); parser **Atom** (stdlib `xml`, el `fetch_rss` de T15 parsea RSS 2.0 — extender o duplicar); UA descriptivo fijo; degradación graceful ante 429 (respetar `x-ratelimit-reset`).
 - Impl.: `mcp_servers/reddit_server.py` (primer server real sobre la plantilla T29; carpeta nueva `mcp_servers/`). Tool única `get_subreddit_posts(subreddit, sort, time_window, limit)` — acepta multireddit `a+b`; sorts hot/new/top/rising; devuelve JSON title/url/author/published/summary. `_fetch` serializa con lock: espera bloqueante hasta el slot de 61s, cache TTL 10 min por URL, retry único ante 429 si `Retry-After` ≤ 90s. Validación estricta de subreddit/sort/window (anti path-traversal). Declarado en `settings.json` → MCP con **`enabled:false`** (`call_timeout_s:90` porque una llamada puede esperar el slot) — el admin lo prende. Stub `RedditSource` borrado de `sources.py`. **Verificado en vivo** (top diario de r/argentina por el pipeline completo T29→T18). Tests: `tests/test_reddit_server.py` (11: parsing/URLs/limiter/cache sin red + spawn E2E).
 
-### T19 · Scraper X (MCP server)  `scraper` `L`
-- **Acept.:** X no tiene API libre → vía navegador o investigar otra. MCP server `x` independiente; reemplaza el stub `TwitterSource`.
+### T19 · Scraper X (twscrape → source de la suite)  `scraper` `L`
+- **Acept.:** X sin API libre → **`twscrape`** (pool multi-cuenta + rate-limit handling; auth por cookies `auth_token`+`ct0`). Reemplaza el stub `TwitterSource`. Cuenta **quemada**, no la real; idealmente proxy residencial.
+- **DECISIÓN (investigación 2026-07-18):** Nitter y snscrape **muertos** (ya no hay camino anónimo en X). Working hoy: twscrape (recomendado por rotación de cuentas), twikit (read+write, si el bot algún día postea en X), Tweety/Scweet (ignorar). Managed (twitterapi.io / Bright Data) descartado por no-self-hosted. Auth por cookies = mismo patrón que `login_by_sessionid` de IG. Tier **frágil/best-effort** (rompe c/2-4 semanas cuando X rota tokens/GraphQL). Ya existe una twscrape Claude Code Skill → el envoltorio no es el valor, sí la normalización al contrato. **Migra al repo de la suite (M9 · T31).**
 
-### T20 · Hardening scraper IG (MCP server)  `scraper` `M`
-- **Acept.:** robustecer `scrape_ig.py` / `ig_api.py` (manejo de sesión, reintentos, config de cuentas objetivo) y envolverlo como MCP server `ig`.
+### T20 · Hardening scraper IG (source de la suite)  `scraper` `M`
+- **Acept.:** robustecer `scrape_ig.py` / `ig_api.py` (manejo de sesión, reintentos, config de cuentas objetivo) y volverlo un source de la suite (M9 · T31). Mantener `instagrapi` (camino API) como principal.
+- **Es el activo diferenciado del repo:** el **descubrimiento por cuenta** (`fetch_recent(username, limit)`) que sobrevive el bloqueo de Meta (login por sessionid + fingerprint es_AR). media-mcp/Cobalt solo bajan **un post por URL** — no descubren por cuenta ni manejan sesión. La envoltura "MCP server" queda subsumida en el modo real-time de la suite (M9 · T36); v1 = modo batch/carpeta (ya funciona).
 
 ---
 
@@ -195,7 +197,7 @@ Generaliza el loop proactivo: hoy feed (T5), noticias (T15) y eventos son pases 
 - **Acept.:** registro de tareas periódicas (`{name, interval, enabled, handler}`) donde feed-pass, news-pass y chequeo de eventos del día son entradas; agregar una tarea nueva no toca el loop.
 - Pase "heartbeat" opcional: el agente lee pendientes (eventos de hoy T4/T9, recordatorios) y **decide** si tiene algo que decir — misma filosofía agéntica que `ReflectDecideNode`, sin scheduling rígido.
 - Config declarativa en `settings.json`; cursores en `feed_cursors` (patrón `news:{host}` ya existente).
-- Impl.: `scheduler.py` (genérico, no conoce butterbot): `PeriodicTask(name, fn, interval_hours, enabled)` + `run_due()` + `apply_tasks_config()`. **Sin doble gate:** `interval_hours=0` = correr cada iteración (feed/news/mentions se auto-gatean por dentro, sin tocar su lógica); `>0` = gate del scheduler vía cursor `task:{name}` (reusa `get/save_feed_last_run`). **Aislamiento de errores POR TAREA** (mejora sobre el try único por iteración; KeyboardInterrupt atraviesa). `run()` quedó genérico: lista de 4 tareas + `run_due()` + sleep; el poll de menciones se extrajo a `_poll_mentions()` sin cambios. **Heartbeat** = `run_heartbeat_pass()` (función, no grafo): lee `events_today`+`upcoming_events` — **sin eventos no llama al LLM** (costo cero); prompt = SOUL + fecha + `prompts/heartbeat_prompt.md` (nuevo, T23) + skills feed_reflection (T26) + eventos + posts recientes; decide con `FeedDecision` reutilizado (rol `feed_opinion`); dedup normalizado contra `bot_posts`; **nunca postea eventos personales no celebrables** (regla en el prompt). Config `TASKS` en settings (heartbeat **off por default**, 12h). CLI `--heartbeat` (pase único). **Verificado en vivo con LLM real** (bsky falso): saludó un cumpleaños en personaje y en la segunda pasada se negó a repetirse ("ya saludé a Polci hoy"). Tests: `test_scheduler.py` (9) + `test_heartbeat.py` (6). **Cierra M6.**
+- Impl.: `scheduler.py` (genérico, no conoce Botata): `PeriodicTask(name, fn, interval_hours, enabled)` + `run_due()` + `apply_tasks_config()`. **Sin doble gate:** `interval_hours=0` = correr cada iteración (feed/news/mentions se auto-gatean por dentro, sin tocar su lógica); `>0` = gate del scheduler vía cursor `task:{name}` (reusa `get/save_feed_last_run`). **Aislamiento de errores POR TAREA** (mejora sobre el try único por iteración; KeyboardInterrupt atraviesa). `run()` quedó genérico: lista de 4 tareas + `run_due()` + sleep; el poll de menciones se extrajo a `_poll_mentions()` sin cambios. **Heartbeat** = `run_heartbeat_pass()` (función, no grafo): lee `events_today`+`upcoming_events` — **sin eventos no llama al LLM** (costo cero); prompt = SOUL + fecha + `prompts/heartbeat_engine.md` (nuevo, T23) + skills feed_reflection (T26) + eventos + posts recientes; decide con `FeedDecision` reutilizado (rol `feed_opinion`); dedup normalizado contra `bot_posts`; **nunca postea eventos personales no celebrables** (regla en el prompt). Config `TASKS` en settings (heartbeat **off por default**, 12h). CLI `--heartbeat` (pase único). **Verificado en vivo con LLM real** (bsky falso): saludó un cumpleaños en personaje y en la segunda pasada se negó a repetirse ("ya saludé a Polci hoy"). Tests: `test_scheduler.py` (9) + `test_heartbeat.py` (6). **Cierra M6.**
 
 ### T30 · Configuración por comandos de admin  `tools` `M`  ✅ **HECHO** *(agregada post-M6, pedido del admin 2026-07-13)*
 El admin ajusta la config del bot **desde Bluesky** ("@bot prendé el heartbeat cada 6 horas"), sin SSH ni editar JSON.
@@ -223,3 +225,32 @@ El admin ajusta la config del bot **desde Bluesky** ("@bot prendé el heartbeat 
 - **Acept.:** UI gráfica para: credenciales de Bluesky, modelo(s), tipo de comunidad (feeds/listas/timeline), y toggles de tools.
 - ~~Última a propósito~~ **Adelantada (2026-07-12):** el schema de config ya se estabilizó (TOOLS/TASKS/MCP/FEEDS/MODELS) y la pila de toggles justificaba la UI ya. Criterio del admin: **esta es la UI del núcleo**; las futuras UIs por canal (Discord, etc.) serán interfaces separadas — no una UI para todo.
 - Impl.: `config_ui.py` (stdlib puro: `http.server`, cero deps) + `ui/config.html` (una página, vanilla JS, dark). **Solo localhost** (bind 127.0.0.1; `python config_ui.py [--port] [--no-browser]`). Secciones: identidad · credenciales (.env **write-only**: la API jamás devuelve valores, solo qué claves están seteadas; input vacío = no tocar) · modelos (endpoints/aliases/roles) · feeds · tools (enabled + scopes con ⚠️ al promover a reply) · tareas · MCP · noticias (master + fuentes) · skills (toggle hot-reload que reescribe el frontmatter). **Validación server-side antes de escribir** (scopes/tipos/políticas/aliases huérfanos → 400 con detalle, no toca el archivo); escrituras atómicas (`tmp` + `os.replace`) con backup `.bak`. Verificado en vivo por browser: toggle de skill → frontmatter en disco → restaurado; settings inválido → 400 visible; round-trip del settings re-serializado → el bot importa igual. Tests: `tests/test_config_ui.py` (18). Suite: 189.
+
+---
+
+## M9 · Suite de scrapers + índice de contenido (repo propio)  `P2/P3`
+
+Decisión completa en **CLAUDE.md** (*Decisiones pendientes → Suite de scrapers*). El subsistema de
+scraping se **separa a repo propio** (la suite **Membrilla**); Botata pasa a **consumidor**. Frontera =
+contrato `SourceItem`; la **capa semántica vive en el consumidor** (no en la suite); dos modos
+(batch/carpeta v1 · real-time/MCP v2); dos tiers (**clientes de API estables** vs **scrapers frágiles**).
+Botata es genérico/multi-comunidad: la relevancia de cada fuente es config del admin, no del código.
+**v1 = solo modo batch/carpeta** (probado, sin LLM adentro).
+
+### T31 · Extracción de la suite a repo propio  `scraper` `L`  `P2`
+- **Acept.:** mover el scraping (`scrape_ig.py`/`ig_api.py`/`sources.py`/`browser.py`/`extract.py` + `config/instagram.json`) a repo propio. `SourceItem` como **frontera pública**. **Quitar `from botata import ...`** (el modelo/LLM lo inyecta el consumidor). Partir `db.py`: *ledger de scrapeo* (`has_scraped_item`/`save_scraped_item`) con la suite; *índice semántico* en Botata. Contrato de output = item normalizado + path a media local en carpeta. v1 = solo modo batch/carpeta.
+
+### T32 · Índice semántico de contenido scrapeado (consumer-side)  `proactivity` `M`  `P2`
+- **Acept.:** Botata ingesta la carpeta de la suite — **etapa 2** (offline): corre vision, guarda descripción + embedding en una tabla de contenido nueva. **Etapa 3** (en query): pedidos temáticos ("algo de conejos") resuelven por `hybrid_search` reusando el motor existente (vec0 bge-m3 + FTS5 + RRF). **Búsqueda por significado = retrieval sobre el índice, nunca fetch en vivo.** El fetch en vivo (T36) sirve solo para "lo último de fuente conocida".
+
+### T33 · Source TikTok (Whisper + frames)  `scraper` `L`  `P3`
+- **Acept.:** source TikTok con la **opción pesada**: transcripción de audio (Whisper local) + descripción de frames (video-first rompe el pipeline image-first). Extractor: `TikTokPy`/`TikTok-Api` (Playwright firma X-Bogus/A-Bogus). **Después de X (T19).** Los "slides" (carruseles de foto) caen en el pipeline image-first tal cual.
+
+### T34 · Source Pinterest (gallery-dl)  `scraper` `S`  `P3`
+- **Acept.:** source Pinterest vía **`gallery-dl`** (image-first, drop-in, muchas veces sin login → tier estable). Descubrimiento por perfil + board + tag. Off por default en Botata (relevancia por comunidad — fuerte para un bot de aves/estético).
+
+### T35 · Source Tumblr (API oficial)  `scraper` `S`  `P3`
+- **Acept.:** source Tumblr vía **`pytumblr2`** (API v2 oficial, NPF; consumer key gratis). Posts por blog + por tag. **Cliente de API estable, no scraper** (legal, baja fragilidad).
+
+### T36 · Modo real-time / MCP on-demand de la suite (v2)  `scraper` `M`  `P3`
+- **Acept.:** front-end MCP sobre el mismo core de extractores para **"lo último de fuente CONOCIDA" en vivo** (frescura, no búsqueda temática). Sesiones calientes (sin login interactivo mid-request), rate-limit sincrónico, dedup contra la carpeta. Subsume la envoltura MCP de IG/X. Se madura con Botata como primer consumidor antes de prometérselo a otros.

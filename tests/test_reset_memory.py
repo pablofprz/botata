@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("BSKY_PASSWORD", "dummy")
 
-import butterbot as b  # noqa: E402
+import botata as b  # noqa: E402
 import db as d  # noqa: E402
 from tools import Scope, ToolContext  # noqa: E402
 
@@ -53,7 +53,7 @@ def _vec_count(conn, rowid):
 def test_purge_removes_facts_embeddings_events(conn):
     fid = _seed_user(conn, "u1.bsky.social", "vive en rosario")
     counts = d.purge_user_memory(conn, "u1.bsky.social")
-    assert counts == {"facts": 1, "events": 1, "relationships": 0}
+    assert counts == {"facts": 1, "events": 1, "relationships": 0, "interactions": 0}
     assert conn.execute("SELECT COUNT(*) FROM user_facts WHERE handle='u1.bsky.social'").fetchone()[0] == 0
     assert _vec_count(conn, fid) == 0  # embedding también borrado
     assert conn.execute("SELECT COUNT(*) FROM events WHERE handle='u1.bsky.social'").fetchone()[0] == 0

@@ -12,7 +12,7 @@ os.environ.setdefault("BSKY_PASSWORD", "dummy")
 os.environ.setdefault("OPENROUTER_API_KEY", "dummy")
 
 import db as d
-import butterbot as b
+import botata as b
 
 _AR = timezone(timedelta(hours=-3))
 
@@ -27,16 +27,19 @@ def conn(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _hb_path(tmp_path, monkeypatch):
-    """Aísla HEARTBEAT.md del archivo real del repo."""
-    monkeypatch.setattr(b, "HEARTBEAT_PATH", tmp_path / "HEARTBEAT.md")
+    """Aísla el override runtime Y el default versionado de los archivos reales."""
+    monkeypatch.setattr(b, "HEARTBEAT_OVERRIDE_PATH", tmp_path / "heartbeat_override.md")
+    monkeypatch.setattr(b, "HEARTBEAT_CHECKLIST_PATH", tmp_path / "heartbeat_checklist.md")
 
 
 class FakeBsky:
     def __init__(self):
         self.posts = []
+        self.images = []
 
     def post(self, text, image_path=None):
         self.posts.append(text)
+        self.images.append(image_path)
         return f"at://fake/{len(self.posts)}"
 
 
@@ -107,7 +110,7 @@ def test_texto_vacio_no_postea(conn, monkeypatch):
 
 def test_instrucciones_sin_eventos_llama_llm(conn, monkeypatch):
     """Con instrucciones vigentes, el pase corre aunque no haya eventos."""
-    b.HEARTBEAT_PATH.write_text(
+    b.HEARTBEAT_OVERRIDE_PATH.write_text(
         "suplicale a un usuario random que te dé dulce de batata\n", encoding="utf-8")
     decision = b.FeedDecision(should_post=True, reason="batata", text="alguien tiene batata? 🙏")
     bsky, llm = FakeBsky(), FakeLLM(decision)
@@ -118,10 +121,92 @@ def test_instrucciones_sin_eventos_llama_llm(conn, monkeypatch):
     assert bsky.posts == ["alguien tiene batata? 🙏"]
 
 
+def test_default_versionado_corre_sin_override(conn, monkeypatch):
+    """El heartbeat inicial (prompts/heartbeat_checklist.md) es el mecanismo principal:
+    corre sin que el admin haya posteado nada."""
+    b.HEARTBEAT_CHECKLIST_PATH.write_text("ronda de base: mirá el calendario\n", encoding="utf-8")
+    decision = b.FeedDecision(should_post=False, reason="nada nuevo")
+    bsky, llm = FakeBsky(), FakeLLM(decision)
+    _run(conn, bsky, llm, monkeypatch)
+    assert llm.calls == 1
+    assert "INSTRUCCIONES POR DEFECTO" in llm.last_system
+    assert "ronda de base" in llm.last_system
+    assert "INSTRUCCIONES VIGENTES del admin para este pase" not in llm.last_system
+
+
+def test_override_del_admin_pisa_al_default(conn, monkeypatch):
+    """El post del admin (set_heartbeat) es auxiliar: pisa temporalmente al
+    default, que no se inyecta mientras el override exista."""
+    b.HEARTBEAT_CHECKLIST_PATH.write_text("ronda de base: mirá el calendario\n", encoding="utf-8")
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("pedí dulce de batata\n", encoding="utf-8")
+    decision = b.FeedDecision(should_post=True, reason="batata", text="batata? 🙏")
+    bsky, llm = FakeBsky(), FakeLLM(decision)
+    _run(conn, bsky, llm, monkeypatch)
+    assert "INSTRUCCIONES VIGENTES" in llm.last_system
+    assert "dulce de batata" in llm.last_system
+    assert "ronda de base" not in llm.last_system
+
+
+def test_override_borrado_vuelve_al_default(conn, monkeypatch):
+    """Borrar el override (set_heartbeat instructions='') restaura el default."""
+    b.HEARTBEAT_CHECKLIST_PATH.write_text("ronda de base: mirá el calendario\n", encoding="utf-8")
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("", encoding="utf-8")   # borrado = archivo vacío
+    decision = b.FeedDecision(should_post=False, reason="nada")
+    bsky, llm = FakeBsky(), FakeLLM(decision)
+    _run(conn, bsky, llm, monkeypatch)
+    assert llm.calls == 1
+    assert "INSTRUCCIONES POR DEFECTO" in llm.last_system
+
+
 def test_sin_eventos_ni_instrucciones_no_llama(conn, monkeypatch):
     bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=True, text="x"))
     _run(conn, bsky, llm, monkeypatch)
     assert llm.calls == 0 and bsky.posts == []
+
+
+def test_heartbeat_adjunta_imagen(conn, monkeypatch):
+    """Con catálogo disponible e image_query en la decisión, el post sale con imagen."""
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("subí imágenes de gatos\n", encoding="utf-8")
+    monkeypatch.setattr(b, "TASKS_CONFIG", {"heartbeat": {"autonomous_images": True}})
+    monkeypatch.setattr(b.dbmod, "get_image_catalog_stats", lambda c: {"total": 3})
+    monkeypatch.setattr(b, "resolve_catalog_image",
+                        lambda c, q, **k: "scrape/pictures/manual/gato.jpg")
+    decision = b.FeedDecision(should_post=True, reason="gato", text="miren este gato",
+                              image_query="gato sorprendido")
+    bsky, llm = FakeBsky(), FakeLLM(decision)
+    _run(conn, bsky, llm, monkeypatch)
+    assert "catálogo de imágenes" in llm.last_system      # se le ofreció el catálogo
+    assert bsky.posts == ["miren este gato"]
+    assert bsky.images == ["scrape/pictures/manual/gato.jpg"]
+
+
+def test_heartbeat_toggle_imagenes_apagado(conn, monkeypatch):
+    """TASKS.heartbeat.autonomous_images=false → ni ofrece catálogo ni adjunta."""
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("subí imágenes de gatos\n", encoding="utf-8")
+    monkeypatch.setattr(b, "TASKS_CONFIG", {"heartbeat": {"autonomous_images": False}})
+    monkeypatch.setattr(b.dbmod, "get_image_catalog_stats", lambda c: {"total": 3})
+    spy = {"called": False}
+    monkeypatch.setattr(b, "resolve_catalog_image",
+                        lambda c, q, **k: spy.__setitem__("called", True) or "x.jpg")
+    decision = b.FeedDecision(should_post=True, reason="gato", text="miren este gato",
+                              image_query="gato")
+    bsky, llm = FakeBsky(), FakeLLM(decision)
+    _run(conn, bsky, llm, monkeypatch)
+    assert "catálogo de imágenes" not in llm.last_system
+    assert bsky.images == [None]
+    assert spy["called"] is False
+
+
+def test_heartbeat_catalogo_vacio_no_ofrece(conn, monkeypatch):
+    """Sin imágenes cargadas, el bloque de catálogo no entra al prompt."""
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("subí imágenes de gatos\n", encoding="utf-8")
+    monkeypatch.setattr(b, "TASKS_CONFIG", {"heartbeat": {"autonomous_images": True}})
+    monkeypatch.setattr(b.dbmod, "get_image_catalog_stats", lambda c: {"total": 0})
+    decision = b.FeedDecision(should_post=True, reason="x", text="hola", image_query="gato")
+    bsky, llm = FakeBsky(), FakeLLM(decision)
+    _run(conn, bsky, llm, monkeypatch)
+    assert "catálogo de imágenes" not in llm.last_system
+    assert bsky.images == [None]
 
 
 def test_error_del_llm_es_graceful(conn, monkeypatch):

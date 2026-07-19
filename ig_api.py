@@ -26,7 +26,7 @@ from instagrapi.exceptions import BadPassword, ChallengeRequired
 
 from sources import SourceItem
 
-log = logging.getLogger("butterbot.ig_api")
+log = logging.getLogger("botata.ig_api")
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

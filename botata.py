@@ -1,13 +1,13 @@
 """
-butterbot.py — Phase 1 (LangGraph mention flow) + Feed reader
+botata.py — Phase 1 (LangGraph mention flow) + Feed reader
 
 Modes:
   --mode admin_only   only responds to ADMIN_HANDLE (default)
   --mode open         responds to any mention
 
 Usage:
-  python butterbot.py --mode admin_only
-  python butterbot.py --mode open
+  python botata.py --mode admin_only
+  python botata.py --mode open
 """
 
 import argparse
@@ -52,7 +52,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("butterbot")
+log = logging.getLogger("botata")
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -69,10 +69,15 @@ FEEDS_DIR   = CONTEXT_DIR / "feeds"
 POSTED_DIR.mkdir(exist_ok=True)
 FEEDS_DIR.mkdir(exist_ok=True)
 
-DB_PATH        = POSTED_DIR  / "butterbot.db"
+DB_PATH        = POSTED_DIR  / "botata.db"
 SETTINGS_PATH  = CONFIG_DIR  / "settings.json"
 MEMORY_PATH    = CONTEXT_DIR / "MEMORY.md"
-HEARTBEAT_PATH = CONTEXT_DIR / "HEARTBEAT.md"  # instrucciones vigentes del admin para el heartbeat
+# Heartbeat: tres archivos, tres roles distintos (NO redundantes):
+#   prompts/heartbeat_engine.md    → el motor: framing + reglas duras del pase (invariantes).
+#   prompts/heartbeat_checklist.md → la checklist de tareas de base, versionada (mecanismo PRINCIPAL).
+#   context/heartbeat_override.md  → override runtime que escribe set_heartbeat (AUXILIAR); pisa la checklist.
+HEARTBEAT_OVERRIDE_PATH  = CONTEXT_DIR / "heartbeat_override.md"   # override runtime del admin (vía set_heartbeat)
+HEARTBEAT_CHECKLIST_PATH = PROMPTS_DIR / "heartbeat_checklist.md"  # checklist de base versionada
 
 # ---------------------------------------------------------------------------
 # Config
@@ -163,6 +168,12 @@ NEWS_SOURCES : list = _load_news_sources()
 # Master toggle del posteo de noticias (outward-facing). OFF por default: el admin lo prende.
 NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 
+# Quién puede agendarle ACCIONES al bot (eventos kind='bot_action': "posteá X a
+# tal hora"). 'admin' (default) = solo el admin; 'any' = cualquier usuario.
+# Superficie de prompt injection en bot público → default cerrado. Semilla del
+# futuro scope de permisos por usuario.
+BOT_ACTIONS_FROM : str = str(settings.get("BOT_ACTIONS_FROM", "admin")).lower()
+
 # Back-compat del router: si no hay sección MODELS, se derivan los aliases de estos.
 _LEGACY_MODELS = {
     "base_url":  OPENAI_ENDPOINT,
@@ -177,7 +188,7 @@ _LEGACY_MODELS = {
 # ---------------------------------------------------------------------------
 
 def init_db() -> sqlite3.Connection:
-    """Conexión a butterbot.db con sqlite-vec cargado y esquema completo (delegado a dbmod)."""
+    """Conexión a botata.db con sqlite-vec cargado y esquema completo (delegado a dbmod)."""
     return dbmod.init_db(DB_PATH)
 
 
@@ -378,7 +389,7 @@ class MentionState(TypedDict):
 
 # URL http(s) hasta el primer espacio; recortamos puntuación de cierre al final.
 _URL_RE = re.compile(r"https?://[^\s]+")
-_OG_UA = "Mozilla/5.0 (compatible; butterbot/1.0; +https://bsky.app)"
+_OG_UA = "Mozilla/5.0 (compatible; botata/1.0; +https://bsky.app)"
 
 
 def _find_urls_with_offsets(text: str) -> list[tuple[str, int, int]]:
@@ -696,11 +707,16 @@ class BskyClient:
 
                 text = self._extract_text(post.record)
                 if text:
+                    # A quién responde este post (para el grafo de relaciones).
+                    # Best-effort: item.reply.parent es un PostView con .author.
+                    parent = getattr(getattr(item, "reply", None), "parent", None)
+                    reply_to = getattr(getattr(parent, "author", None), "handle", None)
                     posts.append({
                         "handle"     : post.author.handle,
                         "text"       : text,
                         "uri"        : post.uri,
                         "indexed_at" : indexed_at.isoformat(),
+                        "reply_to"   : reply_to,
                     })
 
             cursor = getattr(resp, "cursor", None)
@@ -1082,6 +1098,11 @@ class FetchFeedNode:
         posts = self.bsky.get_feed_posts(
             state.get("feed_type", "list"), state.get("list_uri"), since=since)
         save_feed_last_run(self.conn, feed_name)
+        # Grafo de relaciones: autor ↔ respondido, mecánico y sin LLM. El gate
+        # "ambos usuarios conocidos" vive en db.bump_relationship.
+        for p in posts:
+            if p.get("reply_to") and p["reply_to"] != BSKY_HANDLE:
+                dbmod.bump_relationship(self.conn, p["handle"], p["reply_to"], kind="reply")
         log.info("Feed %s: %d posts nuevos", feed_name, len(posts))
         return {"posts": posts, "posts_count": len(posts)}
 
@@ -1405,7 +1426,7 @@ def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None
 # ---------------------------------------------------------------------------
 # T15 · Noticias / RSS gestionadas por admin
 # ---------------------------------------------------------------------------
-_NEWS_UA = "butterbot/1.0 (bot comunitario de Bluesky Argentina)"
+_NEWS_UA = "botata/1.0 (bot comunitario de Bluesky Argentina)"
 
 
 def _strip_html(s: str | None) -> str:
@@ -1605,19 +1626,29 @@ def run_news_loop() -> None:
 
 def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
                        conn: sqlite3.Connection) -> None:
-    """Mira los eventos de hoy/próximos + las instrucciones vigentes del admin
-    (context/HEARTBEAT.md, editables por comando vía set_heartbeat) y DECIDE si
-    vale la pena decir algo.
+    """Mira los eventos de hoy/próximos + las instrucciones del heartbeat y
+    DECIDE si vale la pena decir algo.
+
+    Las instrucciones tienen dos capas: `prompts/heartbeat_checklist.md` es la
+    checklist de base (versionada, editable a mano — el mecanismo PRINCIPAL) y
+    `context/heartbeat_override.md` es el override runtime que setea el admin por
+    comando (set_heartbeat — mecanismo AUXILIAR). El override, si existe y no
+    está vacío, pisa a la checklist; borrarlo vuelve a la checklist.
 
     Misma filosofía que ReflectDecideNode: decisión del agente, sin cron rígido.
-    Sin eventos NI instrucciones → return sin tocar el LLM (costo cero). El
-    intervalo lo gatea el scheduler (cursor `task:heartbeat`), no esta función.
+    Sin eventos NI instrucciones (ninguna de las dos capas) → return sin tocar
+    el LLM (costo cero). El intervalo lo gatea el scheduler (cursor
+    `task:heartbeat`), no esta función.
     """
-    instrucciones = load_text(HEARTBEAT_PATH).strip()
-    hoy      = dbmod.events_today(conn)
+    override = load_text(HEARTBEAT_OVERRIDE_PATH).strip()
+    instrucciones = override or load_text(HEARTBEAT_CHECKLIST_PATH).strip()
+    # Acciones agendadas (kind='bot_action') vencidas: ÓRDENES, no contexto — van
+    # en su propia sección y se marcan done tras el pase (se ejecutan una vez).
+    acciones = dbmod.due_bot_actions(conn)
+    hoy      = [e for e in dbmod.events_today(conn) if e["kind"] != "bot_action"]
     proximos = [e for e in dbmod.upcoming_events(conn, limit=5)
-                if e["id"] not in {h["id"] for h in hoy}]
-    if not hoy and not proximos and not instrucciones:
+                if e["id"] not in {h["id"] for h in hoy} and e["kind"] != "bot_action"]
+    if not acciones and not hoy and not proximos and not instrucciones:
         log.info("heartbeat: sin eventos ni instrucciones — nada que decir")
         return
 
@@ -1628,13 +1659,25 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
 
     soul = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
     parts = [soul, f"\n---\n{current_datetime_line()}",
-             f"\n---\n{load_text(PROMPTS_DIR / 'heartbeat_prompt.md')}"]
+             f"\n---\n{load_text(PROMPTS_DIR / 'heartbeat_engine.md')}"]
     skills_block = skills_prompt_block(SKILLS_DIR, Scope.FEED_REFLECTION)
     if skills_block:
         parts.append(f"\n---\n{skills_block}")
-    if instrucciones:
+    if override:
         parts.append("\n---\nINSTRUCCIONES VIGENTES del admin para este pase "
-                     "(tu tarea principal ahora):\n" + instrucciones)
+                     "(orden puntual que pisa tu tarea de base; tu tarea "
+                     "principal ahora):\n" + override)
+    elif instrucciones:
+        parts.append("\n---\nINSTRUCCIONES POR DEFECTO del heartbeat "
+                     "(tu tarea de base en cada pase):\n" + instrucciones)
+    if acciones:
+        parts.append(
+            "\n---\nACCIONES AGENDADAS por el admin, vencidas AHORA (son órdenes: "
+            "cumplilas en este pase, en tu voz de siempre; la regla de eventos "
+            "personales NO aplica acá — esto te lo ordenaron explícitamente):\n"
+            + "\n".join(f"- [{a['event_at']}] {a['title']}"
+                        + (f" — {a['description']}" if a.get("description") else "")
+                        for a in acciones))
     if hoy:
         parts.append("\n---\nEventos de HOY:\n" + "\n".join(_fmt(e) for e in hoy))
     if proximos:
@@ -1643,6 +1686,16 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
     if recientes:
         parts.append("\n---\nYa posteaste esto recientemente (NO lo repitas):\n"
                      + "\n".join(f"- {t}" for t in recientes))
+    # T12 en el heartbeat: las instrucciones ya son del admin → default true
+    # (a diferencia de los feeds, que son opt-in). Toggle: TASKS.heartbeat.autonomous_images.
+    images_on = bool(TASKS_CONFIG.get("heartbeat", {}).get("autonomous_images", True)) and \
+        dbmod.get_image_catalog_stats(conn)["total"] > 0
+    if images_on:
+        parts.append(
+            "\n---\nTenés un catálogo de imágenes. Si —y SOLO si— una imagen pega justo "
+            "con tu post, poné en 'image_query' palabras clave para buscarla. Si no "
+            "corresponde, dejá 'image_query' vacío (la mayoría de las veces va vacío)."
+        )
     parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
     system = "\n".join(p for p in parts if p)
 
@@ -1651,7 +1704,14 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
         decision = llm.complete(system, "¿Hay algo que valga la pena decir hoy?", FeedDecision)
     except Exception as e:
         log.error("heartbeat: %s", e)
-        return
+        return  # acciones NO marcadas done: error de LLM → reintentar el próximo pase
+    # Acción considerada = acción cumplida (aunque el LLM decline con razón): una
+    # orden vencida no se reintenta para siempre — el error de LLM es la única excepción.
+    for a in acciones:
+        dbmod.mark_event_done(conn, a["id"])
+        if not decision.should_post:
+            log.warning("heartbeat: acción agendada [%s] '%s' declinada (%s) — marcada done",
+                        a["event_at"], a["title"], decision.reason[:80])
     log.info("heartbeat: should_post=%s (%s)", decision.should_post, decision.reason[:80])
     if not decision.should_post:
         return
@@ -1663,9 +1723,12 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
     if any(_norm_text(t) == norm for t in recent_bot_posts(conn, limit=20)):
         log.info("heartbeat: texto duplicado de un post reciente — skip")
         return
-    uri = bsky.post(text)
+    image_path = None
+    if images_on and decision.image_query:
+        image_path = resolve_catalog_image(conn, decision.image_query)
+    uri = bsky.post(text, image_path=image_path)
     log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
-    log.info("heartbeat: posteado %s", uri)
+    log.info("heartbeat: posteado %s%s", uri, " (con imagen)" if image_path else "")
 
 
 def run_heartbeat_loop() -> None:
@@ -1675,6 +1738,79 @@ def run_heartbeat_loop() -> None:
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     run_heartbeat_pass(bsky, router, db)
     log.info("Heartbeat pass completo.")
+
+
+# ---------------------------------------------------------------------------
+# T6 (cierre) · Reflexión: destila LECCIONES conductuales de la actividad reciente
+# ---------------------------------------------------------------------------
+class LessonItem(BaseModel):
+    lesson: str = Field(description="Lección conductual, una sola oración accionable.")
+    about_handle: str | None = Field(
+        default=None,
+        description="Handle (sin @) si la lección es sobre un usuario puntual; null si es de comunidad.",
+    )
+
+
+class LessonsReflection(BaseModel):
+    lessons: list[LessonItem] = Field(default_factory=list)
+
+
+def run_reflection_pass(router: ModelRouter, conn: sqlite3.Connection, *,
+                        activity_limit: int = 40, min_activity: int = 4) -> None:
+    """Pase periódico INWARD-ONLY (nunca postea): mira la actividad reciente del
+    bot y destila lecciones de comportamiento nuevas → db.lessons (upsert_lesson,
+    con dedup semántico). Cierra el pendiente de T6 (facts+eventos ya se aprenden;
+    faltaban las lecciones conductuales). Análogo a `maybe_update_lessons` del
+    monolito, pero sobre bot_posts + la memoria de lecciones en SQLite.
+
+    Con poca actividad (< min_activity) → return sin tocar el LLM (costo cero).
+    """
+    activity = recent_bot_activity(conn, limit=activity_limit)
+    if len(activity) < min_activity:
+        log.info("reflection: poca actividad (%d) — nada que destilar", len(activity))
+        return
+
+    existing = [r["lesson_text"] for r in conn.execute(
+        "SELECT lesson_text FROM lessons ORDER BY id").fetchall()]
+    existing_block = "\n".join(f"- {t}" for t in existing) or "Ninguna aún."
+
+    soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
+    prompt = load_text(PROMPTS_DIR / "reflect_lessons_prompt.md").format(
+        existing_lessons=existing_block)
+    system = f"{soul}\n---\n{current_datetime_line()}\n---\n{prompt}"
+
+    def _fmt(a: dict) -> str:
+        who = f"→ @{a['reply_to_handle']}" if a.get("reply_to_handle") else "(post suelto)"
+        return f"- {a.get('posted_at', '')} {who}: {a.get('text', '')}"
+
+    user = "Actividad reciente del bot (de más nuevo a más viejo):\n" + \
+        "\n".join(_fmt(a) for a in activity)
+
+    llm = RoleLLM(router, "update_profile")
+    try:
+        result = llm.complete(system, user, LessonsReflection)
+    except Exception as e:
+        log.error("reflection: %s", e)
+        return
+
+    n = 0
+    for item in result.lessons:
+        text = (item.lesson or "").strip()
+        if not text:
+            continue
+        handle = (item.about_handle or "").lstrip("@").strip()
+        scope  = f"user:{handle}" if handle and dbmod.user_exists(conn, handle) else "community"
+        if dbmod.upsert_lesson(conn, text, scope=scope) is not None:
+            n += 1
+    log.info("reflection: %d lección(es) nueva(s) de %d posteos", n, len(activity))
+
+
+def run_reflection_loop() -> None:
+    """Pase único de reflexión desde CLI (`--reflect`). Ignora intervalo y toggle."""
+    db     = init_db()
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    run_reflection_pass(router, db)
+    log.info("Reflection pass completo.")
 
 
 # ---------------------------------------------------------------------------
@@ -1785,11 +1921,28 @@ def _tool_create_event(args: dict, ctx: ToolContext) -> ToolResult:
     if dbmod.event_exists(ctx.conn, title=title, event_at=event_at, handle=owner):
         return ToolResult(text=f"ese evento ya estaba agendado: {title}")
     kind = (args.get("kind") or "other").strip() or "other"
+    downgraded = False
+    if kind == "bot_action":
+        # Acción agendada = orden para que el BOT postee algo a una hora. Permiso
+        # parametrizable (BOT_ACTIONS_FROM), default solo admin: superficie de
+        # prompt injection si cualquiera le agenda contenido a un bot público.
+        if not is_admin and BOT_ACTIONS_FROM != "any":
+            kind, downgraded = "reminder", True
+        else:
+            owner = None  # las acciones son del bot, no del usuario que las pidió
     desc = (args.get("description") or "").strip() or None
+    src  = f"tool:@{author}" if author else "tool"
     eid  = dbmod.create_event(ctx.conn, title=title, event_at=event_at, handle=owner,
-                              description=desc, kind=kind, source="tool")
+                              description=desc, kind=kind, source=src)
     who  = "la comunidad" if owner is None else f"@{owner}"
     when = event_at[:16].replace("T", " ")
+    if downgraded:
+        return ToolResult(
+            text=f"agendé '{title}' el {when} como recordatorio tuyo (id {eid}) — "
+                 "ordenarme posteos solo puede el admin, pero lo voy a tener presente")
+    if kind == "bot_action":
+        return ToolResult(text=f"dale, acción agendada: '{title}' el {when} (id {eid}) — "
+                               "la ejecuto en el primer pase después de esa hora")
     return ToolResult(text=f"listo, agendé '{title}' para {who} el {when} (id {eid})")
 
 
@@ -2254,14 +2407,15 @@ def build_tool_registry(config: dict | None = None, *,
         "create_event",
         "Agenda un evento en el calendario (fecha + título). El admin puede agendar para "
         "la comunidad (omitiendo 'handle') o para un usuario; un usuario común solo puede "
-        "agendar para sí mismo.",
+        "agendar para sí mismo. Si te piden que VOS postees algo a una hora ('posteá el "
+        "himno a las 00:00'), usá kind='bot_action' con la instrucción en 'description'.",
         {
             "type": "object",
             "properties": {
                 "title":       {"type": "string", "description": "Título breve del evento."},
                 "event_at":    {"type": "string", "description": "Fecha ISO 8601: YYYY-MM-DD o YYYY-MM-DDTHH:MM. Resolvé fechas relativas ('mañana', 'el sábado') usando la fecha de HOY."},
-                "description": {"type": "string", "description": "Detalle opcional del evento."},
-                "kind":        {"type": "string", "description": "Tipo: 'birthday', 'meetup', 'reminder', 'other'."},
+                "description": {"type": "string", "description": "Detalle opcional del evento. Para 'bot_action': la instrucción de QUÉ postear."},
+                "kind":        {"type": "string", "description": "Tipo: 'birthday', 'meetup', 'reminder', 'other', o 'bot_action' (orden para que el bot postee algo a esa hora; solo la cumple si viene del admin)."},
                 "handle":      {"type": "string", "description": "Solo admin: dueño del evento (sin @), u omitir para evento de comunidad. Ignorado para usuarios comunes (su evento es siempre propio)."},
             },
             "required": ["title", "event_at"],
@@ -2416,9 +2570,15 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             f"({f.get('posting_policy', 'balanced')}, {f.get('interval_hours', 6)}h)"
             for f in FEEDS_CONFIG))
         lines.append(f"noticias (NEWS_ENABLED): {'on' if NEWS_ENABLED else 'off'}")
-        hb_inst = load_text(HEARTBEAT_PATH).strip()
-        lines.append("instrucciones del heartbeat: "
-                     + (f"«{hb_inst[:120]}»" if hb_inst else "ninguna (solo calendario)"))
+        hb_override = load_text(HEARTBEAT_OVERRIDE_PATH).strip()
+        hb_default = load_text(HEARTBEAT_CHECKLIST_PATH).strip()
+        if hb_override:
+            lines.append(f"heartbeat: orden puntual del admin vigente «{hb_override[:120]}» "
+                         "(pisa al default)")
+        elif hb_default:
+            lines.append(f"heartbeat: instrucciones por defecto «{hb_default[:120]}»")
+        else:
+            lines.append("heartbeat: sin instrucciones (solo calendario)")
         lines.append("mcp: " + (", ".join(
             f"{name}={'on' if cfg.get('enabled', True) else 'off'}"
             for name, cfg in MCP_CONFIG.items()) or "sin servers"))
@@ -2520,8 +2680,8 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                         t.interval_hours = float(interval)
         if instructions is not None:
             text = instructions.strip()
-            HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            HEARTBEAT_PATH.write_text(text + "\n" if text else "", encoding="utf-8")
+            HEARTBEAT_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_OVERRIDE_PATH.write_text(text + "\n" if text else "", encoding="utf-8")
         partes = ["dale, heartbeat actualizado:"]
         if enabled is not None:
             partes.append("prendido" if enabled else "apagado")
@@ -2530,7 +2690,7 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
         if instructions is not None:
             corto = (instructions.strip()[:140] + "…") if len(instructions.strip()) > 140 else instructions.strip()
             partes.append(f"y la instrucción vigente es: «{corto}»" if corto
-                          else "y borré las instrucciones (vuelvo a solo calendario)")
+                          else "y borré tu orden puntual (vuelvo a mi heartbeat de siempre)")
         partes.append("— aplicado en vivo y guardado")
         return ToolResult(text=" ".join(partes))
 
@@ -2617,14 +2777,16 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                      "interval_hours": {"type": "number"},
                  }, "required": ["task"]}, _set_task_config, {Scope.ADMIN})
     reg.register("set_heartbeat",
-                 "Configura el heartbeat COMPLETO en una sola llamada: qué debe hacer en cada pase "
-                 "(instructions, en lenguaje natural), cada cuánto corre (interval_hours; 5 minutos "
+                 "Ajusta el heartbeat en una sola llamada: una orden puntual para los próximos pases "
+                 "(instructions — es un override AUXILIAR que pisa temporalmente el heartbeat por "
+                 "defecto, no lo reemplaza para siempre), cada cuánto corre (interval_hours; 5 minutos "
                  "= 0.0833) y si está prendido (enabled). Usala para CUALQUIER pedido sobre el "
                  "heartbeat; si el admin da una instrucción de qué hacer, casi siempre enabled=true.",
                  {**_obj, "properties": {
                      "instructions": {"type": "string",
-                                      "description": "Qué debe hacer el bot en cada pase, en lenguaje "
-                                                     "natural. String vacío = borrar (vuelve a solo calendario)."},
+                                      "description": "Orden puntual para los próximos pases, en lenguaje "
+                                                     "natural. String vacío = borrar el override (vuelve "
+                                                     "al heartbeat por defecto)."},
                      "interval_hours": {"type": "number"},
                      "enabled": {"type": "boolean"},
                  }}, _set_heartbeat, {Scope.ADMIN})
@@ -2784,12 +2946,17 @@ class GenerateReplyNode:
 
         facts   = dbmod.hybrid_search_user_facts(self.conn, handle, query, k=5)
         lessons = dbmod.hybrid_search_lessons(self.conn, query, k=5)
+        recent  = dbmod.recent_interactions(self.conn, handle, limit=5)
 
         parts = [soul, f"\n---\n{current_datetime_line()}"]
         if memory:
             parts.append(f"\n---\nTu memoria general:\n{memory}")
         if facts:
             parts.append("\n---\nHechos que sabés del usuario:\n" + "\n".join(f"- {t}" for _, t in facts))
+        if recent:
+            parts.append(
+                "\n---\nTus últimas conversaciones con este usuario (de más nueva a más vieja):\n"
+                + "\n".join(f"- [{r['created_at'][:10]}] {r['summary']}" for r in recent))
         if lessons:
             parts.append("\n---\nLecciones de comportamiento:\n" + "\n".join(f"- {t}" for _, t in lessons))
 
@@ -3038,11 +3205,26 @@ class PostReplyNode:
         return {"posted_reply_uri": posted_uri}
 
 
+class ProfileUpdate(BaseModel):
+    """Salida estructurada del post-reply: hechos duraderos + nota de interacción."""
+    facts: list[str] = Field(
+        default_factory=list,
+        description="Hechos duraderos que el usuario reveló sobre sí mismo. Vacío si no hubo.",
+    )
+    interaction_summary: str = Field(
+        default="",
+        description="UNA línea: de qué se habló y en qué tono. Siempre presente.",
+    )
+
+
 class UpdateProfileNode:
     """
-    Node 5: Post-reply, extrae hechos nuevos que el usuario reveló sobre sí mismo
-    y los guarda en db.user_facts (con dedup semántico). El LLM decide — si no hay
-    nada notable, devuelve NADA. Usa REASONING_MODEL.
+    Node 5: Post-reply, memoria en dos niveles.
+    - `facts`: hechos duraderos autorrevelados → db.user_facts (dedup semántico).
+      El LLM decide — la mayoría de las interacciones no revelan ninguno.
+    - `interaction_summary`: nota breve de CADA interacción (tema + tono) →
+      db.interactions (log cronológico, sin embeddings). Esto garantiza que
+      ninguna conversación pasa sin dejar huella en la memoria del usuario.
     """
 
     def __init__(self, llm: RoleLLM, conn: sqlite3.Connection):
@@ -3061,25 +3243,27 @@ class UpdateProfileNode:
             return {}
 
         try:
-            content = self.llm.chat(messages=[
-                {"role": "system", "content": f"{current_datetime_line()}\n\n{prompt.format(author_handle=handle)}"},
-                {"role": "user",   "content": conversation},
-            ])
-            result = (content or "").strip()
+            result = self.llm.complete(
+                f"{current_datetime_line()}\n\n{prompt.format(author_handle=handle)}",
+                conversation,
+                ProfileUpdate,
+            )
         except Exception as e:
             log.error("UpdateProfileNode failed for @%s: %s", handle, e)
             return {}
 
-        if result.upper() == "NADA":
-            return {}
-
         new_facts = 0
-        for line in result.splitlines():
-            fact = line.strip().lstrip("-").strip()
+        for fact in result.facts:
+            fact = fact.strip().lstrip("-").strip()
             if fact and dbmod.upsert_user_fact(self.conn, handle, fact, source_uri="reply") is not None:
                 new_facts += 1
-        if new_facts:
-            log.info("@%s: %d hecho(s) nuevo(s) guardado(s)", handle, new_facts)
+        summary = (result.interaction_summary or "").strip()
+        if summary:
+            dbmod.log_interaction(self.conn, handle, summary,
+                                  source_uri=state.get("mention_uri"))
+        if new_facts or summary:
+            log.info("@%s: %d hecho(s) nuevo(s), interacción %s", handle, new_facts,
+                     "anotada" if summary else "sin nota")
         return {}
 
 
@@ -3237,7 +3421,7 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
 
 
 def run(mode: str) -> None:
-    log.info("Starting butterbot — mode: %s", mode.upper())
+    log.info("Starting botata — mode: %s", mode.upper())
 
     db     = init_db()
     bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
@@ -3263,6 +3447,8 @@ def run(mode: str) -> None:
         PeriodicTask("mentions",  lambda: _poll_mentions(graph, db, bsky, mode)),
         PeriodicTask("heartbeat", lambda: run_heartbeat_pass(bsky, router, db),
                      interval_hours=12, enabled=False),  # outward-facing: el admin lo prende
+        PeriodicTask("reflection", lambda: run_reflection_pass(router, db),
+                     interval_hours=24, enabled=True),  # inward-only (no postea): destila lecciones
     ]
     apply_tasks_config(tasks, TASKS_CONFIG)
     _RUNTIME_TASKS[:] = tasks  # T30: las tools de config del admin mutan esta lista en vivo
@@ -3283,6 +3469,30 @@ def run(mode: str) -> None:
         time.sleep(POLL_INTERVAL)
 
 
+def _thread_participants(thread_context: str) -> list[str]:
+    """Handles que participaron del thread. Las líneas del contexto las armamos
+    nosotros con formato fijo `handle: texto` (_thread_context) → parseo seguro."""
+    seen: list[str] = []
+    for line in thread_context.splitlines():
+        h = line.split(":", 1)[0].strip()
+        if h and "." in h and " " not in h and h not in seen:  # forma de handle (dominio)
+            seen.append(h)
+    return seen
+
+
+def _bump_thread_relationships(conn: sqlite3.Connection, author: str,
+                               thread_context: str) -> None:
+    """Grafo de relaciones: el autor de la mención interactuó con los participantes
+    del thread. Mecánico y best-effort (solo entre usuarios ya conocidos — el gate
+    vive en db.bump_relationship); jamás bloquea el procesamiento."""
+    try:
+        for other in _thread_participants(thread_context):
+            if other not in (author, BSKY_HANDLE):
+                dbmod.bump_relationship(conn, author, other, kind="thread")
+    except Exception:
+        log.error("bump_thread_relationships falló para @%s", author, exc_info=True)
+
+
 def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -> None:
     """Poll de menciones (extraído del loop en T27; comportamiento idéntico)."""
     mentions = [m for m in bsky.get_mentions() if not has_replied(db, m["uri"])]
@@ -3293,6 +3503,7 @@ def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -
             mention["thread_context"]  = ctx
             mention["thread_root_uri"] = root_uri
             mention["thread_root_cid"] = root_cid
+            _bump_thread_relationships(db, mention["author_handle"], ctx)
             process_mention(graph, db, mention, mode)
         # mark_all_read is UI hygiene only (keeps Polci's notif tab clean);
         # it no longer gates dedup — the DB does.
@@ -3304,7 +3515,7 @@ def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="butterbot")
+    parser = argparse.ArgumentParser(description="botata")
     parser.add_argument(
         "--mode",
         choices=["admin_only", "open"],
@@ -3347,6 +3558,12 @@ if __name__ == "__main__":
         help="T27: run the calendar heartbeat pass once (agent decides whether to post) "
              "and exit. Ignores the scheduler interval and the TASKS toggle.",
     )
+    parser.add_argument(
+        "--reflect",
+        action="store_true",
+        help="T6: run the reflection pass once (distill behavioral lessons from recent "
+             "bot activity into db.lessons) and exit. Inward-only, never posts.",
+    )
     args = parser.parse_args()
 
     if args.proactive:
@@ -3357,6 +3574,9 @@ if __name__ == "__main__":
 
     elif args.heartbeat:
         run_heartbeat_loop()
+
+    elif args.reflect:
+        run_reflection_loop()
 
     elif args.fetch_feeds:
         db        = init_db()

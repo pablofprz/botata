@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from browser import BrowserSession
 from extract import LLMExtractor
 
-log = logging.getLogger("butterbot.sources")
+log = logging.getLogger("botata.sources")
 
 # Delays humanos entre requests para evitar detección de bot
 _DELAY_BETWEEN_POSTS = (8, 18)     # segundos entre cada post del feed
@@ -378,7 +378,7 @@ _DEFAULT_UA = (
 
 # ─── Ganchos: X (interfaz lista, sin implementar) ────────────────────────────
 # Reddit ya NO va por Source: es un MCP server (mcp_servers/reddit_server.py,
-# T18) que butterbot consume vía el cliente MCP (T29). X seguirá el mismo
+# T18) que botata consume vía el cliente MCP (T29). X seguirá el mismo
 # camino cuando se implemente (T19).
 class TwitterSource(Source):
     platform = "twitter"

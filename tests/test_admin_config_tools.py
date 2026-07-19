@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("BSKY_PASSWORD", "dummy")
 os.environ.setdefault("OPENROUTER_API_KEY", "dummy")
 
-import butterbot as b
+import botata as b
 from scheduler import PeriodicTask
 from tools import Scope, ToolContext
 
@@ -20,7 +20,7 @@ _CTX = ToolContext(state={"author_handle": "ppolci.com", "is_admin": True}, conn
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """Sandbox: settings.json + globals de butterbot apuntando a tmp_path."""
+    """Sandbox: settings.json + globals de botata apuntando a tmp_path."""
     (tmp_path / "config").mkdir()
     settings = {
         "BOT_HANDLE": "bot.test", "ADMIN_HANDLE": "ppolci.com",
@@ -41,7 +41,7 @@ def env(tmp_path, monkeypatch):
              PeriodicTask("mentions", lambda: None),
              PeriodicTask("heartbeat", lambda: None, interval_hours=12, enabled=False)]
     monkeypatch.setattr(b, "_RUNTIME_TASKS", tasks)
-    monkeypatch.setattr(b, "HEARTBEAT_PATH", tmp_path / "context" / "HEARTBEAT.md")
+    monkeypatch.setattr(b, "HEARTBEAT_OVERRIDE_PATH", tmp_path / "context" / "heartbeat_override.md")
     reg = b.build_tool_registry()
     return tmp_path, reg, tasks
 
@@ -137,7 +137,7 @@ def test_set_heartbeat_completo(env):
     hb = next(t for t in tasks if t.name == "heartbeat")
     assert hb.enabled is True and abs(hb.interval_hours - 0.0833) < 1e-6   # vivo
     assert _disk(tmp)["TASKS"]["heartbeat"]["enabled"] is True             # disco
-    assert "dulce de batata" in b.HEARTBEAT_PATH.read_text(encoding="utf-8")
+    assert "dulce de batata" in b.HEARTBEAT_OVERRIDE_PATH.read_text(encoding="utf-8")
 
 
 def test_set_heartbeat_borrar_instrucciones(env):
@@ -145,7 +145,7 @@ def test_set_heartbeat_borrar_instrucciones(env):
     reg.execute("set_heartbeat", {"instructions": "algo"}, _CTX)
     out = reg.execute("set_heartbeat", {"instructions": ""}, _CTX)
     assert "borré" in out.text
-    assert b.HEARTBEAT_PATH.read_text(encoding="utf-8") == ""
+    assert b.HEARTBEAT_OVERRIDE_PATH.read_text(encoding="utf-8") == ""
 
 
 def test_set_heartbeat_sin_args(env):

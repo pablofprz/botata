@@ -2,7 +2,7 @@
 
 Conecta MCP servers externos (config: settings.json → sección MCP) y registra
 sus tools en el ToolRegistry (T1) con un handler proxy. Infra genérica estilo
-tools.py: no conoce butterbot; solo el contrato ToolRegistry/ToolResult.
+tools.py: no conoce botata; solo el contrato ToolRegistry/ToolResult.
 
 Config por server:
     "MCP": {
@@ -45,7 +45,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from tools import ALL_SCOPES, ToolContext, ToolRegistry, ToolResult
 
-log = logging.getLogger("butterbot.mcp")
+log = logging.getLogger("botata.mcp")
 
 _DEFAULT_SCOPES: frozenset[str] = frozenset({"admin"})
 _DEFAULT_CALL_TIMEOUT_S = 30.0

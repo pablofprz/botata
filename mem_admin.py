@@ -28,7 +28,7 @@ import numpy as np
 
 import db
 
-log = logging.getLogger("butterbot.mem_admin")
+log = logging.getLogger("botata.mem_admin")
 
 
 # ─── helpers de localización de ID ───────────────────────────────────────────
@@ -185,7 +185,7 @@ def _lookup_handle(conn: sqlite3.Connection, fact_id: int) -> str:
 
 # ─── argparse ────────────────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Administración de memoria de butterbot.")
+    p = argparse.ArgumentParser(description="Administración de memoria de botata.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pl = sub.add_parser("list", help="Listar facts de un usuario, lecciones, o resumen.")

@@ -1,4 +1,4 @@
-"""tools.py — framework de tools de butterbot (registry + scopes + config).
+"""tools.py — framework de tools de botata (registry + scopes + config).
 
 Reemplaza el `ADMIN_TOOLS` hardcodeado por un registro central. Cada tool se
 declara UNA vez (schema OpenAI + handler + scopes) y el grafo arma en runtime la
@@ -7,7 +7,7 @@ lista disponible filtrando por:
   - `scope`:   contexto donde la tool tiene sentido (reply | feed_reflection | admin).
 
 Infra genérica y agnóstica de la app: NO conoce dbmod, paths ni prompts. Los
-handlers concretos viven en butterbot.py y se cierran sobre lo que necesitan; acá
+handlers concretos viven en botata.py y se cierran sobre lo que necesitan; acá
 solo se define el contrato (Tool/ToolContext/ToolResult) y el ruteo.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-log = logging.getLogger("butterbot.tools")
+log = logging.getLogger("botata.tools")
 
 
 # ─── Scopes ──────────────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ class ToolResult:
 class ToolContext:
     """Todo lo que un handler necesita del runtime. `state` es el MentionState (o el
     estado del loop proactivo); `conn` es la conexión sqlite. Handlers que necesiten
-    más se cierran sobre los globals de butterbot.py."""
+    más se cierran sobre los globals de botata.py."""
     state: dict[str, Any]
     conn: Any
 

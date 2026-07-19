@@ -2,7 +2,7 @@
 
 ClearSky indexa los registros `app.bsky.graph.block` del firehose de Bluesky y
 expone un índice reverso ("quién bloquea a X") que ATProto no provee nativamente.
-Esta es la fuente de la funcionalidad de consulta de bloques de butterbot (v1).
+Esta es la fuente de la funcionalidad de consulta de bloques de botata (v1).
 
 API confirmada en vivo (2026-07-07):
     GET {BASE}/blocklist/{DID}/{page}
@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-log = logging.getLogger("butterbot.clearsky")
+log = logging.getLogger("botata.clearsky")
 
 # Host público actual (anunciado 11/2025; el viejo `api.clearsky.services` está deprecado).
 CLEARSKY_BASE = "https://public.api.clearsky.services/api/v1/anon"

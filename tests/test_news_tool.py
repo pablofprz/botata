@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("BSKY_PASSWORD", "dummy")
 
-import butterbot as b  # noqa: E402
+import botata as b  # noqa: E402
 from tools import Scope, ToolContext  # noqa: E402
 
 _CTX = ToolContext(state={"author_handle": "u"}, conn=None)

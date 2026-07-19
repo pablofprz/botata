@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping
 from openai import OpenAI
 from pydantic import BaseModel
 
-log = logging.getLogger("butterbot.router")
+log = logging.getLogger("botata.router")
 
 # Roles por defecto (usados en el modo back-compat). Mapean función → alias.
 _DEFAULT_ROLES: dict[str, str] = {

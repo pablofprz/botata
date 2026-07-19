@@ -1,4 +1,4 @@
-"""config_ui.py — panel local de configuración de butterbot (T22).
+"""config_ui.py — panel local de configuración de botata (T22).
 
 UI web servida SOLO en 127.0.0.1 para editar settings.json, credenciales (.env),
 fuentes de noticias y toggles de skills sin tocar JSON a mano.
@@ -311,13 +311,13 @@ def serve(base_dir: Path, port: int = 8787) -> ThreadingHTTPServer:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Panel de configuración de butterbot (localhost)")
+    parser = argparse.ArgumentParser(description="Panel de configuración de botata (localhost)")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     httpd = serve(BASE_DIR, args.port)
     url = f"http://127.0.0.1:{args.port}/"
-    print(f"butterbot config UI → {url}  (Ctrl+C para salir)")
+    print(f"botata config UI → {url}  (Ctrl+C para salir)")
     print("Los cambios en settings/.env/noticias requieren reiniciar el bot.")
     if not args.no_browser:
         webbrowser.open(url)

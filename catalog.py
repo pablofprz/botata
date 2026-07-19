@@ -1,4 +1,4 @@
-"""catalog.py — sincronizador del catálogo de imágenes de butterbot.
+"""catalog.py — sincronizador del catálogo de imágenes de botata.
 
 Dos comandos:
   python catalog.py sync           # procesa archivos nuevos sin catalogar
@@ -38,7 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("butterbot.catalog")
+log = logging.getLogger("botata.catalog")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 _settings = json.loads((BASE_DIR / "config" / "settings.json").read_text(encoding="utf-8"))
@@ -189,7 +189,7 @@ def cmd_stats() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Catálogo de imágenes de butterbot")
+    parser = argparse.ArgumentParser(description="Catálogo de imágenes de botata")
     parser.add_argument(
         "cmd", choices=["sync", "stats"],
         help="sync: procesa archivos nuevos sin catalogar | stats: resumen del catálogo",

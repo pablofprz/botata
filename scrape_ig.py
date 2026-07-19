@@ -15,7 +15,7 @@ Dos caminos (dos adapters, misma DB y mismo destino de imágenes):
 
 Las imágenes se guardan en scrape/pictures/instagram/<post_id>_<n>.jpg.
 No se pisan: si el archivo ya existe, se saltea.
-La DB (posted/butterbot.db) trackea qué posts ya se procesaron.
+La DB (posted/botata.db) trackea qué posts ya se procesaron.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("butterbot.scrape_ig")
+log = logging.getLogger("botata.scrape_ig")
 
 IG_CONFIG      = BASE_DIR / "config" / "instagram.json"
 IG_PROFILE     = BASE_DIR / "posted" / "browser" / "ig"   # perfil persistente (sesión logueada)
@@ -215,8 +215,8 @@ def cmd_import_cookies(cookies_path: str | None = None) -> None:
 
 
 def _make_source() -> tuple[IGSource, BrowserSession]:
-    # Reusa el cliente LLM de butterbot (LITE_MODEL alcanza para extraer).
-    from butterbot import LITE_MODEL, OPENAI_ENDPOINT, OPENROUTER_API_KEY, LLMClient
+    # Reusa el cliente LLM de botata (LITE_MODEL alcanza para extraer).
+    from botata import LITE_MODEL, OPENAI_ENDPOINT, OPENROUTER_API_KEY, LLMClient
 
     llm = LLMClient(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT, model=LITE_MODEL)
     browser = BrowserSession(
@@ -369,7 +369,7 @@ def cmd_api_session(cookies_path: str | None = None, sessionid: str | None = Non
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Scraper de Instagram (butterbot)")
+    parser = argparse.ArgumentParser(description="Scraper de Instagram (botata)")
     parser.add_argument(
         "cmd",
         choices=["api-login", "api-session", "api-run",

@@ -11,7 +11,7 @@ os.environ.setdefault("BSKY_PASSWORD", "dummy")
 os.environ.setdefault("OPENROUTER_API_KEY", "dummy")
 
 import skills as sk
-import butterbot as b
+import botata as b
 from tools import Scope, ToolContext
 
 _CTX = ToolContext(state={}, conn=None)

@@ -12,13 +12,13 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
-log = logging.getLogger("butterbot.extract")
+log = logging.getLogger("botata.extract")
 
 T = TypeVar("T", bound=BaseModel)
 
 
 class SupportsComplete(Protocol):
-    """Interfaz mínima del cliente LLM (la cumple butterbot.LLMClient)."""
+    """Interfaz mínima del cliente LLM (la cumple botata.LLMClient)."""
     def complete(self, system: str, user: str, response_model: type[BaseModel]) -> BaseModel: ...
 
 

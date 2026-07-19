@@ -1,12 +1,12 @@
-# Arquitectura de butterbot
+# Arquitectura de Botata
 
 > Documento de referencia para entender el sistema completo. Actualizado al cierre de M6
 > (2026-07-11, tareas T1–T29 salvo T19/T20/T28). El estado de tareas vive en `ROADMAP.md`;
 > las decisiones y su porqué, en `CLAUDE.md`. Este documento explica **cómo funciona el código**.
 
-## 1. Qué es butterbot
+## 1. Qué es Botata
 
-Butterbot es un bot comunitario de Bluesky construido como **agente**: no es un script que
+Botata es un bot comunitario de Bluesky construido como **agente**: no es un script que
 reacciona con plantillas, sino un sistema donde un LLM decide — qué responder, si postear,
 qué herramienta usar, qué recordar de cada persona. La refundación de `maripobot.py` (un
 monolito sin estructura) sobre cuatro pilares:
@@ -22,7 +22,7 @@ nada de clases innecesarias, todo toggle en config, y **ningún prompt hardcodea
 ## 2. Mapa de módulos
 
 ```
-butterbot.py        ← el corazón: grafos, nodos, BskyClient, pases, loop, CLI (~3000 líneas)
+botata.py        ← el corazón: grafos, nodos, BskyClient, pases, loop, CLI (~3000 líneas)
 db.py               ← persistencia: esquema, embeddings, búsqueda híbrida, eventos, catálogo
 router.py           ← ruteo de modelos LLM por rol, con fallbacks entre endpoints
 tools.py            ← framework de tools (registry + scopes), agnóstico de la app
@@ -42,18 +42,18 @@ prompts/            ← todos los prompts del sistema (T23: nunca inline en .py)
 skills/             ← skills en markdown, editables en caliente
 config/             ← settings.json (config central) + news_sites.json + credenciales gitignored
 context/            ← SOUL.md (personalidad) + MEMORY.md (memoria general del bot)
-posted/butterbot.db ← LA base de datos (gitignored; sync por rclone)
+posted/botata.db ← LA base de datos (gitignored; sync por rclone)
 tests/              ← pytest, ~170 tests, sin red salvo E2E marcados
 scripts/            ← sync de credenciales/DB, snapshot WAL, pipeline de chats a Obsidian
 ```
 
 La regla de dependencias: los módulos de infra (`tools`, `skills`, `scheduler`, `mcp_tools`,
-`router`, `db`) **no importan butterbot** — definen contratos genéricos. `butterbot.py` los
+`router`, `db`) **no importan botata** — definen contratos genéricos. `botata.py` los
 cablea. Eso permite testearlos aislados y, a futuro (M7), reutilizarlos con otro canal.
 
 ## 3. Arranque y configuración
 
-### Import de butterbot.py (orden)
+### Import de botata.py (orden)
 
 1. Logging a stdout (nivel INFO).
 2. Paths: `CONFIG_DIR`, `CONTEXT_DIR`, `PROMPTS_DIR`, `SKILLS_DIR`, `POSTED_DIR`; crea `posted/`.
@@ -198,7 +198,7 @@ graph TD
 
 ### La base
 
-SQLite en `posted/butterbot.db`, modo **WAL** (lecturas no bloquean escrituras),
+SQLite en `posted/botata.db`, modo **WAL** (lecturas no bloquean escrituras),
 `foreign_keys=ON`, conexión compartida con `check_same_thread=False` (langgraph ejecuta
 nodos en hilos). El esquema completo está en `CLAUDE.md`; las tablas por responsabilidad:
 
@@ -287,7 +287,7 @@ toggle. Los scopes son los tres contextos de ejecución:
 El grafo arma la lista disponible en runtime filtrando por scope+enabled. `settings.json →
 TOOLS` puede override-ar enable y scopes por nombre sin tocar código. El contrato del
 handler: `(args: dict, ctx: ToolContext) → ToolResult(text, image_path?)`. Los handlers
-viven en `butterbot.py` y se cierran sobre lo que necesitan (bsky, router, conn).
+viven en `botata.py` y se cierran sobre lo que necesitan (bsky, router, conn).
 
 Tools actuales (por scope predominante): `web_search` (Brave), `get_upcoming_events` /
 `create_event` (calendario), `summarize_feed` / `get_my_recent_posts` / `get_news` /
@@ -326,7 +326,7 @@ el admin escribe en `skills/`.
 
 ## 10. Cliente MCP y servers (mcp_tools.py + mcp_servers/, T29)
 
-Butterbot consume **MCP servers externos** como tools: la sección `MCP` de settings declara
+Botata consume **MCP servers externos** como tools: la sección `MCP` de settings declara
 servers (stdio o streamable-http); al arranque el cliente conecta, lista sus tools y las
 registra en el ToolRegistry como `{server}_{tool}` con un handler proxy. Un conector nuevo
 (Google Calendar, un scraper, lo que sea) es config, no código.
@@ -372,15 +372,25 @@ Tareas registradas:
 | `mentions` | poll + proceso de menciones | on |
 | `heartbeat` | pase de calendario agéntico | **off**, 12h |
 
-**Heartbeat**: lee `events_today` + `upcoming_events`; sin eventos no llama al LLM (costo
-cero). Con eventos, compone SOUL + fecha + `heartbeat_prompt.md` + skills + eventos + posts
-recientes, y decide con `FeedDecision`. El prompt codifica el criterio: saludar cumpleaños,
-recordar juntadas, **jamás** postear eventos personales no celebrables, y callar es digno.
+**Heartbeat**: lee `events_today` + `upcoming_events` + instrucciones en dos capas:
+`prompts/heartbeat_checklist.md` (default versionado, editable a mano — el mecanismo principal) y
+`context/heartbeat_override.md` (override runtime que escribe el comando `set_heartbeat` — auxiliar,
+lo pisa temporalmente; borrarlo vuelve al default). Sin eventos NI instrucciones en ninguna
+capa, no llama al LLM (costo cero). Con material, compone SOUL + fecha + `heartbeat_engine.md`
++ skills + instrucciones + eventos + posts recientes, y decide con `FeedDecision`. Imágenes
+autónomas (T12): si hay catálogo, ofrece `image_query` y adjunta vía `resolve_catalog_image`
+(mismo guardrail que el feed); toggle `TASKS.heartbeat.autonomous_images`, default **true**
+(las instrucciones del heartbeat ya son del admin, a diferencia de los feeds opt-in). Reparto
+estilo OpenClaw (un archivo = un rol): `heartbeat_engine.md` = SOLO invariantes del pase
+(regla dura anti-alucinación de eventos, **jamás** eventos personales no celebrables,
+anti-spam, callar es digno, formato); las tareas viven en la checklist `prompts/heartbeat_checklist.md`
+(ítem 1 hoy: calendario) — editarla reemplaza la conducta de verdad, sin criterio duplicado
+en el marco.
 Verificado en vivo: saluda una vez y a la pasada siguiente se niega a repetirse.
 
 ## 12. BskyClient (la capa de plataforma)
 
-Único punto de contacto con Bluesky (~370 líneas dentro de butterbot.py). Métodos clave:
+Único punto de contacto con Bluesky (~370 líneas dentro de botata.py). Métodos clave:
 
 - **Entrada**: `get_mentions()` (últimas 25 notifs mention/reply; no filtra por `is_read` —
   el dedup es de la DB), `get_thread_info(uri)` (reconstruye la cadena de parents como
@@ -423,7 +433,7 @@ Subsistema separado del runtime del bot (corre por CLI, alimenta el catálogo):
 spawnean procesos locales; el de Reddit usa fixtures). Convenciones:
 
 - `sys.path.insert` + env dummies (`BSKY_PASSWORD`, `OPENROUTER_API_KEY`) **antes** de
-  `import butterbot` (el import las exige).
+  `import botata` (el import las exige).
 - Mocks por `monkeypatch.setattr` sobre los globals del módulo; DB real temporal
   (`d.init_db(tmp_path/...)`) para lo que toca esquema.
 - Los tests de retrieval con embeddings reales existen pero el grueso usa vectores dummy.
@@ -432,7 +442,7 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 
 ## 15. Operación
 
-- **Entrypoints CLI**: `python butterbot.py` (loop completo; `--mode open|admin_only`) ·
+- **Entrypoints CLI**: `python botata.py` (loop completo; `--mode open|admin_only`) ·
   `--proactive [--force-post]` (pase de feed one-shot) · `--news` · `--heartbeat` ·
   `--fetch-feeds [--backfill]` · `--post-summary <feed>`. Satélites: `mem_admin.py`,
   `catalog.py`, `scrape_ig.py`, `migrate_maripobot.py`.
@@ -452,7 +462,7 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 
 ## 16. Cómo extender el sistema (recetas)
 
-- **Tool nueva**: handler `(args, ctx) → ToolResult` en butterbot.py + `reg.register(...)`
+- **Tool nueva**: handler `(args, ctx) → ToolResult` en botata.py + `reg.register(...)`
   en `build_tool_registry` (schema + scopes) + entrada en `settings.json → TOOLS`. Test.
 - **Skill nueva**: crear `skills/nombre.md` con frontmatter. Nada más — se carga sola.
 - **Tarea periódica nueva**: función del pase + `PeriodicTask` en la lista de `run()` +
@@ -470,7 +480,7 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 
 - **Tool-calling de una ronda**: el LLM no puede encadenar tools ni reaccionar al resultado
   de una tool con otra. Suficiente hoy; revisar si las tools se vuelven composicionales.
-- **`butterbot.py` es grande** (~3000 líneas): BskyClient, nodos, pases y CLI conviven.
+- **`botata.py` es grande** (~3000 líneas): BskyClient, nodos, pases y CLI conviven.
   La extracción natural (BskyClient → `channel_bsky.py`) conviene hacerla **como parte de
   T28**, no antes, para no refactorizar dos veces.
 - **Sin reconexión en caliente de MCP**: server muerto en runtime → cada call devuelve

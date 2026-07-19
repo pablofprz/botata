@@ -1,4 +1,4 @@
-"""db.py — capa de persistencia de butterbot.
+"""db.py — capa de persistencia de botata.
 
 SQLite (WAL) como source of truth único + sqlite-vec (vec0, ANN coseno)
 + FTS5 (BM25) para búsqueda híbrida. El esquema y las decisiones de diseño
@@ -22,11 +22,11 @@ from typing import Any
 import numpy as np
 import sqlite_vec
 
-log = logging.getLogger("butterbot.db")
+log = logging.getLogger("botata.db")
 
 # ─── Constantes ────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "posted" / "butterbot.db"
+DB_PATH = BASE_DIR / "posted" / "botata.db"
 
 # bge-m3 (dense) → 1024 dimensiones. Verificado contra config.json del modelo.
 EMBED_DIM = 1024
@@ -106,15 +106,30 @@ CREATE TABLE IF NOT EXISTS events (
     title       TEXT NOT NULL,
     description TEXT,
     event_at    TEXT NOT NULL,                    -- ISO 8601 (America/Argentina)
-    kind        TEXT NOT NULL DEFAULT 'other',    -- birthday|reminder|community|other
+    kind        TEXT NOT NULL DEFAULT 'other',    -- birthday|reminder|community|other|bot_action
     source      TEXT,                             -- admin|feed|/comando|uri de origen
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    done        INTEGER NOT NULL DEFAULT 0        -- solo kind='bot_action': ya ejecutada
 );
 CREATE INDEX IF NOT EXISTS idx_events_at     ON events(event_at);
 CREATE INDEX IF NOT EXISTS idx_events_handle ON events(handle);
 
+-- ─── interactions: log conversacional por usuario ────────────────────
+-- Una nota breve por CADA interacción directa (mención respondida): de qué se
+-- habló, en qué tono. Separada de user_facts a propósito: los facts son datos
+-- duraderos autorrevelados; esto es historial de conversación (recencia > semántica,
+-- se recupera cronológico, sin embeddings).
+CREATE TABLE IF NOT EXISTS interactions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    handle     TEXT NOT NULL REFERENCES users(handle) ON DELETE CASCADE,
+    summary    TEXT NOT NULL,               -- ej. "discutimos del mundial, tono jodón"
+    source_uri TEXT,                        -- URI de la mención de origen
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_interactions_handle ON interactions(handle, created_at);
+
 -- ─── replied_posts: idempotencia de procesamiento (entrada) ─────────
--- (preexistente en butterbot.py — se preserva tal cual)
+-- (preexistente en botata.py — se preserva tal cual)
 CREATE TABLE IF NOT EXISTS replied_posts (
     uri        TEXT PRIMARY KEY,
     cid        TEXT NOT NULL,
@@ -125,7 +140,7 @@ CREATE TABLE IF NOT EXISTS replied_posts (
 );
 
 -- ─── feed_cursors: cursores por feed ─────────────────────────────────
--- (preexistente en butterbot.py — se preserva tal cual)
+-- (preexistente en botata.py — se preserva tal cual)
 CREATE TABLE IF NOT EXISTS feed_cursors (
     feed_name  TEXT PRIMARY KEY,
     last_run   TEXT
@@ -185,7 +200,7 @@ CREATE TABLE IF NOT EXISTS image_catalog (
     ocr_text      TEXT,                       -- texto visible en la imagen (si tiene)
     source_url    TEXT,                       -- permalink al post original
     posted_at     TEXT,                       -- fecha del post original
-    used_at       TEXT,                       -- última vez que butterbot usó esta imagen
+    used_at       TEXT,                       -- última vez que botata usó esta imagen
     use_count     INTEGER NOT NULL DEFAULT 0,
     UNIQUE(platform, external_id, file_path)
 );
@@ -274,7 +289,7 @@ def _load_vec_extension(conn: sqlite3.Connection) -> None:
 
 
 def init_db(path: Path | str = DB_PATH) -> sqlite3.Connection:
-    """Abre/crea butterbot.db, aplica pragmas, carga sqlite-vec y crea el esquema.
+    """Abre/crea botata.db, aplica pragmas, carga sqlite-vec y crea el esquema.
 
     Devuelve una conexión lista para uso del bot. `check_same_thread=False`
     porque langgraph puede ejecutar nodos en hilos; WAL cubre la concurrencia.
@@ -288,9 +303,22 @@ def init_db(path: Path | str = DB_PATH) -> sqlite3.Connection:
         conn.execute(f"PRAGMA {pragma}")
     _load_vec_extension(conn)
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     conn.commit()
     log.info("DB ready at %s (sqlite_vec loaded)", path)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Migraciones idempotentes sobre DBs existentes (el _SCHEMA solo crea, no altera).
+
+    - events.done (2026-07-19): marca de cumplimiento para eventos-acción
+      (kind='bot_action') — el heartbeat los ejecuta una sola vez.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "done" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN done INTEGER NOT NULL DEFAULT 0")
+        log.info("migración: events.done agregada")
 
 
 # ─── scraped_items: idempotencia y log de entrada del scraping ──────────────
@@ -876,9 +904,12 @@ def upcoming_events(
     Si `handle` se pasa → eventos de ese usuario + los de comunidad (handle IS NULL).
     Si es None → todos. `now` default = ahora en AR (UTC-3).
     """
-    now_expr = "?" if now is not None else "datetime('now','-3 hours')"
+    now_expr = "datetime(replace(?,'T',' '))" if now is not None \
+        else "datetime('now','-3 hours')"
     params: list[Any] = [now] if now is not None else []
-    where = [f"event_at >= {now_expr}"]
+    # replace(): event_at ISO usa 'T', datetime() de SQLite usa espacio — sin
+    # normalizar, la comparación de strings miente (ver due_bot_actions).
+    where = [f"datetime(replace(event_at,'T',' ')) >= {now_expr}"]
     if handle is not None:
         where.append("(handle = ? OR handle IS NULL)")
         params.append(handle)
@@ -909,6 +940,96 @@ def events_today(
     return [dict(r) for r in rows]
 
 
+def due_bot_actions(conn: sqlite3.Connection, *, now: str | None = None) -> list[dict]:
+    """Eventos-acción (kind='bot_action') vencidos y no cumplidos: event_at <= ahora.
+
+    Son órdenes agendadas para el bot ("posteá X a tal hora"), no contexto: el
+    heartbeat las ejecuta en el primer pase después de la hora y las marca done.
+    `now` default = ahora en AR (UTC-3).
+    """
+    now_expr = "datetime(replace(?,'T',' '))" if now is not None \
+        else "datetime('now','-3 hours')"
+    params: tuple = (now,) if now is not None else ()
+    # datetime(replace(...)) normaliza el separador: event_at se guarda ISO con 'T'
+    # pero datetime('now') devuelve con espacio, y en comparación de strings
+    # 'T' > ' ' haría que NINGÚN evento del día aparezca como vencido.
+    rows = conn.execute(
+        f"SELECT * FROM events WHERE kind = 'bot_action' AND done = 0 "
+        f"AND datetime(replace(event_at,'T',' ')) <= {now_expr} ORDER BY event_at ASC",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_event_done(conn: sqlite3.Connection, event_id: int) -> None:
+    """Marca un evento-acción como cumplido (no se vuelve a ejecutar)."""
+    conn.execute("UPDATE events SET done = 1 WHERE id = ?", (event_id,))
+    conn.commit()
+
+
+# ─── relationships: grafo ponderado entre usuarios ──────────────────────────
+def bump_relationship(
+    conn: sqlite3.Connection,
+    handle_a: str,
+    handle_b: str,
+    kind: str = "thread",
+    *,
+    inc: float = 1.0,
+) -> bool:
+    """Incrementa (o crea) la arista no dirigida entre dos usuarios.
+
+    Orden canónico (min, max) para que (a,b) y (b,a) sean la MISMA arista.
+    Solo entre usuarios que ya existen en `users` (no crea filas: el grafo es
+    entre gente conocida, no un censo). Devuelve True si tocó la arista.
+    """
+    a, b = sorted((handle_a.strip(), handle_b.strip()))
+    if not a or a == b:
+        return False
+    exists = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE handle IN (?, ?)", (a, b)
+    ).fetchone()[0]
+    if exists < 2:
+        return False
+    conn.execute(
+        "INSERT INTO relationships(handle_a, handle_b, kind, weight) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(handle_a, handle_b, kind) DO UPDATE SET "
+        "weight = weight + excluded.weight, last_at = datetime('now')",
+        (a, b, kind, inc),
+    )
+    conn.commit()
+    return True
+
+
+# ─── interactions: log conversacional por usuario ───────────────────────────
+def log_interaction(
+    conn: sqlite3.Connection,
+    handle: str,
+    summary: str,
+    *,
+    source_uri: str | None = None,
+) -> int:
+    """Registra una nota de interacción directa con un usuario."""
+    cur = conn.execute(
+        "INSERT INTO interactions(handle, summary, source_uri) VALUES (?, ?, ?)",
+        (handle, summary, source_uri),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def recent_interactions(conn: sqlite3.Connection, handle: str, limit: int = 5) -> list[dict]:
+    """Últimas notas de interacción con un usuario, de más nueva a más vieja.
+
+    Recuperación cronológica a propósito (recencia > semántica): es historial
+    de conversación, no conocimiento — por eso no tiene embeddings."""
+    rows = conn.execute(
+        "SELECT summary, source_uri, created_at FROM interactions "
+        "WHERE handle = ? ORDER BY id DESC LIMIT ?",
+        (handle, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def purge_user_memory(
     conn: sqlite3.Connection,
     handle: str,
@@ -929,6 +1050,7 @@ def purge_user_memory(
         conn.execute("DELETE FROM user_facts_vec WHERE rowid = ?", (fid,))
     conn.execute("DELETE FROM user_facts WHERE handle = ?", (handle,))  # trigger limpia el FTS
     events = conn.execute("DELETE FROM events WHERE handle = ?", (handle,)).rowcount
+    inters = conn.execute("DELETE FROM interactions WHERE handle = ?", (handle,)).rowcount
     rels = 0
     if include_relationships:
         rels = conn.execute(
@@ -941,7 +1063,8 @@ def purge_user_memory(
         conn.execute("UPDATE bot_posts SET reply_to_handle = NULL WHERE reply_to_handle = ?", (handle,))
         conn.execute("DELETE FROM users WHERE handle = ?", (handle,))
     conn.commit()
-    return {"facts": len(fact_ids), "events": events, "relationships": rels}
+    return {"facts": len(fact_ids), "events": events, "relationships": rels,
+            "interactions": inters}
 
 
 def migrate_user_handle(conn: sqlite3.Connection, old_handle: str, new_handle: str) -> dict[str, int]:
@@ -976,6 +1099,8 @@ def migrate_user_handle(conn: sqlite3.Connection, old_handle: str, new_handle: s
     conn.execute("DELETE FROM relationships WHERE handle_a = ? OR handle_b = ?",
                  (old_handle, old_handle))
     conn.execute("UPDATE bot_posts SET reply_to_handle = ? WHERE reply_to_handle = ?",
+                 (new_handle, old_handle))
+    conn.execute("UPDATE interactions SET handle = ? WHERE handle = ?",
                  (new_handle, old_handle))
     conn.execute("DELETE FROM users WHERE handle = ?", (old_handle,))
     conn.commit()

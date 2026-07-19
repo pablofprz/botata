@@ -17,7 +17,7 @@ os.environ.setdefault("BSKY_PASSWORD", "dummy")
 os.environ.setdefault("OPENROUTER_API_KEY", "dummy")
 
 import db as d
-import butterbot as b
+import botata as b
 
 _DIM = 1024
 
