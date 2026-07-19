@@ -53,6 +53,7 @@
 <nav>
   <h1>🤖 botata</h1>
   <a href="#identidad">Identidad</a>
+  <a href="#presupuesto">Presupuesto</a>
   <a href="#credenciales">Credenciales</a>
   <a href="#modelos">Modelos</a>
   <a href="#feeds">Feeds</a>
@@ -67,6 +68,14 @@
      Las skills se recargan solas.</p>
 
   <section id="identidad"><h2>Identidad</h2><div class="card" id="c-identidad"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="presupuesto"><h2>Presupuesto diario</h2>
+    <p class="hint">Guard económico: mide el gasto del día contra el endpoint de créditos de
+      OpenRouter; superado el límite, el bot <b>duerme hasta el día siguiente</b> (no corre
+      ninguna tarea, menciones incluidas). "Anunciar" postea la siesta/despertar
+      (<code>prompts/burned.json</code> / <code>hello.json</code>).</p>
+    <div class="card" id="c-budget"></div>
     <button onclick="saveSettings()">Guardar</button></section>
 
   <section id="credenciales"><h2>Credenciales (.env)</h2>
@@ -157,8 +166,9 @@ function render() {
   $("c-identidad").innerHTML = `<div class="row">
     <div>${textInput(S, "BOT_HANDLE", "Handle del bot")}</div>
     <div>${textInput(S, "ADMIN_HANDLE", "Handle del admin")}</div>
-    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll (segundos)", "number")}</div>
-    <div>${textInput(S, "OPENROUTER_DAILY_BUDGET_USD", "Budget diario USD", "number")}</div></div>`;
+    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll (segundos)", "number")}</div></div>`;
+
+  renderBudget();
 
   $("c-env").innerHTML = Object.entries(ENV_KEYS).map(([k, set]) => `
     <div class="row" style="align-items:center;margin-bottom:4px">
@@ -168,6 +178,15 @@ function render() {
     </div>`).join("");
 
   renderModels(); renderFeeds(); renderTools(); renderTasks(); renderMcp(); renderNews(); renderSkills();
+}
+
+function renderBudget() {
+  const b = S.BUDGET ?? (S.BUDGET = {enabled: false, daily_usd: 1.0, announce: true});
+  $("c-budget").innerHTML = `<div class="row">
+    <div style="max-width:200px">${textInput(b, "daily_usd", "límite diario (USD)", "number")}</div>
+    <div style="flex:2;padding-bottom:6px">${check(b, "enabled", "activo", false)}
+      ${check(b, "announce", "anunciar siesta/despertar", true)}</div></div>
+    ${b.enabled ? "" : `<p class="warn">⚠️ sin budget activo el bot corre SIN límite de gasto</p>`}`;
 }
 
 function renderModels() {

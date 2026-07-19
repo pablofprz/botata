@@ -75,6 +75,15 @@ def validate_settings(s: dict) -> list[str]:
         if "interval_hours" in cfg and not isinstance(cfg["interval_hours"], (int, float)):
             errs.append(f"TASKS.{name}: interval_hours debe ser numérico")
 
+    budget = s.get("BUDGET")
+    if budget is not None:
+        daily = budget.get("daily_usd", 1.0)
+        if not isinstance(daily, (int, float)) or isinstance(daily, bool) or daily <= 0:
+            errs.append("BUDGET.daily_usd debe ser un número > 0")
+        for flag in ("enabled", "announce"):
+            if flag in budget and not isinstance(budget[flag], bool):
+                errs.append(f"BUDGET.{flag} debe ser booleano")
+
     errs += validate_mcp(s.get("MCP", {}))
 
     models = s.get("MODELS")

@@ -146,6 +146,15 @@ CREATE TABLE IF NOT EXISTS feed_cursors (
     last_run   TEXT
 );
 
+-- ─── kv: estado misceláneo clave→valor ───────────────────────────────
+-- Para estado chico que debe sobrevivir reinicios sin merecer tabla propia
+-- (ej. 'budget_state' del guard de presupuesto). Valores JSON como TEXT.
+CREATE TABLE IF NOT EXISTS kv (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ─── posted_news: idempotencia de items RSS ya posteados (T15) ────────
 CREATE TABLE IF NOT EXISTS posted_news (
     item_id   TEXT PRIMARY KEY,   -- link o guid del item RSS
@@ -938,6 +947,23 @@ def events_today(
         tuple(params),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def kv_get(conn: sqlite3.Connection, key: str) -> str | None:
+    """Lee un valor del estado misceláneo (tabla kv)."""
+    row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Upsert de un valor en el estado misceláneo (tabla kv)."""
+    conn.execute(
+        "INSERT INTO kv(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+        "updated_at = datetime('now')",
+        (key, value),
+    )
+    conn.commit()
 
 
 def due_bot_actions(conn: sqlite3.Connection, *, now: str | None = None) -> list[dict]:

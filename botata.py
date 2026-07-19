@@ -15,6 +15,7 @@ import base64
 import json
 import logging
 import os
+import random
 import re
 from html import unescape as _html_unescape
 import sqlite3
@@ -37,6 +38,7 @@ from pydantic import AliasChoices, BaseModel, Field
 from typing_extensions import TypedDict
 
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
+import budget as budgetmod  # guard de presupuesto diario de tokens
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
 from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope, ALL_SCOPES  # framework de tools
 from skills import skills_prompt_block, get_skill_body  # workspace de skills (T26)
@@ -173,6 +175,11 @@ NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 # Superficie de prompt injection en bot público → default cerrado. Semilla del
 # futuro scope de permisos por usuario.
 BOT_ACTIONS_FROM : str = str(settings.get("BOT_ACTIONS_FROM", "admin")).lower()
+
+# Presupuesto diario de tokens (guard económico, portado de maripobot).
+# {enabled, daily_usd, announce} — editable desde la UI (python config_ui.py).
+# Quemado el budget del día → el loop saltea TODAS las tareas hasta mañana.
+BUDGET_CONFIG : dict = settings.get("BUDGET", {})
 
 # Back-compat del router: si no hay sección MODELS, se derivan los aliases de estos.
 _LEGACY_MODELS = {
@@ -2570,6 +2577,11 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             f"({f.get('posting_policy', 'balanced')}, {f.get('interval_hours', 6)}h)"
             for f in FEEDS_CONFIG))
         lines.append(f"noticias (NEWS_ENABLED): {'on' if NEWS_ENABLED else 'off'}")
+        if BUDGET_CONFIG.get("enabled"):
+            lines.append(f"budget diario: ${float(BUDGET_CONFIG.get('daily_usd', 1.0)):.2f} "
+                         f"(announce={'on' if BUDGET_CONFIG.get('announce', True) else 'off'})")
+        else:
+            lines.append("budget diario: off (sin límite de gasto)")
         hb_override = load_text(HEARTBEAT_OVERRIDE_PATH).strip()
         hb_default = load_text(HEARTBEAT_CHECKLIST_PATH).strip()
         if hb_override:
@@ -3455,8 +3467,21 @@ def run(mode: str) -> None:
     log.info("Tareas: %s", ", ".join(
         f"{t.name}{'(off)' if not t.enabled else ''}" for t in tasks))
 
+    guard = build_budget_guard(db)
+    if guard.enabled:
+        log.info("Budget diario: $%.2f (announce=%s)", guard.daily_usd,
+                 BUDGET_CONFIG.get("announce", True))
+
     while True:
         try:
+            # Guard económico: quemado el budget del día, el bot duerme (no corre
+            # NINGUNA tarea, menciones incluidas) hasta el día siguiente.
+            transition = guard.check()
+            if transition:
+                _announce_budget_transition(bsky, db, transition)
+            if guard.burned:
+                time.sleep(POLL_INTERVAL)
+                continue
             run_due(
                 tasks,
                 get_last=lambda name: get_feed_last_run(db, name),
@@ -3467,6 +3492,39 @@ def run(mode: str) -> None:
             log.info("Shutting down.")
             break
         time.sleep(POLL_INTERVAL)
+
+
+def build_budget_guard(conn: sqlite3.Connection) -> "budgetmod.BudgetGuard":
+    """Arma el BudgetGuard desde la sección BUDGET de settings (UI-editable).
+    El fetcher apunta al endpoint /credits de OpenRouter (el budget mide el gasto
+    ahí; el fallback local Ollama es gratis y queda afuera a propósito)."""
+    return budgetmod.BudgetGuard(
+        get=lambda k: dbmod.kv_get(conn, k),
+        set=lambda k, v: dbmod.kv_set(conn, k, v),
+        fetch=lambda: budgetmod.fetch_openrouter_usage(OPENAI_ENDPOINT, OPENROUTER_API_KEY),
+        daily_usd=float(BUDGET_CONFIG.get("daily_usd", 1.0)),
+        enabled=bool(BUDGET_CONFIG.get("enabled", False)),
+    )
+
+
+def _announce_budget_transition(bsky: BskyClient, conn: sqlite3.Connection,
+                                transition: str) -> None:
+    """Postea el anuncio de siesta ('sleep') o despertar ('wake') si announce=true.
+    Mensajes al azar de prompts/burned.json / hello.json (portados de maripobot).
+    Best-effort: un fallo posteando jamás tira el loop."""
+    if not BUDGET_CONFIG.get("announce", True):
+        return
+    path = PROMPTS_DIR / ("burned.json" if transition == "sleep" else "hello.json")
+    fallback = ("Límite alcanzado por hoy, chau" if transition == "sleep"
+                else "Bip bip, estoy activo de vuelta")
+    try:
+        msgs = load_json(path) or []
+        text = random.choice(msgs) if msgs else fallback
+        uri = bsky.post(text)
+        log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
+        log.info("budget: anuncio de %s posteado", transition)
+    except Exception as e:
+        log.error("budget: no pude postear el anuncio de %s: %s", transition, e)
 
 
 def _thread_participants(thread_context: str) -> list[str]:

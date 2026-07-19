@@ -24,6 +24,7 @@ _SETTINGS = {
         "aliases": {"reasoning": [{"endpoint": "or", "model": "m1"}]},
         "roles": {"reply": "reasoning"},
     },
+    "BUDGET": {"enabled": True, "daily_usd": 1.5, "announce": True},
 }
 
 
@@ -56,6 +57,9 @@ def test_settings_valido_pasa():
     (lambda s: s["MCP"]["reddit"].pop("command"), "requiere command"),
     (lambda s: s["MODELS"]["roles"].update(reply="inexistente"), "alias desconocido"),
     (lambda s: s["MODELS"]["aliases"]["reasoning"][0].update(endpoint="nope"), "endpoint desconocido"),
+    (lambda s: s["BUDGET"].update(daily_usd=0), "daily_usd"),
+    (lambda s: s["BUDGET"].update(daily_usd="mucho"), "daily_usd"),
+    (lambda s: s["BUDGET"].update(enabled="si"), "BUDGET.enabled"),
 ])
 def test_settings_invalido_falla(mutacion, fragmento):
     s = json.loads(json.dumps(_SETTINGS))
