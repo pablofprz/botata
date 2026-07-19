@@ -222,5 +222,73 @@ def test_error_del_llm_es_graceful(conn, monkeypatch):
     assert bsky.posts == []
 
 
+# ─── Fase de tools del heartbeat ─────────────────────────────────────────────
+class FakeToolLLM(FakeLLM):
+    """FakeLLM que además pide UNA tool call en la fase de tools."""
+
+    def __init__(self, decision, tool_name, tool_args):
+        super().__init__(decision)
+        self._call = type("C", (), {"function": type("F", (), {
+            "name": tool_name, "arguments": __import__("json").dumps(tool_args)})()})()
+
+    def call_with_tools(self, system, user, tools):
+        self.tool_system = system
+        return "", [self._call]
+
+
+def _music_registry():
+    from tools import ToolRegistry, ToolResult, Scope
+    reg = ToolRegistry()
+    reg.register(
+        "search_music", "busca música",
+        {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        lambda args, ctx: ToolResult(text="- La H no murió — Hermética (https://spoti.fy/x)"),
+        {Scope.FEED_REFLECTION},
+    )
+    return reg
+
+
+def test_instruccion_con_tool_trae_resultado_real(conn, monkeypatch):
+    """'posteá un tema de Hermética' → la fase de tools llama search_music y el
+    resultado (tema + link real) entra al contexto de la decisión."""
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("posteá un tema de Hermética\n", encoding="utf-8")
+    decision = b.FeedDecision(should_post=True, reason="orden musical",
+                              text="escuchen La H no murió https://spoti.fy/x")
+    bsky = FakeBsky()
+    llm = FakeToolLLM(decision, "search_music", {"query": "Hermética"})
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    b.run_heartbeat_pass(bsky, router=None, conn=conn, registry=_music_registry())
+    assert "La H no murió" in llm.last_system          # el resultado llegó a la decisión
+    assert "Resultado de search_music" in llm.last_system
+    assert bsky.posts == ["escuchen La H no murió https://spoti.fy/x"]
+
+
+def test_sin_registry_no_hay_fase_de_tools(conn, monkeypatch):
+    """Back-compat: sin registry el pase funciona igual (tests/pases viejos)."""
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("posteá algo\n", encoding="utf-8")
+    bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=True, text="algo"))
+    _run(conn, bsky, llm, monkeypatch)                 # registry=None
+    assert bsky.posts == ["algo"]
+
+
+def test_fase_de_tools_rota_no_frena_el_pase(conn, monkeypatch):
+    """Una tool que explota se loguea y el pase sigue sin su resultado."""
+    from tools import ToolRegistry, Scope
+    reg = ToolRegistry()
+
+    def _boom(args, ctx):
+        raise RuntimeError("spotify caído")
+
+    reg.register("search_music", "x",
+                 {"type": "object", "properties": {}, "required": []},
+                 _boom, {Scope.FEED_REFLECTION})
+    b.HEARTBEAT_OVERRIDE_PATH.write_text("posteá un tema\n", encoding="utf-8")
+    decision = b.FeedDecision(should_post=False, reason="no pude")
+    llm = FakeToolLLM(decision, "search_music", {})
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    b.run_heartbeat_pass(FakeBsky(), router=None, conn=conn, registry=reg)  # no lanza
+    assert llm.calls == 1
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

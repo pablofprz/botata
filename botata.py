@@ -1632,7 +1632,8 @@ def run_news_loop() -> None:
 # ---------------------------------------------------------------------------
 
 def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
-                       conn: sqlite3.Connection) -> None:
+                       conn: sqlite3.Connection,
+                       registry: ToolRegistry | None = None) -> None:
     """Mira los eventos de hoy/próximos + las instrucciones del heartbeat y
     DECIDE si vale la pena decir algo.
 
@@ -1703,10 +1704,36 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
             "con tu post, poné en 'image_query' palabras clave para buscarla. Si no "
             "corresponde, dejá 'image_query' vacío (la mayoría de las veces va vacío)."
         )
+    llm = RoleLLM(router, "feed_opinion")
+
+    # Fase de tools (scope feed_reflection) — le da manos a las instrucciones:
+    # "posteá un tema de Hermética" puede llamar search_music y traer un link
+    # real; "qué se viene" puede mirar el calendario. Mismo patrón que
+    # ReflectDecideNode; sin registry (tests/CLI viejo) se saltea.
+    if registry is not None:
+        hb_tools = registry.openai_schemas(Scope.FEED_REFLECTION)
+        if hb_tools:
+            tool_system = "\n".join(p for p in parts if p) + (
+                "\n---\nSi tus instrucciones piden algo que requiere info real "
+                "(buscar música, videos, noticias, calendario, web), llamá a la "
+                "tool que corresponda ANTES de decidir. Si no hace falta, no "
+                "llames ninguna."
+            )
+            try:
+                _, tool_calls = llm.call_with_tools(
+                    tool_system, "¿Hay algo que valga la pena decir hoy?", hb_tools)
+                for call in tool_calls or []:
+                    cname = call.function.name
+                    cargs = json.loads(call.function.arguments)
+                    outcome = registry.execute(cname, cargs, ToolContext(state={}, conn=conn))
+                    log.info("heartbeat: tool %s(%s) → %r", cname, cargs, (outcome.text or "")[:120])
+                    parts.append(f"\n---\nResultado de {cname}: {outcome.text}")
+            except Exception as e:
+                log.warning("heartbeat: fase de tools falló: %s", e)
+
     parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
     system = "\n".join(p for p in parts if p)
 
-    llm = RoleLLM(router, "feed_opinion")
     try:
         decision = llm.complete(system, "¿Hay algo que valga la pena decir hoy?", FeedDecision)
     except Exception as e:
@@ -1743,7 +1770,8 @@ def run_heartbeat_loop() -> None:
     db     = init_db()
     bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    run_heartbeat_pass(bsky, router, db)
+    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
+    run_heartbeat_pass(bsky, router, db, registry)
     log.info("Heartbeat pass completo.")
 
 
@@ -1818,6 +1846,81 @@ def run_reflection_loop() -> None:
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     run_reflection_pass(router, db)
     log.info("Reflection pass completo.")
+
+
+# ---------------------------------------------------------------------------
+# Reflexión PÚBLICA (portado de maripobot: reflect_on_history/auto_reflect)
+# ---------------------------------------------------------------------------
+def run_public_reflection_pass(bsky: "BskyClient", router: ModelRouter,
+                               conn: sqlite3.Connection, *,
+                               activity_limit: int = 20, min_activity: int = 3) -> None:
+    """Tarea periódica OUTWARD: el bot postea una reflexión en primera persona
+    (≤300 chars, su voz) sobre lo que vivió — la pata pública de la reflexión
+    (la inward, `run_reflection_pass`, destila lecciones a la DB).
+
+    Material = lecciones recientes + actividad reciente del bot. El agente
+    decide si hay algo con peso (FeedDecision; should_post=false es el
+    resultado digno si no lo hay). Toggleable como toda tarea:
+    TASKS.public_reflection (UI / set_task_config). Sin material → no llama
+    al LLM (costo cero).
+    """
+    activity = recent_bot_activity(conn, limit=activity_limit)
+    lessons = [r["lesson_text"] for r in conn.execute(
+        "SELECT lesson_text FROM lessons ORDER BY id DESC LIMIT 8").fetchall()]
+    if len(activity) < min_activity and not lessons:
+        log.info("public_reflection: sin material — nada que reflexionar")
+        return
+
+    soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
+    prompt = load_text(PROMPTS_DIR / "public_reflection_prompt.md")
+    parts  = [soul, f"\n---\n{current_datetime_line()}", f"\n---\n{prompt}"]
+    if lessons:
+        parts.append("\n---\nLecciones que destilaste últimamente:\n"
+                     + "\n".join(f"- {t}" for t in lessons))
+    recientes = recent_bot_posts(conn, limit=10)
+    if recientes:
+        parts.append("\n---\nTus posts recientes (NO te repitas — si ya "
+                     "reflexionaste sobre esto, should_post=false):\n"
+                     + "\n".join(f"- {t}" for t in recientes))
+    parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
+    system = "\n".join(p for p in parts if p)
+
+    def _fmt(a: dict) -> str:
+        who = f"→ @{a['reply_to_handle']}" if a.get("reply_to_handle") else "(post suelto)"
+        return f"- {a.get('posted_at', '')} {who}: {a.get('text', '')}"
+
+    user = "Tu actividad reciente (de más nueva a más vieja):\n" + \
+        "\n".join(_fmt(a) for a in activity)
+
+    llm = RoleLLM(router, "feed_opinion")
+    try:
+        decision = llm.complete(system, user, FeedDecision)
+    except Exception as e:
+        log.error("public_reflection: %s", e)
+        return
+    log.info("public_reflection: should_post=%s (%s)",
+             decision.should_post, decision.reason[:80])
+    if not decision.should_post:
+        return
+    text = (decision.text or "").strip()
+    if not text:
+        return
+    norm = _norm_text(text)
+    if any(_norm_text(t) == norm for t in recent_bot_posts(conn, limit=20)):
+        log.info("public_reflection: duplicado de un post reciente — skip")
+        return
+    uri = bsky.post(text)
+    log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
+    log.info("public_reflection: posteado %s", uri)
+
+
+def run_public_reflection_loop() -> None:
+    """Pase único desde CLI (`--reflect-public`). Ignora intervalo y toggle."""
+    db     = init_db()
+    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    run_public_reflection_pass(bsky, router, db)
+    log.info("Public reflection pass completo.")
 
 
 # ---------------------------------------------------------------------------
@@ -3457,10 +3560,12 @@ def run(mode: str) -> None:
         PeriodicTask("feed",      lambda: _run_feed_pass(feed_graph, respect_interval=True)),
         PeriodicTask("news",      lambda: run_news_pass(bsky, router, db, respect_interval=True)),
         PeriodicTask("mentions",  lambda: _poll_mentions(graph, db, bsky, mode)),
-        PeriodicTask("heartbeat", lambda: run_heartbeat_pass(bsky, router, db),
+        PeriodicTask("heartbeat", lambda: run_heartbeat_pass(bsky, router, db, registry),
                      interval_hours=12, enabled=False),  # outward-facing: el admin lo prende
         PeriodicTask("reflection", lambda: run_reflection_pass(router, db),
                      interval_hours=24, enabled=True),  # inward-only (no postea): destila lecciones
+        PeriodicTask("public_reflection", lambda: run_public_reflection_pass(bsky, router, db),
+                     interval_hours=24, enabled=True),  # outward: reflexión en primera persona
     ]
     apply_tasks_config(tasks, TASKS_CONFIG)
     _RUNTIME_TASKS[:] = tasks  # T30: las tools de config del admin mutan esta lista en vivo
@@ -3622,6 +3727,12 @@ if __name__ == "__main__":
         help="T6: run the reflection pass once (distill behavioral lessons from recent "
              "bot activity into db.lessons) and exit. Inward-only, never posts.",
     )
+    parser.add_argument(
+        "--reflect-public",
+        action="store_true",
+        help="Run the PUBLIC reflection pass once (first-person post about what the "
+             "bot lived/learned, <=300 chars) and exit. Outward-facing.",
+    )
     args = parser.parse_args()
 
     if args.proactive:
@@ -3635,6 +3746,9 @@ if __name__ == "__main__":
 
     elif args.reflect:
         run_reflection_loop()
+
+    elif args.reflect_public:
+        run_public_reflection_loop()
 
     elif args.fetch_feeds:
         db        = init_db()
