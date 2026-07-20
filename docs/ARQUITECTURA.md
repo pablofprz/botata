@@ -30,9 +30,8 @@ skills.py           ← workspace de comportamiento en markdown (T26)
 scheduler.py        ← registro de tareas periódicas del loop (T27)
 mcp_tools.py        ← cliente MCP: conectores externos → tools (T29)
 mcp_servers/        ← servers MCP propios (reddit_server.py; futuros: x, ig)
-browser.py          ← navegador stealth (patchright, perfil persistente) para scraping
-sources.py          ← adaptadores de scraping por plataforma (IGSource; X pendiente)
-ig_api.py           ← Instagram vía API privada mobile (alternativa sin navegador)
+(scraping)          ← MOVIDO a la suite aparte 'Membrilla' (pablofprz/membrilla).
+                       Botata consume su salida por carpeta + sidecar JSON vía catalog.py
 clearsky.py         ← "quién me bloquea" (API pública de ClearSky)
 catalog.py          ← CLI: cataloga imágenes scrapeadas con un modelo de visión
 mem_admin.py        ← CLI: administrar la memoria (facts/lecciones) a mano
@@ -213,7 +212,7 @@ nodos en hilos). El esquema completo está en `CLAUDE.md`; las tablas por respon
 | `feed_cursors` | cursores genéricos clave→timestamp (feeds, news:host, task:name) |
 | `image_catalog` (+`_vec`, `_fts`) | imágenes scrapeadas descritas por el modelo de visión |
 | `relationships` | grafo social ponderado (schema listo, aún sin poblar — ver Neo4J en CLAUDE.md) |
-| `posted_news`, `clearsky_cache`, `scraped_items` | dedup/cache de subsistemas |
+| `posted_news`, `clearsky_cache` | dedup/cache de subsistemas |
 
 ### Embeddings
 
@@ -409,23 +408,18 @@ Verificado en vivo: saluda una vez y a la pasada siguiente se niega a repetirse.
 Para M7 (multicanal), esta clase es el molde de la futura interfaz `Channel`: todo lo que
 el grafo necesita de una plataforma pasa por acá.
 
-## 13. Scraping (browser.py, sources.py, ig_api.py, catalog.py)
+## 13. Ingesta de contenido scrapeado (catalog.py)
 
-Subsistema separado del runtime del bot (corre por CLI, alimenta el catálogo):
+El **scraping** (adquisición) se movió a la suite aparte **Membrilla**
+(`pablofprz/membrilla`, T31): `sources.py`/`ig_api.py`/`browser.py`/`extract.py`/`scrape_ig.py`
+viven ahí. Membrilla deja media + un sidecar `<external_id>.json` en una carpeta; Botata la
+consume **sin compartir código ni DB** (handoff = carpeta + sidecar):
 
-- **browser.py**: navegador anti-detección con **patchright** (Chromium parcheado a nivel
-  binario: sin `navigator.webdriver`, sin leak de `Runtime.enable`, TLS fingerprint real).
-  Modelo de sesión: login manual headful **una vez** → el perfil persistente guarda la
-  sesión → la automatización la reúsa headless para siempre. No sabe de plataformas.
-- **sources.py**: adaptadores por plataforma (`Source` ABC → `fetch_recent`). `IGSource`
-  implementado (meta tags OG como estrategia primaria, LLM extractor de fallback).
-  X/Twitter es un stub (T19). Reddit ya **no** pasa por acá: es el MCP server.
-- **ig_api.py**: camino alternativo para IG vía instagrapi (API privada mobile, sin
-  navegador). Interfaz intercambiable con IGSource.
-- **catalog.py** (CLI `sync`/`stats`): toma las imágenes scrapeadas (y la carpeta
-  `manual/`), las describe con el modelo de visión (categoría, descripción, tags, OCR) y
-  las indexa en `image_catalog` con embedding — de ahí salen las imágenes que el bot
-  adjunta (con el guardrail: sin descripción válida, no se postea).
+- **catalog.py** (CLI `sync`/`stats`): toma las imágenes de la carpeta (y la carpeta
+  `manual/`), lee el **sidecar** de Membrilla para enriquecer (source/url/fecha), las describe
+  con el modelo de visión (categoría, descripción, tags, OCR) y las indexa en `image_catalog`
+  con embedding — de ahí salen las imágenes que el bot adjunta (guardrail: sin descripción
+  válida, no se postea).
 
 ## 14. Testing
 
