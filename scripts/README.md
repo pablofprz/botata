@@ -46,7 +46,7 @@ En prod, dejá `db-backup.sh` en un cron (ej. cada hora) para tener siempre la �
 copia en la nube; desde el dev hacés `db-restore` y trabajás sobre eso.
 
 ## Sync de chats → vault de Obsidian
-Importa conversaciones de Claude al vault (`../butterbot-vault/chats/`) con frontmatter,
+Importa conversaciones de Claude al vault (`vault/chats/`, dentro del repo) con frontmatter,
 tags por keyword y wikilinks. Idempotente (manifest en `chats/.manifest.json`). Solo stdlib.
 
 - **code**: lee los transcripts `.jsonl` de Claude Code

@@ -21,6 +21,9 @@ nada de clases innecesarias, todo toggle en config, y **ningún prompt hardcodea
 
 ## 2. Mapa de módulos
 
+Todos los módulos Python viven en **`src/`** (layout src, desde 2026-07-20; la raíz quedó sin
+`.py` sueltos). Rutas del listado relativas a `src/`:
+
 ```
 botata.py        ← el corazón: grafos, nodos, BskyClient, pases, loop, CLI (~3000 líneas)
 db.py               ← persistencia: esquema, embeddings, búsqueda híbrida, eventos, catálogo
@@ -52,7 +55,7 @@ cablea. Eso permite testearlos aislados y, a futuro (M7), reutilizarlos con otro
 
 ## 3. Arranque y configuración
 
-### Import de botata.py (orden)
+### Import de src/botata.py (orden)
 
 1. Logging a stdout (nivel INFO).
 2. Paths: `CONFIG_DIR`, `CONTEXT_DIR`, `PROMPTS_DIR`, `SKILLS_DIR`, `POSTED_DIR`; crea `posted/`.
@@ -436,7 +439,7 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 
 ## 15. Operación
 
-- **Entrypoints CLI**: `python botata.py` (loop completo; `--mode open|admin_only`) ·
+- **Entrypoints CLI**: `python -m botata` (loop completo; `--mode open|admin_only`) ·
   `--proactive [--force-post]` (pase de feed one-shot) · `--news` · `--heartbeat` ·
   `--fetch-feeds [--backfill]` · `--post-summary <feed>`. Satélites: `mem_admin.py`,
   `catalog.py`, `scrape_ig.py`, `migrate_maripobot.py`.
