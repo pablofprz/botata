@@ -173,26 +173,6 @@ CREATE TABLE IF NOT EXISTS clearsky_cache (
     fetched_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- ─── scraped_items: entrada scrapeada de plataformas externas ────────
--- Log de entrada + idempotencia del scraping (IG, Reddit, X...). Dedup por
--- (platform, external_id). Reusable: cualquier Source (adaptador de plataforma)
--- escribe acá con el mismo esquema, agnóstico de la plataforma.
-CREATE TABLE IF NOT EXISTS scraped_items (
-    platform    TEXT NOT NULL,              -- 'instagram' | 'reddit' | 'twitter'
-    external_id TEXT NOT NULL,              -- shortcode / post id (clave estable)
-    source_name TEXT,                       -- nombre de la cuenta/feed en la config
-    author      TEXT,
-    text        TEXT,
-    media_urls  TEXT,                       -- JSON array de URLs
-    url         TEXT,                       -- permalink
-    posted_at   TEXT,                       -- fecha del post si se pudo extraer
-    scraped_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    status      TEXT NOT NULL DEFAULT 'pending',   -- pending|processed|failed
-    PRIMARY KEY (platform, external_id)
-);
-CREATE INDEX IF NOT EXISTS idx_scraped_source ON scraped_items(platform, source_name);
-CREATE INDEX IF NOT EXISTS idx_scraped_status ON scraped_items(status);
-
 -- ─── image_catalog: mapa de conocimiento de imágenes del bot ─────────
 -- Cada archivo de imagen en scrape/pictures/ tiene una fila acá con su
 -- descripción generada por LLM multimodal, categoría, tags y OCR. Es la
@@ -200,7 +180,7 @@ CREATE INDEX IF NOT EXISTS idx_scraped_status ON scraped_items(status);
 CREATE TABLE IF NOT EXISTS image_catalog (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     platform      TEXT NOT NULL,              -- 'instagram' | 'reddit' | 'local'
-    external_id   TEXT NOT NULL,              -- post shortcode (link a scraped_items)
+    external_id   TEXT NOT NULL,              -- post shortcode (= sidecar de Membrilla)
     source_name   TEXT NOT NULL,              -- cuenta de origen (ej. 'encadenado_shitpost')
     file_path     TEXT NOT NULL,              -- relativo a repo root
     description   TEXT NOT NULL,              -- descripción LLM de qué hay en la imagen
@@ -328,52 +308,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "done" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN done INTEGER NOT NULL DEFAULT 0")
         log.info("migración: events.done agregada")
-
-
-# ─── scraped_items: idempotencia y log de entrada del scraping ──────────────
-def has_scraped_item(conn: sqlite3.Connection, platform: str, external_id: str) -> bool:
-    """True si ya vimos este ítem (dedup por clave de plataforma)."""
-    row = conn.execute(
-        "SELECT 1 FROM scraped_items WHERE platform = ? AND external_id = ?",
-        (platform, external_id),
-    ).fetchone()
-    return row is not None
-
-
-def save_scraped_item(
-    conn: sqlite3.Connection,
-    *,
-    platform: str,
-    external_id: str,
-    source_name: str | None = None,
-    author: str | None = None,
-    text: str | None = None,
-    media_urls: str | None = None,   # JSON array serializado
-    url: str | None = None,
-    posted_at: str | None = None,
-) -> bool:
-    """Inserta un ítem scrapeado. Devuelve True si es nuevo, False si ya existía.
-
-    Idempotente: el INSERT OR IGNORE + rowcount distingue insert real de duplicado.
-    """
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO scraped_items "
-        "(platform, external_id, source_name, author, text, media_urls, url, posted_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (platform, external_id, source_name, author, text, media_urls, url, posted_at),
-    )
-    conn.commit()
-    return cur.rowcount > 0
-
-
-def mark_scraped_status(
-    conn: sqlite3.Connection, platform: str, external_id: str, status: str
-) -> None:
-    conn.execute(
-        "UPDATE scraped_items SET status = ? WHERE platform = ? AND external_id = ?",
-        (status, platform, external_id),
-    )
-    conn.commit()
 
 
 # ─── Embeddings (bge-m3, lazy) ─────────────────────────────────────────────
@@ -784,18 +718,6 @@ def list_uncataloged_files(
                 uncataloged.append((platform, external_id, file_path))
 
     return uncataloged
-
-
-def get_scraped_meta(
-    conn: sqlite3.Connection, platform: str, external_id: str
-) -> dict | None:
-    """Busca metadata en scraped_items para enriquecer una fila de image_catalog."""
-    row = conn.execute(
-        "SELECT source_name, author, text, url, posted_at "
-        "FROM scraped_items WHERE platform = ? AND external_id = ?",
-        (platform, external_id),
-    ).fetchone()
-    return dict(row) if row else None
 
 
 def get_image_catalog_stats(conn: sqlite3.Connection) -> dict:

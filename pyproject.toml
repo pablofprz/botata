@@ -21,11 +21,8 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     # Embeddings locales multilingües (bge-m3)
     "sentence-transformers>=3.0",
-    # Automatización de navegador (capa reusable de scraping: IG, Reddit, X...)
-    "playwright>=1.44",
-    "patchright>=1.44",  # playwright parcheado (stealth) — camino browser de IG
-    # Scraping de Instagram vía API privada mobile (sin navegador, sin fingerprint)
-    "instagrapi>=2.0",
+    # (El scraping vive en la suite aparte 'Membrilla' — pablofprz/membrilla.
+    #  Botata consume su salida por carpeta+sidecar, sin dependencias de scraping.)
     # Cliente MCP: conectores externos como tools (T29)
     "mcp>=1.28",
 ]

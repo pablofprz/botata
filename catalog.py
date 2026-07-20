@@ -9,8 +9,9 @@ El sync es idempotente: escanea scrape/pictures/<platform>/ y para cada
 archivo sin fila en image_catalog genera una descripción con IMAGE_MODEL
 (gemini-2.5-flash vía OpenRouter) y la inserta.
 
-Desacoplado a propósito del scrapeo: scrape_ig.py solo descarga y guarda
-en scraped_items; catalog.py corre después y describe las imágenes.
+Desacoplado a propósito del scrapeo: Membrilla (repo aparte) descarga la media
+y deja un sidecar <external_id>.json junto a ella; catalog.py corre después, lo
+lee para enriquecer la fila y describe la imagen. No comparte DB con el scraper.
 
 Carpeta de input MANUAL (T12): dejá imágenes a mano en scrape/pictures/manual/
 y corré 'python catalog.py sync' — se catalogan igual que las scrapeadas
@@ -96,6 +97,23 @@ def describe_image(image_path: Path, llm: OpenAI) -> dict:
 MANUAL_DIR = BASE_DIR / "scrape" / "pictures" / "manual"  # input manual formalizado (T12)
 
 
+def _read_sidecar(img_path: Path, external_id: str) -> dict:
+    """Lee el sidecar <external_id>.json que deja Membrilla junto a la media.
+
+    Contrato de handoff: metadata normalizada (source_name, url, posted_at, author,
+    text...) sin depender de la DB del scraper. Devuelve {} si no hay sidecar (ej.
+    imágenes manuales en scrape/pictures/manual/).
+    """
+    sidecar = img_path.parent / f"{external_id}.json"
+    if not sidecar.exists():
+        return {}
+    try:
+        return json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning("  sidecar ilegible %s: %s", sidecar.name, e)
+        return {}
+
+
 def cmd_sync(dry_run: bool = False) -> None:
     """Sincroniza el catálogo: para cada imagen sin catalogar, genera descripción y la inserta."""
     conn = dbmod.init_db()
@@ -127,11 +145,11 @@ def cmd_sync(dry_run: bool = False) -> None:
                 processed += 1
                 continue
 
-            # Buscar metadata en scraped_items para enriquecer la fila
-            meta = dbmod.get_scraped_meta(conn, platform, external_id)
-            source_name = meta["source_name"] if meta else "manual"
-            source_url = meta["url"] if meta else None
-            posted_at = meta["posted_at"] if meta else None
+            # Metadata desde el sidecar de Membrilla (contrato de handoff)
+            meta = _read_sidecar(img_path, external_id)
+            source_name = meta.get("source_name") or "manual"
+            source_url = meta.get("url")
+            posted_at = meta.get("posted_at")
 
             try:
                 desc = describe_image(img_path, llm)
