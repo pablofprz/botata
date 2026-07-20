@@ -31,7 +31,7 @@ from pathlib import Path
 from tools import ALL_SCOPES
 from skills import load_skills, _parse_frontmatter
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
 UI_HTML = BASE_DIR / "ui" / "config.html"
 
 ENV_KEYS = [

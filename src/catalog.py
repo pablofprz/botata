@@ -32,7 +32,7 @@ from openai import OpenAI
 
 import db as dbmod
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
 load_dotenv(BASE_DIR / ".env")
 
 logging.basicConfig(

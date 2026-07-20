@@ -60,7 +60,7 @@ log = logging.getLogger("botata")
 # Paths
 # ---------------------------------------------------------------------------
 
-BASE_DIR    = Path(__file__).parent
+BASE_DIR    = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
 CONFIG_DIR  = BASE_DIR / "config"
 CONTEXT_DIR = BASE_DIR / "context"
 PROMPTS_DIR = BASE_DIR / "prompts"

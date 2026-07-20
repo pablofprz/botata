@@ -25,7 +25,7 @@ import sqlite_vec
 log = logging.getLogger("botata.db")
 
 # ─── Constantes ────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
 DB_PATH = BASE_DIR / "posted" / "botata.db"
 
 # bge-m3 (dense) → 1024 dimensiones. Verificado contra config.json del modelo.
