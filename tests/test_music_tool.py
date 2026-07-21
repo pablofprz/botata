@@ -60,14 +60,14 @@ def test_error_is_graceful(monkeypatch):
 def test_search_parses_spotify_payload(monkeypatch):
     # search_spotify_tracks arma los dicts desde el JSON crudo de /search.
     payload = {"tracks": {"items": [
-        {"name": "Flaca", "artists": [{"name": "Andrés Calamaro"}],
+        {"id": "t1", "name": "Flaca", "artists": [{"name": "Andrés Calamaro"}],
          "album": {"name": "Alta Suciedad"},
          "external_urls": {"spotify": "https://open.spotify.com/track/1"}},
     ]}}
     monkeypatch.setattr(b, "_spotify_token", lambda: "tok")
     monkeypatch.setattr(b, "_spotify_get", lambda path, token, params=None: payload)
     tracks = b.search_spotify_tracks("calamaro")
-    assert tracks == [{"title": "Flaca", "artist": "Andrés Calamaro",
+    assert tracks == [{"id": "t1", "title": "Flaca", "artist": "Andrés Calamaro",
                        "album": "Alta Suciedad", "url": "https://open.spotify.com/track/1"}]
 
 

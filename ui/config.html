@@ -58,6 +58,7 @@
   <a href="#modelos">Modelos</a>
   <a href="#feeds">Feeds</a>
   <a href="#tools">Tools</a>
+  <a href="#grupos">Grupos</a>
   <a href="#tareas">Tareas</a>
   <a href="#mcp">MCP</a>
   <a href="#noticias">Noticias</a>
@@ -93,8 +94,20 @@
     <button onclick="saveSettings()">Guardar</button></section>
 
   <section id="tools"><h2>Tools</h2>
-    <p class="hint">⚠️ scope <b>reply</b> = invocable por cualquier usuario del bot público.</p>
+    <p class="hint">⚠️ scope <b>reply</b> = invocable por cualquier usuario del bot público.
+      La columna <b>grupos</b> restringe la tool a los miembros de esos grupos (vacía = todos;
+      el admin siempre puede).</p>
     <div class="card" id="c-tools"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="grupos"><h2>Grupos de usuarios</h2>
+    <p class="hint">Listas de handles con nombre libre (ej. <code>music_users</code>). Se
+      referencian desde la columna "grupos" de las Tools. El admin no necesita estar en
+      ningún grupo: bypassea todos los checks. Además de handles, una entrada puede ser
+      <code>feed:nombre</code> (ej. <code>feed:polcifeed</code>) = todos los miembros de ese
+      feed (solo type list/following), resueltos en vivo con cache de 15 min.</p>
+    <div id="c-groups"></div>
+    <button class="ghost" onclick="addGroup()">+ grupo</button>
     <button onclick="saveSettings()">Guardar</button></section>
 
   <section id="tareas"><h2>Tareas periódicas</h2><div class="card" id="c-tasks"></div>
@@ -177,7 +190,7 @@ function render() {
       <div><input type="password" data-env="${esc(k)}" placeholder="(sin cambios)"></div>
     </div>`).join("");
 
-  renderModels(); renderFeeds(); renderTools(); renderTasks(); renderMcp(); renderNews(); renderSkills();
+  renderModels(); renderFeeds(); renderTools(); renderGroups(); renderTasks(); renderMcp(); renderNews(); renderSkills();
 }
 
 function renderBudget() {
@@ -231,7 +244,7 @@ function renderFeeds() {
 
 function renderTools() {
   const tools = S.TOOLS ?? {};
-  let html = `<table><tr><th>tool</th><th>on</th>${SCOPES.map(s => `<th>${s}</th>`).join("")}</tr>`;
+  let html = `<table><tr><th>tool</th><th>on</th>${SCOPES.map(s => `<th>${s}</th>`).join("")}<th>grupos</th></tr>`;
   for (const [name, cfg] of Object.entries(tools)) {
     if (!Array.isArray(cfg.scopes)) cfg.scopes = [];
     const scopeCell = (sc) => {
@@ -243,10 +256,47 @@ function renderTools() {
       }));
       return `<td><input id="${id}" type="checkbox" ${cfg.scopes.includes(sc) ? "checked" : ""}></td>`;
     };
+    const gid = "i" + Math.random().toString(36).slice(2);
+    setTimeout(() => $(gid)?.addEventListener("input", e => {
+      const list = e.target.value.split(/[\s,]+/).filter(Boolean);
+      if (list.length) cfg.groups = list; else delete cfg.groups;
+    }));
     html += `<tr><td><code>${esc(name)}</code></td><td>${check(cfg, "enabled", "", true)}</td>
-             ${SCOPES.map(scopeCell).join("")}</tr>`;
+             ${SCOPES.map(scopeCell).join("")}
+             <td><input id="${gid}" type="text" placeholder="todos"
+                  value="${esc((cfg.groups ?? []).join(" "))}"></td></tr>`;
   }
   $("c-tools").innerHTML = html + "</table>";
+}
+
+function renderGroups() {
+  const groups = S.USER_GROUPS ?? (S.USER_GROUPS = {});
+  $("c-groups").innerHTML = Object.entries(groups).map(([gname, members]) => {
+    const mid = "i" + Math.random().toString(36).slice(2);
+    setTimeout(() => $(mid)?.addEventListener("input", e => {
+      groups[gname] = e.target.value.split(/[\s,]+/).filter(Boolean);
+    }));
+    return `<div class="card">
+      <b><code>${esc(gname)}</code></b>
+      <label>handles y/o feed:nombre (separados por espacio, sin @)
+        <input id="${mid}" type="text" value="${esc((members ?? []).join(" "))}"></label>
+      <div style="margin-top:8px">
+        <button class="danger" onclick="deleteGroup('${esc(gname)}')">borrar grupo</button></div>
+    </div>`;
+  }).join("") || `<p class="hint">sin grupos — las tools con restricción no las usa nadie (salvo el admin)</p>`;
+}
+
+function addGroup() {
+  const name = prompt("Nombre del grupo (ej. music_users):");
+  if (!name || !name.trim()) return;
+  (S.USER_GROUPS ??= {})[name.trim()] = [];
+  render();
+}
+function deleteGroup(name) {
+  const used = Object.entries(S.TOOLS ?? {}).filter(([, c]) => (c.groups ?? []).includes(name));
+  if (used.length && !confirm(`El grupo "${name}" está en uso por: ${used.map(([t]) => t).join(", ")}. ¿Borrar igual?`)) return;
+  delete S.USER_GROUPS[name];
+  render();
 }
 
 function renderTasks() {

@@ -66,10 +66,43 @@ def validate_settings(s: dict) -> list[str]:
         if feed.get("posting_policy", "balanced") not in _POLICIES:
             errs.append(f"{tag}: posting_policy inválida '{feed.get('posting_policy')}'")
 
+    groups = s.get("USER_GROUPS", {})
+    if not isinstance(groups, dict):
+        errs.append("USER_GROUPS debe ser un objeto {grupo: [handles]}")
+        groups = {}
+    else:
+        feeds_by_name = {f.get("name"): f for f in s.get("FEEDS", []) if f.get("name")}
+        for gname, members in groups.items():
+            if not (isinstance(gname, str) and gname.strip()):
+                errs.append("USER_GROUPS: nombre de grupo vacío")
+            if not (isinstance(members, list)
+                    and all(isinstance(h, str) and h.strip() for h in members)):
+                errs.append(f"USER_GROUPS.{gname}: debe ser una lista de handles no vacíos")
+                continue
+            for m in members:
+                if not m.startswith("feed:"):
+                    continue
+                fname = m[len("feed:"):].strip()
+                feed = feeds_by_name.get(fname)
+                if feed is None:
+                    errs.append(f"USER_GROUPS.{gname}: '{m}' no matchea ningún feed de FEEDS")
+                elif feed.get("type", "list") not in ("list", "following"):
+                    errs.append(f"USER_GROUPS.{gname}: '{m}' es type={feed.get('type')} — "
+                                "solo list/following tienen membresía definida")
+
     for name, cfg in s.get("TOOLS", {}).items():
         bad = set(cfg.get("scopes", [])) - ALL_SCOPES
         if bad:
             errs.append(f"TOOLS.{name}: scope(s) inválido(s) {sorted(bad)}")
+        tg = cfg.get("groups")
+        if tg is not None:
+            if not (isinstance(tg, list) and all(isinstance(g, str) for g in tg)):
+                errs.append(f"TOOLS.{name}: groups debe ser una lista de nombres de grupo")
+            else:
+                unknown = set(tg) - set(groups)
+                if unknown:
+                    errs.append(f"TOOLS.{name}: grupo(s) desconocido(s) {sorted(unknown)} "
+                                "(definilos en USER_GROUPS)")
 
     for name, cfg in s.get("TASKS", {}).items():
         if "interval_hours" in cfg and not isinstance(cfg["interval_hours"], (int, float)):

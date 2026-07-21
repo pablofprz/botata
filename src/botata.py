@@ -176,6 +176,17 @@ NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 # futuro scope de permisos por usuario.
 BOT_ACTIONS_FROM : str = str(settings.get("BOT_ACTIONS_FROM", "admin")).lower()
 
+# Grupos de usuarios: {"music_users": ["handle1", ...]}. Una tool con
+# TOOLS.<name>.groups = ["music_users"] solo la pueden gatillar (en scope reply)
+# los miembros de esos grupos; sin `groups` la tool es para todos (back-compat).
+# El admin bypassea todo check. Editar membresías = UI/archivo, no por comando.
+USER_GROUPS : dict = settings.get("USER_GROUPS", {})
+
+# Playlist comunitaria de recomendaciones (tool add_music_recommendation).
+# Solo el ID (no la URL completa). Escribir requiere el token de USUARIO de
+# spotify_auth.py (autorización única del admin) — Client Credentials no puede.
+SPOTIFY_PLAYLIST_ID : str = str(settings.get("SPOTIFY_PLAYLIST_ID", "")).strip()
+
 # Presupuesto diario de tokens (guard económico, portado de maripobot).
 # {enabled, daily_usd, announce} — editable desde la UI (python config_ui.py).
 # Quemado el budget del día → el loop saltea TODAS las tareas hasta mañana.
@@ -489,6 +500,7 @@ class BskyClient:
     _LOGIN_BACKOFF = 5  # segundos, exponencial: 5, 10, 20, 40
 
     def __init__(self, handle: str, password: str):
+        self.handle = handle
         request = AtprotoRequest(timeout=httpx.Timeout(30.0, connect=15.0))
         self._client = Client(request=request)
         for attempt in range(1, self._LOGIN_RETRIES + 1):
@@ -748,6 +760,33 @@ class BskyClient:
             lambda cursor, lim: self._client.app.bsky.feed.get_feed(
                 {"feed": uri, "limit": lim, **({"cursor": cursor} if cursor else {})}),
             f"get_custom_feed[{uri}]", since, limit)
+
+    def get_list_members(self, list_uri: str) -> list[str]:
+        """Handles de los miembros de una **lista** de Bluesky (para USER_GROUPS feed:)."""
+        uri = self.resolve_list_uri(list_uri)
+        handles: list[str] = []
+        cursor = None
+        for _ in range(10):  # cap: 10 páginas × 100 = 1000 miembros
+            resp = self._client.app.bsky.graph.get_list(
+                {"list": uri, "limit": 100, **({"cursor": cursor} if cursor else {})})
+            handles += [item.subject.handle for item in (resp.items or [])]
+            cursor = getattr(resp, "cursor", None)
+            if not cursor:
+                break
+        return handles
+
+    def get_follows(self) -> list[str]:
+        """Handles de las cuentas que el bot sigue (para USER_GROUPS feed: type=following)."""
+        handles: list[str] = []
+        cursor = None
+        for _ in range(10):
+            resp = self._client.app.bsky.graph.get_follows(
+                {"actor": self.handle, "limit": 100, **({"cursor": cursor} if cursor else {})})
+            handles += [f.handle for f in (resp.follows or [])]
+            cursor = getattr(resp, "cursor", None)
+            if not cursor:
+                break
+        return handles
 
     def get_timeline(self, since: datetime | None, limit: int = 50) -> list[dict]:
         """Home **timeline** del bot: posts de las cuentas que sigue (fuente tipo `following`)."""
@@ -1548,7 +1587,7 @@ _RUNTIME_TASKS: list[PeriodicTask] = []
 # Defensa en profundidad: aunque un handler futuro lo intente, el guard rechaza.
 _PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "MODELS", "OPENAI_ENDPOINT",
                        "REASONING_MODEL", "LITE_MODEL", "IMAGE_MODEL",
-                       "SPOTIFY_REDIRECT_URI")
+                       "SPOTIFY_REDIRECT_URI", "USER_GROUPS")
 
 # Las tools de config no se tocan a sí mismas (anti auto-lockout / escalación).
 _CONFIG_TOOL_NAMES = frozenset({
@@ -1588,6 +1627,13 @@ def _delta_guard(before: dict, after: dict) -> list[str]:
         if publica:
             return [f"cambio prohibido: ampliar scopes públicos de '{name}' "
                     f"({sorted(publica)}) requiere la UI"]
+        # Grupos: por comando solo se RESTRINGE. Con restricción vigente, quitarla
+        # o sumar grupos = más gente puede usar la tool → solo UI.
+        bg = set((bt.get(name) or {}).get("groups") or [])
+        ag = set(cfg.get("groups") or [])
+        if bg and (not ag or ag - bg):
+            return [f"cambio prohibido: aflojar la restricción de grupos de '{name}' "
+                    "(quitar la restricción o sumar grupos) requiere la UI"]
     return []
 
 
@@ -1923,6 +1969,78 @@ def run_public_reflection_loop() -> None:
     log.info("Public reflection pass completo.")
 
 
+def run_playlist_share_pass(bsky: "BskyClient", router: ModelRouter,
+                            conn: sqlite3.Connection) -> None:
+    """Tarea periódica OUTWARD: postea un tema al azar de la playlist comunitaria
+    (la misma que alimenta add_music_recommendation) con un comentario del LLM.
+
+    Config TASKS.playlist_share: `comment` (default true) — apagado, postea solo
+    título—artista+link, sin llamar al LLM (costo cero). Anti-repetición: evita
+    tracks cuyo link ya aparece en los posts recientes del bot; si TODOS son
+    recientes (playlist chica), elige igual al azar. Sin token de usuario o sin
+    playlist → skip silencioso (el admin todavía no corrió spotify_auth.py).
+    """
+    import spotify_auth
+    if not SPOTIFY_PLAYLIST_ID:
+        log.info("playlist_share: sin SPOTIFY_PLAYLIST_ID — skip")
+        return
+    token = spotify_auth.user_token()
+    if not token:
+        log.info("playlist_share: sin token de usuario (spotify_auth.py) — skip")
+        return
+    try:
+        tracks = [t for t in playlist_tracks(SPOTIFY_PLAYLIST_ID, token) if t.get("url")]
+    except Exception as e:
+        log.error("playlist_share: no pude leer la playlist: %s", e)
+        return
+    if not tracks:
+        log.info("playlist_share: playlist vacía — skip")
+        return
+
+    recientes = recent_bot_posts(conn, limit=30)
+    frescos = [t for t in tracks if not any(t["url"] in p for p in recientes)]
+    track = random.choice(frescos or tracks)
+    label = f"{track['title']} — {track['artist']}"
+
+    comment_on = bool(TASKS_CONFIG.get("playlist_share", {}).get("comment", True))
+    text = f"{label}\n{track['url']}"
+    if comment_on:
+        soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
+        prompt = load_text(PROMPTS_DIR / "playlist_share_prompt.md")
+        system = "\n".join(p for p in [
+            soul, f"\n---\n{current_datetime_line()}", f"\n---\n{prompt}",
+            "\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md")] if p)
+        user = f"El tema que te tocó compartir: {label}\nLink: {track['url']}"
+        try:
+            decision = RoleLLM(router, "feed_opinion").complete(system, user, FeedDecision)
+            if not decision.should_post:
+                log.info("playlist_share: el agente declinó (%s)", decision.reason[:80])
+                return
+            comment = (decision.text or "").strip()
+            if comment:
+                text = comment if track["url"] in comment else f"{comment}\n{track['url']}"
+        except Exception as e:
+            # el comentario es opcional; el share es la función — degradar a sin comentario
+            log.warning("playlist_share: LLM falló (%s) — posteo sin comentario", e)
+
+    norm = _norm_text(text)
+    if any(_norm_text(t) == norm for t in recientes):
+        log.info("playlist_share: duplicado de un post reciente — skip")
+        return
+    uri = bsky.post(text)
+    log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
+    log.info("playlist_share: posteado %s (%s)", uri, label)
+
+
+def run_playlist_share_loop() -> None:
+    """Pase único desde CLI (`--share-playlist`). Ignora intervalo y toggle."""
+    db     = init_db()
+    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    run_playlist_share_pass(bsky, router, db)
+    log.info("Playlist share pass completo.")
+
+
 # ---------------------------------------------------------------------------
 # Tools concretas
 # Los handlers reciben (args, ctx) y devuelven un ToolResult. ctx.state es el
@@ -2170,6 +2288,7 @@ def search_spotify_tracks(query: str, limit: int = 5, market: str = "AR") -> lis
     items = (data.get("tracks") or {}).get("items") or []
     return [
         {
+            "id":     t.get("id"),
             "title":  t["name"],
             "artist": ", ".join(a["name"] for a in t["artists"]),
             "album":  t["album"]["name"],
@@ -2196,6 +2315,113 @@ def _tool_search_music(args: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(text=f"no encontré temas para '{query}'")
     lines = [f"- {t['title']} — {t['artist']} ({t['url']})" for t in tracks]
     return ToolResult(text="\n".join(lines))
+
+
+# ─── Playlist de recomendaciones (token de USUARIO — spotify_auth.py) ─────────
+
+def _spotify_post(path: str, token: str, payload: dict) -> dict:
+    req = urllib.request.Request(
+        f"{_SPOTIFY_API}{path}", data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def playlist_tracks(playlist_id: str, token: str) -> list[dict]:
+    """Tracks de la playlist: [{id, title, artist, url}]. Paginado, cap 1000.
+
+    Endpoint `/items` (migración Spotify feb-2026: `/tracks` fue REMOVIDO para
+    apps en Development Mode y el wrapper de la respuesta pasó de `track` a
+    `item`). Solo funciona sobre playlists propias del usuario autorizado.
+    """
+    out: list[dict] = []
+    offset = 0
+    for _ in range(10):
+        data = _spotify_get(f"/playlists/{playlist_id}/items", token,
+                            {"fields": "items(item(id,name,artists(name),external_urls)),total",
+                             "limit": 100, "offset": offset})
+        items = data.get("items") or []
+        for it in items:
+            t = it.get("item") or it.get("track")  # tolerante al wrapper viejo
+            if not t or not t.get("id"):
+                continue
+            out.append({
+                "id":     t["id"],
+                "title":  t.get("name"),
+                "artist": ", ".join(a.get("name", "") for a in (t.get("artists") or [])),
+                "url":    (t.get("external_urls") or {}).get("spotify"),
+            })
+        offset += len(items)
+        if not items or offset >= int(data.get("total") or 0):
+            break
+    return out
+
+
+def playlist_track_ids(playlist_id: str, token: str) -> set[str]:
+    """IDs de los tracks ya en la playlist (para dedup de recomendaciones)."""
+    return {t["id"] for t in playlist_tracks(playlist_id, token)}
+
+
+def _norm_track_key(title: str | None, artist: str | None) -> tuple[str, str]:
+    """Clave de dedup por canción, no por edición: Spotify tiene el mismo tema con
+    IDs distintos por álbum/remaster. Baja a minúsculas, corta el sufijo de edición
+    ("Tema - Remastered 2019" → "tema") y se queda con el artista principal."""
+    t = (title or "").casefold().strip().split(" - ")[0].strip()
+    a = (artist or "").casefold().split(",")[0].strip()
+    return (t, a)
+
+
+def add_track_to_playlist(query: str) -> dict:
+    """Busca `query` y agrega el mejor match a la playlist comunitaria.
+
+    Devuelve {status: added|duplicate|not_found|unavailable, track?}. `unavailable`
+    = falta config o autorización de usuario (spotify_auth.py). Excepciones de red
+    las maneja el caller.
+    """
+    import spotify_auth
+    if not SPOTIFY_PLAYLIST_ID:
+        return {"status": "unavailable", "reason": "sin SPOTIFY_PLAYLIST_ID en settings"}
+    token = spotify_auth.user_token()
+    if not token:
+        return {"status": "unavailable",
+                "reason": "sin token de usuario (correr python src/spotify_auth.py)"}
+    tracks = search_spotify_tracks(query, limit=1)
+    if not tracks or not tracks[0].get("id"):
+        return {"status": "not_found"}
+    track = tracks[0]
+    # Dedup doble: por ID y por canción (título+artista normalizados) — el mismo
+    # tema existe en Spotify con IDs distintos según la edición/remaster.
+    key = _norm_track_key(track["title"], track["artist"])
+    existentes = playlist_tracks(SPOTIFY_PLAYLIST_ID, token)
+    if any(e["id"] == track["id"] or _norm_track_key(e["title"], e["artist"]) == key
+           for e in existentes):
+        return {"status": "duplicate", "track": track}
+    _spotify_post(f"/playlists/{SPOTIFY_PLAYLIST_ID}/items", token,
+                  {"uris": [f"spotify:track:{track['id']}"]})
+    return {"status": "added", "track": track}
+
+
+def _tool_add_music(args: dict, ctx: ToolContext) -> ToolResult:
+    """Tool `add_music_recommendation`: recomendación de un power_user → la playlist."""
+    query = (args.get("query") or "").strip()
+    if not query:
+        return ToolResult(text="necesito saber qué canción o artista querés recomendar")
+    try:
+        out = add_track_to_playlist(query)
+    except Exception as e:
+        log.error("add_music_recommendation: %s", e)
+        return ToolResult(text="no pude tocar la playlist ahora, probá más tarde")
+    track = out.get("track") or {}
+    label = f"{track.get('title')} — {track.get('artist')}"
+    if out["status"] == "added":
+        return ToolResult(text=f"listo, agregué {label} a la playlist ({track.get('url')})")
+    if out["status"] == "duplicate":
+        return ToolResult(text=f"{label} ya estaba en la playlist ({track.get('url')})")
+    if out["status"] == "not_found":
+        return ToolResult(text=f"no encontré '{query}' en Spotify, probá con título y artista")
+    log.warning("add_music_recommendation no disponible: %s", out.get("reason"))
+    return ToolResult(text="la playlist de recomendaciones no está configurada todavía")
 
 
 # ─── T14 · Video (YouTube Data API v3, stdlib — headless) ──────────────────────
@@ -2409,6 +2635,54 @@ def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | 
     return _summarize_feed
 
 
+# Membresía dinámica de grupos vía feeds ("feed:polcifeed" en USER_GROUPS).
+# TTL: la lista se re-consulta como mucho cada 15 min; entre medio, cache.
+_GROUP_FEED_TTL_S = 900
+
+
+def _make_group_feed_resolver(bsky: "BskyClient") -> "Callable[[str], frozenset[str]]":
+    """Resuelve "feed:<name>" → handles miembros del feed, con cache TTL y stale-ok.
+
+    Solo feeds con membresía definida: type `list` (miembros de la lista) y
+    `following` (a quién sigue el bot). Un feed algorítmico (type `feed`) no
+    tiene miembros → vacío con warning. Error de red → se sirve el último
+    resultado bueno (un hiccup no le saca permisos a nadie); sin cache previo
+    → vacío (cerrado).
+    """
+    cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+    def resolve(name: str) -> frozenset[str]:
+        now = time.monotonic()
+        hit = cache.get(name)
+        if hit and now < hit[0]:
+            return hit[1]
+        feed = next((f for f in FEEDS_CONFIG if f.get("name") == name), None)
+        if feed is None:
+            log.warning("USER_GROUPS: 'feed:%s' no matchea ningún feed de FEEDS", name)
+            return frozenset()
+        ftype = feed.get("type", "list")
+        try:
+            if ftype == "list":
+                members = frozenset(bsky.get_list_members(feed["uri"]))
+            elif ftype == "following":
+                members = frozenset(bsky.get_follows())
+            else:
+                log.warning("USER_GROUPS: 'feed:%s' es type=%s — sin membresía definida", name, ftype)
+                return frozenset()
+        except Exception as e:
+            log.warning("USER_GROUPS: no pude resolver miembros de 'feed:%s': %s%s",
+                        name, e, " — uso el cache anterior" if hit else "")
+            if hit:  # stale-ok: reintento corto, sirviendo lo último bueno
+                cache[name] = (now + 60, hit[1])
+                return hit[1]
+            return frozenset()
+        cache[name] = (now + _GROUP_FEED_TTL_S, members)
+        log.info("USER_GROUPS: 'feed:%s' → %d miembros", name, len(members))
+        return members
+
+    return resolve
+
+
 def build_tool_registry(config: dict | None = None, *,
                         bsky: "BskyClient | None" = None,
                         router: "ModelRouter | None" = None,
@@ -2601,6 +2875,23 @@ def build_tool_registry(config: dict | None = None, *,
         {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     reg.register(
+        "add_music_recommendation",
+        "Agrega una recomendación musical de un usuario a la playlist comunitaria de Spotify. "
+        "Usala cuando un usuario te recomienda un tema/canción o te pide agregar música a la "
+        "lista/playlist (ej. 'agregá X a la lista', 'te recomiendo Y'). Busca la canción y la "
+        "suma a la playlist; avisa si ya estaba.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "La canción recomendada, idealmente 'título artista' (ej. 'Flaca Calamaro')."}
+            },
+            "required": ["query"],
+        },
+        _tool_add_music,
+        {Scope.REPLY, Scope.ADMIN},
+    )
+    reg.register(
         "share_video",
         "Trae un video de YouTube: con `query` busca sobre un tema; sin query trae uno de los "
         "más populares del momento (Argentina). Incluye el transcript si está disponible. Usala "
@@ -2646,12 +2937,17 @@ def build_tool_registry(config: dict | None = None, *,
         {Scope.REPLY, Scope.FEED_REFLECTION},
     )
     _register_admin_config_tools(reg)  # T30: config por comandos de admin
-    if mcp_config:
-        import mcp_tools  # lazy: solo si hay servers MCP configurados
+    # Lazy de verdad: el SDK de MCP se importa solo si hay algún server PRENDIDO.
+    # Con la sección MCP presente pero todo enabled:false (el default), ni se carga
+    # — y el bot arranca aunque el entorno no tenga el paquete `mcp` instalado.
+    if mcp_config and any(cfg.get("enabled", True) for cfg in mcp_config.values()):
+        import mcp_tools  # lazy: solo si hay servers MCP habilitados
         n = mcp_tools.register_mcp_tools(reg, mcp_config)
         log.info("MCP: %d tool(s) externas registradas", n)
     if config:
         reg.apply_config(config)
+    reg.set_groups(USER_GROUPS, admin_handle=ADMIN_HANDLE,
+                   feed_resolver=_make_group_feed_resolver(bsky) if bsky is not None else None)
     return reg
 
 
@@ -2670,6 +2966,13 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
         risky = [n for n in reg.names()
                  if reg.get(n).enabled and Scope.REPLY in reg.get(n).scopes]
         lines.append("tools con scope reply (públicas): " + ", ".join(sorted(risky)))
+        restringidas = [n for n in reg.names() if reg.get(n).groups]
+        if USER_GROUPS or restringidas:
+            lines.append("grupos de usuarios: " + ("; ".join(
+                f"{g}=[{', '.join(members)}]" for g, members in USER_GROUPS.items())
+                or "ninguno definido"))
+            lines.append("tools restringidas por grupo: " + (", ".join(
+                f"{n}→{sorted(reg.get(n).groups)}" for n in sorted(restringidas)) or "ninguna"))
         if _RUNTIME_TASKS:
             lines.append("tareas: " + ", ".join(
                 f"{t.name}={'on' if t.enabled else 'off'}"
@@ -2708,12 +3011,24 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             return ToolResult(text=f"'{name}' es una tool de configuración: no se toca "
                               "por comando (anti-lockout). Usá la UI (config_ui.py).")
         enabled, scopes = _as_bool(args.get("enabled")), args.get("scopes")
+        groups = args.get("groups")
         if scopes is not None:
             ampliados = (set(scopes) - set(tool.scopes)) & _PUBLIC_SCOPES
             if ampliados:
                 return ToolResult(text=f"no puedo AGREGAR scopes públicos ({sorted(ampliados)}) "
                                   "por comando — por acá solo se reduce exposición. "
                                   "Para ampliar, usá la UI (config_ui.py).")
+        if groups is not None:
+            actuales = set(tool.groups or ())
+            nuevos = set(groups)
+            if actuales and (not nuevos or nuevos - actuales):
+                return ToolResult(text="no puedo AFLOJAR la restricción de grupos por comando "
+                                  "(quitar la restricción o sumar grupos = más gente puede usar "
+                                  "la tool). Para ampliar, usá la UI (config_ui.py).")
+            desconocidos = nuevos - set(USER_GROUPS)
+            if desconocidos:
+                return ToolResult(text=f"grupo(s) desconocido(s): {sorted(desconocidos)}. "
+                                  f"Definidos en USER_GROUPS: {sorted(USER_GROUPS) or 'ninguno'}.")
 
         def delta(s: dict) -> None:
             cfg = s.setdefault("TOOLS", {}).setdefault(name, {})
@@ -2721,6 +3036,8 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                 cfg["enabled"] = enabled
             if scopes is not None:
                 cfg["scopes"] = list(scopes)
+            if groups is not None:
+                cfg["groups"] = list(groups)
         errs = _persist_settings_delta(delta)
         if errs:
             return ToolResult(text="no apliqué nada: " + "; ".join(errs))
@@ -2728,9 +3045,12 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             tool.enabled = enabled
         if scopes is not None:
             tool.scopes = frozenset(set(scopes) & ALL_SCOPES)
+        if groups is not None:
+            tool.groups = frozenset(groups) if groups else None
         return ToolResult(text=f"tool {name}: "
                           + (f"enabled={enabled} " if enabled is not None else "")
-                          + (f"scopes={sorted(tool.scopes)}" if scopes is not None else "")
+                          + (f"scopes={sorted(tool.scopes)} " if scopes is not None else "")
+                          + (f"groups={sorted(tool.groups or ())}" if groups is not None else "")
                           + " — aplicado en vivo y guardado")
 
     def _set_task_config(args: dict, ctx: ToolContext) -> ToolResult:
@@ -2876,12 +3196,17 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                  "Muestra la configuración actual del bot (tools, tareas, feeds, noticias, MCP).",
                  {**_obj, "properties": {}}, _get_bot_config, {Scope.ADMIN})
     reg.register("set_tool_config",
-                 "Prende/apaga una tool del bot o cambia sus scopes. Cambio en vivo + persistido.",
+                 "Prende/apaga una tool del bot, cambia sus scopes o la restringe a grupos de "
+                 "usuarios (USER_GROUPS). Cambio en vivo + persistido.",
                  {**_obj, "properties": {
                      "tool": {"type": "string", "description": "Nombre exacto de la tool."},
                      "enabled": {"type": "boolean"},
                      "scopes": {"type": "array", "items": {"type": "string",
                                 "enum": ["reply", "feed_reflection", "admin"]}},
+                     "groups": {"type": "array", "items": {"type": "string"},
+                                "description": "Grupos de USER_GROUPS que pueden usar la tool. "
+                                               "Por comando solo se puede RESTRINGIR (agregar una "
+                                               "restricción donde no había, o achicar la lista)."},
                  }, "required": ["tool"]}, _set_tool_config, {Scope.ADMIN})
     reg.register("set_task_config",
                  "Prende/apaga una tarea periódica (feed, news, mentions) o cambia su intervalo en horas. "
@@ -3099,7 +3424,9 @@ class GenerateReplyNode:
         # Fase de tools scope REPLY (toggleable por config; hoy: summarize_feed).
         # Si el LLM decide llamar una tool, su resultado se inyecta al contexto.
         if self.registry is not None:
-            reply_tools = self.registry.openai_schemas(Scope.REPLY)
+            # Filtrado por grupos de usuario (USER_GROUPS): las tools restringidas
+            # ni se le ofrecen al LLM si el autor no pertenece.
+            reply_tools = self.registry.openai_schemas(Scope.REPLY, handle=handle)
             if reply_tools:
                 tool_names = [t["function"]["name"] for t in reply_tools]
                 log.info("GenerateReplyNode: fase de tools con %d disponibles: %s",
@@ -3117,7 +3444,8 @@ class GenerateReplyNode:
                         cname = call.function.name
                         cargs = json.loads(call.function.arguments)
                         log.info("GenerateReplyNode: llamando tool %s con args %s", cname, cargs)
-                        outcome = self.registry.execute(cname, cargs, ToolContext(state=state, conn=self.conn))
+                        outcome = self.registry.execute(cname, cargs, ToolContext(state=state, conn=self.conn),
+                                                        handle=handle)
                         log.info("GenerateReplyNode: resultado de %s: %r", cname, (outcome.text or "")[:200])
                         parts.append(f"\n---\nResultado de {cname}: {outcome.text}")
                 except Exception as e:
@@ -3148,9 +3476,10 @@ class GenerateReplyNode:
 class HandleAdminCommandNode:
     """
     Node 3b: Handle admin commands using tool calling.
-    The LLM receives the command text and a set of tools.
-    It decides which tool to call — we execute it and use the result as reply.
-    Tools: save_to_user_profile, save_to_memory, get_debug_info, get_help.
+    The LLM receives the command text and a set of tools. Ejecuta TODAS las tool
+    calls que pida (contenido: música, búsqueda, etc.) y concatena los resultados
+    como respuesta; las tools de CONFIG mantienen "un cambio por mensaje" (solo
+    la primera corre — guarda T30).
     """
 
     def __init__(self, llm: RoleLLM, conn: sqlite3.Connection, registry: ToolRegistry):
@@ -3180,16 +3509,31 @@ class HandleAdminCommandNode:
             log.warning("HandleAdminCommandNode: no tool called, using direct reply")
             return {"reply_text": text_reply or "comando no reconocido"}
 
-        # Execute the first tool call (we always expect exactly one)
-        call      = tool_calls[0]
-        tool_name = call.function.name
-        tool_args = json.loads(call.function.arguments)
-        log.info("Tool called: %s(%s)", tool_name, tool_args)
+        # Ejecuta TODAS las tool calls del modelo ("agregá 3 temas" = 3 llamadas),
+        # con una excepción: las tools de CONFIG mantienen la regla "un cambio por
+        # mensaje" (guarda de seguridad T30) — solo la primera de ellas corre, el
+        # resto se saltea con aviso.
+        texts: list[str] = []
+        image_path: str | None = None
+        config_done = False
+        for call in tool_calls:
+            tool_name = call.function.name
+            tool_args = json.loads(call.function.arguments)
+            if tool_name in _CONFIG_TOOL_NAMES and config_done:
+                log.info("Tool de config extra salteada: %s (un cambio por mensaje)", tool_name)
+                texts.append(f"[{tool_name}: salteada — un cambio de config por mensaje, "
+                             "mandá el resto de a uno]")
+                continue
+            log.info("Tool called: %s(%s)", tool_name, tool_args)
+            outcome = self.registry.execute(tool_name, tool_args, ToolContext(state=state, conn=self.conn))
+            if tool_name in _CONFIG_TOOL_NAMES:
+                config_done = True
+            texts.append(outcome.text)
+            image_path = image_path or outcome.image_path
 
-        outcome = self.registry.execute(tool_name, tool_args, ToolContext(state=state, conn=self.conn))
-        result: dict = {"reply_text": outcome.text}
-        if outcome.image_path:
-            result["image_path"] = outcome.image_path
+        result: dict = {"reply_text": "\n".join(t for t in texts if t)}
+        if image_path:
+            result["image_path"] = image_path
         return result
 
 
@@ -3566,6 +3910,8 @@ def run(mode: str) -> None:
                      interval_hours=24, enabled=True),  # inward-only (no postea): destila lecciones
         PeriodicTask("public_reflection", lambda: run_public_reflection_pass(bsky, router, db),
                      interval_hours=24, enabled=True),  # outward: reflexión en primera persona
+        PeriodicTask("playlist_share", lambda: run_playlist_share_pass(bsky, router, db),
+                     interval_hours=24, enabled=True),  # outward: tema de la playlist comunitaria
     ]
     apply_tasks_config(tasks, TASKS_CONFIG)
     _RUNTIME_TASKS[:] = tasks  # T30: las tools de config del admin mutan esta lista en vivo
@@ -3733,6 +4079,12 @@ if __name__ == "__main__":
         help="Run the PUBLIC reflection pass once (first-person post about what the "
              "bot lived/learned, <=300 chars) and exit. Outward-facing.",
     )
+    parser.add_argument(
+        "--share-playlist",
+        action="store_true",
+        help="Post a random track from the community playlist once (LLM comment per "
+             "TASKS.playlist_share.comment) and exit. Requires spotify_auth.py token.",
+    )
     args = parser.parse_args()
 
     if args.proactive:
@@ -3749,6 +4101,9 @@ if __name__ == "__main__":
 
     elif args.reflect_public:
         run_public_reflection_loop()
+
+    elif args.share_playlist:
+        run_playlist_share_loop()
 
     elif args.fetch_feeds:
         db        = init_db()

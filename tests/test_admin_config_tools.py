@@ -28,6 +28,7 @@ def env(tmp_path, monkeypatch):
         "FEEDS": [{"name": "polcifeed", "type": "list", "uri": "at://x/l/1",
                    "interval_hours": 6, "enabled": True, "posting_policy": "active"}],
         "TOOLS": {},
+        "USER_GROUPS": {"music_users": ["fulano.bsky.social"], "vip": ["mengano.com"]},
         "TASKS": {"heartbeat": {"enabled": False, "interval_hours": 12}},
         "MCP": {"reddit": {"transport": "stdio", "command": "python", "enabled": False}},
     }
@@ -37,6 +38,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "FEEDS_CONFIG", json.loads(json.dumps(settings["FEEDS"])))
     monkeypatch.setattr(b, "MCP_CONFIG", json.loads(json.dumps(settings["MCP"])))
     monkeypatch.setattr(b, "NEWS_ENABLED", False)
+    monkeypatch.setattr(b, "USER_GROUPS", json.loads(json.dumps(settings["USER_GROUPS"])))
     tasks = [PeriodicTask("feed", lambda: None),
              PeriodicTask("mentions", lambda: None),
              PeriodicTask("heartbeat", lambda: None, interval_hours=12, enabled=False)]
@@ -80,6 +82,45 @@ def test_set_tool_scope_invalido_no_toca_runtime(env):
     assert "no apliqué nada" in out.text
     assert reg.get("web_search").scopes == antes                     # rollback implícito
     assert not _disk(tmp)["TOOLS"]                                   # disco intacto
+
+
+def test_set_tool_groups_restringe_ok(env):
+    tmp, reg, _ = env
+    out = reg.execute("set_tool_config", {"tool": "search_music", "groups": ["music_users"]}, _CTX)
+    assert "aplicado en vivo" in out.text
+    assert reg.get("search_music").groups == frozenset({"music_users"})          # vivo
+    assert _disk(tmp)["TOOLS"]["search_music"]["groups"] == ["music_users"]      # disco
+
+
+def test_set_tool_groups_desconocido(env):
+    tmp, reg, _ = env
+    out = reg.execute("set_tool_config", {"tool": "search_music", "groups": ["nope"]}, _CTX)
+    assert "desconocido" in out.text
+    assert reg.get("search_music").groups is None
+    assert not _disk(tmp)["TOOLS"]
+
+
+def test_set_tool_groups_no_se_afloja_por_comando(env):
+    tmp, reg, _ = env
+    reg.execute("set_tool_config", {"tool": "search_music", "groups": ["music_users"]}, _CTX)
+    # sumar un grupo = más gente → rechazado
+    out = reg.execute("set_tool_config",
+                      {"tool": "search_music", "groups": ["music_users", "vip"]}, _CTX)
+    assert "AFLOJAR" in out.text
+    # quitar la restricción → rechazado
+    out = reg.execute("set_tool_config", {"tool": "search_music", "groups": []}, _CTX)
+    assert "AFLOJAR" in out.text
+    assert reg.get("search_music").groups == frozenset({"music_users"})
+    assert _disk(tmp)["TOOLS"]["search_music"]["groups"] == ["music_users"]
+
+
+def test_guard_user_groups_protegido(env):
+    tmp, reg, _ = env
+    # ningún comando debe poder editar las membresías (ampliar exposición = UI)
+    errs = b._persist_settings_delta(
+        lambda s: s["USER_GROUPS"]["music_users"].append("intruso.bsky.social"))
+    assert errs and "USER_GROUPS" in errs[0]
+    assert _disk(tmp)["USER_GROUPS"]["music_users"] == ["fulano.bsky.social"]
 
 
 # ─── set_task_config ─────────────────────────────────────────────────────────

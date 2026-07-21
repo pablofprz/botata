@@ -60,12 +60,24 @@ def test_settings_valido_pasa():
     (lambda s: s["BUDGET"].update(daily_usd=0), "daily_usd"),
     (lambda s: s["BUDGET"].update(daily_usd="mucho"), "daily_usd"),
     (lambda s: s["BUDGET"].update(enabled="si"), "BUDGET.enabled"),
+    (lambda s: s.update(USER_GROUPS="banana"), "USER_GROUPS"),
+    (lambda s: s.update(USER_GROUPS={"g": ["ok", ""]}), "USER_GROUPS.g"),
+    (lambda s: s["TOOLS"]["web_search"].update(groups=["fantasma"]), "desconocido"),
+    (lambda s: s["TOOLS"]["web_search"].update(groups="music_users"), "lista"),
+    (lambda s: s.update(USER_GROUPS={"g": ["feed:fantasma"]}), "no matchea"),
 ])
 def test_settings_invalido_falla(mutacion, fragmento):
     s = json.loads(json.dumps(_SETTINGS))
     mutacion(s)
     errs = cu.validate_settings(s)
     assert errs and any(fragmento in e for e in errs)
+
+
+def test_user_groups_validos_pasan():
+    s = json.loads(json.dumps(_SETTINGS))
+    s["USER_GROUPS"] = {"music_users": ["fulano.bsky.social", "feed:f1"]}
+    s["TOOLS"]["web_search"]["groups"] = ["music_users"]
+    assert cu.validate_settings(s) == []
 
 
 def test_news_valida():

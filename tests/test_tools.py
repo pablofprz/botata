@@ -93,6 +93,102 @@ def test_invalid_scope_at_registration_raises():
     raise AssertionError("scope inválido debía lanzar ValueError")
 
 
+def _make_group_registry() -> ToolRegistry:
+    reg = _make_registry()
+    reg.register("music", "d", {"type": "object", "properties": {}}, _noop,
+                 {Scope.REPLY}, groups={"music_users"})
+    reg.set_groups({"music_users": ["@Fulano.bsky.social", "mengano.com"]},
+                   admin_handle="ppolci.com")
+    return reg
+
+
+def test_groups_filter_available_by_handle():
+    reg = _make_group_registry()
+    # miembro (con @ y mayúsculas en la config → normalizado)
+    assert "music" in {t.name for t in reg.available(Scope.REPLY, handle="fulano.bsky.social")}
+    # no-miembro: la tool restringida desaparece, las libres quedan
+    names = {t.name for t in reg.available(Scope.REPLY, handle="otro.bsky.social")}
+    assert names == {"reply_only", "multi"}
+    # sin handle (contexto sin solicitante): no hay filtro de grupo
+    assert "music" in {t.name for t in reg.available(Scope.REPLY)}
+
+
+def test_groups_admin_bypasses():
+    reg = _make_group_registry()
+    assert "music" in {t.name for t in reg.available(Scope.REPLY, handle="ppolci.com")}
+
+
+def test_groups_execute_enforces():
+    reg = _make_group_registry()
+    ctx = ToolContext(state={}, conn=None)
+    assert reg.execute("music", {"x": "1"}, ctx, handle="mengano.com").text == "ok:1"
+    out = reg.execute("music", {}, ctx, handle="otro.bsky.social")
+    assert "permiso" in out.text
+    # sin handle no se chequea (contextos internos)
+    assert reg.execute("music", {"x": "2"}, ctx).text == "ok:2"
+
+
+def test_groups_unknown_group_is_closed():
+    reg = _make_group_registry()
+    reg.apply_config({"reply_only": {"groups": ["typo_grupo"]}})
+    # grupo inexistente en USER_GROUPS → nadie entra (salvo admin)
+    assert "reply_only" not in {t.name for t in reg.available(Scope.REPLY, handle="fulano.bsky.social")}
+    assert "reply_only" in {t.name for t in reg.available(Scope.REPLY, handle="ppolci.com")}
+
+
+def test_groups_via_apply_config_and_clear():
+    reg = _make_group_registry()
+    reg.apply_config({"multi": {"groups": ["music_users"]}})
+    assert "multi" not in {t.name for t in reg.available(Scope.REPLY, handle="otro.bsky.social")}
+    # groups vacío/null = sin restricción de nuevo
+    reg.apply_config({"multi": {"groups": []}})
+    assert "multi" in {t.name for t in reg.available(Scope.REPLY, handle="otro.bsky.social")}
+
+
+def test_groups_feed_ref_resolves_members():
+    reg = _make_registry()
+    reg.register("music", "d", {"type": "object", "properties": {}}, _noop,
+                 {Scope.REPLY}, groups={"music_users"})
+    calls = []
+    def resolver(name):
+        calls.append(name)
+        return ["@Alguien.bsky.social", "otra.com"] if name == "polcifeed" else []
+    reg.set_groups({"music_users": ["estatico.com", "feed:polcifeed"]},
+                   admin_handle="ppolci.com", feed_resolver=resolver)
+    # miembro estático no consulta el feed; miembro por feed sí (normalizado)
+    assert "music" in {t.name for t in reg.available(Scope.REPLY, handle="estatico.com")}
+    assert "music" in {t.name for t in reg.available(Scope.REPLY, handle="alguien.bsky.social")}
+    assert "music" not in {t.name for t in reg.available(Scope.REPLY, handle="intruso.com")}
+    assert calls == ["polcifeed", "polcifeed"]  # solo los dos checks que no matchearon estático
+
+
+def test_groups_feed_ref_resolver_failure_is_closed():
+    reg = _make_registry()
+    reg.register("music", "d", {"type": "object", "properties": {}}, _noop,
+                 {Scope.REPLY}, groups={"music_users"})
+    def bomb(name):
+        raise RuntimeError("red caída")
+    reg.set_groups({"music_users": ["feed:polcifeed"]},
+                   admin_handle="ppolci.com", feed_resolver=bomb)
+    # resolver roto → cerrado para usuarios, pero no explota y el admin sigue entrando
+    assert "music" not in {t.name for t in reg.available(Scope.REPLY, handle="alguien.com")}
+    assert "music" in {t.name for t in reg.available(Scope.REPLY, handle="ppolci.com")}
+
+
+def test_groups_feed_ref_without_resolver_is_closed():
+    reg = _make_registry()
+    reg.register("music", "d", {"type": "object", "properties": {}}, _noop,
+                 {Scope.REPLY}, groups={"music_users"})
+    reg.set_groups({"music_users": ["feed:polcifeed"]}, admin_handle="ppolci.com")
+    assert "music" not in {t.name for t in reg.available(Scope.REPLY, handle="alguien.com")}
+
+
+def test_no_groups_configured_keeps_everything_open():
+    reg = _make_registry()  # sin set_groups: back-compat total
+    assert {t.name for t in reg.available(Scope.REPLY, handle="cualquiera.bsky.social")} \
+        == {"reply_only", "multi"}
+
+
 if __name__ == "__main__":
     # Runner sin dependencias (corre con `python tests/test_tools.py`). Sigue siendo
     # compatible con pytest si más adelante se agrega al entorno.
