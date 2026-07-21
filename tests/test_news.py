@@ -43,7 +43,7 @@ def test_fetch_rss_parses_and_strips_html(monkeypatch):
 # ─── run_news_pass ────────────────────────────────────────────────────────────
 class FakeBsky:
     def __init__(self): self.posts: list[str] = []
-    def post(self, text, image_path=None):
+    def post(self, text, media_path=None):
         self.posts.append(text)
         return f"at://bot/{len(self.posts)}"
 

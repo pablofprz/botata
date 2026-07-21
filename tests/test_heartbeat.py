@@ -37,9 +37,9 @@ class FakeBsky:
         self.posts = []
         self.images = []
 
-    def post(self, text, image_path=None):
+    def post(self, text, media_path=None):
         self.posts.append(text)
-        self.images.append(image_path)
+        self.images.append(media_path)
         return f"at://fake/{len(self.posts)}"
 
 

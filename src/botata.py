@@ -830,10 +830,27 @@ class BskyClient:
         )
         return models.AppBskyEmbedExternal.Main(external=external)
 
-    def reply(self, text: str, parent_uri: str, parent_cid: str,
-              root_uri: str, root_cid: str, image_path: str | None = None) -> str:
+    def _send_media(self, text: str, media_path: str, *, facets, reply_to=None):
+        """Postea `media_path` como VIDEO (.mp4/.mov/...) o IMAGEN según la extensión.
+
+        Los frames de TikTok resuelven a su .mp4 padre (ver _postable_media_path),
+        así que acá puede llegar un video; se sube con send_video (la lib atproto
+        maneja el upload al servicio de video de Bluesky). El alt = primeros 100 chars
+        del texto.
         """
-        Post a reply, optionally with an attached image.
+        data = Path(media_path).read_bytes()
+        if Path(media_path).suffix.lower() in _VIDEO_EXTS:
+            return self._client.send_video(
+                text=text, video=data, video_alt=text[:100],
+                reply_to=reply_to, facets=facets)
+        return self._client.send_image(
+            text=text, image=data, image_alt=text[:100],
+            reply_to=reply_to, facets=facets)
+
+    def reply(self, text: str, parent_uri: str, parent_cid: str,
+              root_uri: str, root_cid: str, media_path: str | None = None) -> str:
+        """
+        Post a reply, optionally with an attached image OR video.
         parent = immediate post being replied to.
         root   = original post that started the thread.
         """
@@ -843,15 +860,8 @@ class BskyClient:
             "parent": {"uri": parent_uri, "cid": parent_cid},
         }
         facets = build_link_facets(text) or None
-        if image_path:
-            img_bytes = Path(image_path).read_bytes()
-            resp = self._client.send_image(
-                text=text,
-                image=img_bytes,
-                image_alt=text[:100],
-                reply_to=reply_to,
-                facets=facets,
-            )
+        if media_path:
+            resp = self._send_media(text, media_path, facets=facets, reply_to=reply_to)
         else:
             # Tarjeta de preview del primer link (Bluesky admite un solo embed).
             urls = _find_urls_with_offsets(text)
@@ -860,9 +870,9 @@ class BskyClient:
         return resp.uri
 
 
-    def post(self, text: str, limit: int = 295, image_path: str | None = None) -> str:
+    def post(self, text: str, limit: int = 295, media_path: str | None = None) -> str:
         """
-        Post a standalone skeet (no reply), optionally with an attached image.
+        Post a standalone skeet (no reply), optionally with an attached image OR video.
         Returns the new post URI. Truncates at the last sentence-ending
         punctuation before `limit` to avoid cutting mid-word.
         """
@@ -877,9 +887,8 @@ class BskyClient:
                 # No punctuation found — cut at last space
                 text = cut[: cut.rfind(" ")] if " " in cut else cut
         facets = build_link_facets(text) or None
-        if image_path:
-            resp = self._client.send_image(
-                text=text, image=Path(image_path).read_bytes(), image_alt=text[:100], facets=facets)
+        if media_path:
+            resp = self._send_media(text, media_path, facets=facets)
         else:
             urls = _find_urls_with_offsets(text)
             embed = self._external_embed(urls[0][0]) if urls else None
@@ -1331,27 +1340,51 @@ class ReflectDecideNode:
 _VALID_IMAGE_CATEGORIES = {"meme", "foto", "arte", "captura", "otro"}
 
 
-_FRAME_RE = re.compile(r"_f\d+$")  # <id>_f<n>.jpg → frame de video (TikTok)
+_FRAME_RE = re.compile(r"_f\d+$")            # <id>_f<n>.jpg → frame de video (TikTok)
+_MAX_VIDEO_BYTES = 50 * 1024 * 1024          # límite conservador de Bluesky (~50 MB / 60 s)
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 
 
 def _is_video_frame(file_path: str) -> bool:
-    """True si el archivo es un frame extraído de un video (ej. TikTok).
-
-    Los frames son proyecciones del video para que el consumidor lo entienda, no
-    imágenes posteables: un fotograma suelto a mitad de movimiento, descontextualizado.
-    El bot no los postea (siguen en el catálogo para búsqueda).
-    """
+    """True si el archivo es un frame extraído de un video (ej. TikTok)."""
     return bool(_FRAME_RE.search(Path(file_path).stem))
+
+
+def _frame_to_video_rel(frame_path: str) -> str:
+    """De un frame <id>_f<n>.jpg al video padre <id>_0.mp4 (mismo dir, path relativo)."""
+    p = Path(frame_path)
+    base = _FRAME_RE.sub("", p.stem)
+    return str(p.with_name(f"{base}_0.mp4"))
+
+
+def _postable_media_path(file_path_rel: str) -> str | None:
+    """Path ABSOLUTO posteable para una fila del catálogo, o None si no sirve.
+
+    Un frame de video se postea como el VIDEO padre (.mp4), no como el fotograma
+    suelto: así el bot sube el TikTok entero usando el frame como proxy de búsqueda.
+    Si el video no está en disco o excede el límite de Bluesky → None (se prueba el
+    siguiente candidato). El resto de las imágenes se postean tal cual.
+
+    file_path se guarda relativo a la raíz del repo; devolvemos absoluto para que
+    bsky.post/reply lo encuentre sin importar el cwd.
+    """
+    if _is_video_frame(file_path_rel):
+        video = BASE_DIR / _frame_to_video_rel(file_path_rel)
+        if video.exists() and video.stat().st_size <= _MAX_VIDEO_BYTES:
+            return str(video)
+        return None
+    return str(BASE_DIR / file_path_rel)
 
 
 def resolve_catalog_image(conn: sqlite3.Connection, query: str | None,
                           *, mark_used: bool = True) -> str | None:
-    """Selecciona la mejor imagen POSTEABLE del catálogo para `query`, o None.
+    """Selecciona el mejor medio POSTEABLE del catálogo para `query`, o None.
 
-    **Guardrail (T12):** nunca devuelve una imagen sin descripción, con categoría
-    inválida, o que sea un frame de video (no se postean solos). Recorre los mejores
-    candidatos y devuelve el primero posteable. Compartido por el reply (a pedido) y
-    el loop proactivo (autónomo).
+    Devuelve un path absoluto que puede ser una IMAGEN o un VIDEO: los frames de
+    video resuelven al .mp4 padre (ver _postable_media_path), así el bot postea el
+    TikTok entero en vez de un fotograma suelto. **Guardrail (T12):** nunca devuelve
+    algo sin descripción o con categoría inválida. Recorre los mejores candidatos y
+    devuelve el primero posteable. Compartido por el reply y el loop proactivo.
     """
     if not query or not query.strip():
         return None
@@ -1359,18 +1392,17 @@ def resolve_catalog_image(conn: sqlite3.Connection, query: str | None,
     for img in results:
         desc = (img.get("description") or "").strip()
         cat  = (img.get("category") or "").strip().lower()
-        fp   = img.get("file_path") or ""
         if not desc or cat not in _VALID_IMAGE_CATEGORIES:
             continue  # guardrail: no posteamos lo que no 'entendemos'
-        if _is_video_frame(fp):
-            continue  # frame de video: no se postea suelto
+        path = _postable_media_path(img.get("file_path") or "")
+        if not path:
+            continue  # frame sin video utilizable → siguiente candidato
         if mark_used:
             dbmod.mark_image_used(conn, img["id"])
-        log.info("imagen elegida: %r → %s", query, fp)
-        # file_path se guarda relativo a la raíz del repo; el bot puede correr desde
-        # otro cwd, así que devolvemos absoluto para que bsky.post/reply lo encuentre.
-        return str(BASE_DIR / fp)
-    log.info("imagen: sin match posteable para %r", query)
+        log.info("%s elegido: %r → %s",
+                 "video" if path.lower().endswith(".mp4") else "imagen", query, path)
+        return path
+    log.info("media: sin match posteable para %r", query)
     return None
 
 
@@ -1396,7 +1428,7 @@ class PostFeedNode:
         image_path = None
         if state.get("autonomous_images") and state.get("image_query"):
             image_path = resolve_catalog_image(self.conn, state["image_query"])
-        uri = self.bsky.post(text, image_path=image_path)
+        uri = self.bsky.post(text, media_path=image_path)
         log_bot_post(self.conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
         log.info("Feed %s: posteado %s%s", state.get("feed_name"), uri,
                  " (con imagen)" if image_path else "")
@@ -1823,7 +1855,7 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
     image_path = None
     if images_on and decision.image_query:
         image_path = resolve_catalog_image(conn, decision.image_query)
-    uri = bsky.post(text, image_path=image_path)
+    uri = bsky.post(text, media_path=image_path)
     log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
     log.info("heartbeat: posteado %s%s", uri, " (con imagen)" if image_path else "")
 
@@ -2111,17 +2143,18 @@ def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     query    = args.get("query", "")
     category = args.get("category")
     results  = dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category, limit=8)
-    # Frames de video no se postean solos (ver _is_video_frame).
-    results  = [r for r in results if not _is_video_frame(r.get("file_path") or "")][:5]
-    if not results:
+    # Primer candidato con path posteable (frame → video padre; ver _postable_media_path).
+    best, best_path = None, None
+    for r in results:
+        p = _postable_media_path(r.get("file_path") or "")
+        if p:
+            best, best_path = r, p
+            break
+    if not best:
         return ToolResult(text=f"no encontré imágenes para '{query}'")
-    best = results[0]
     dbmod.mark_image_used(ctx.conn, best["id"])
     summary = ", ".join(f"{r['description'][:50]}… [{r['category']}]" for r in results[:3])
-    # Path absoluto (file_path es relativo a la raíz del repo) para que funcione
-    # sin importar desde qué cwd corra el bot.
-    return ToolResult(text=f"encontré {len(results)} imágenes: {summary}",
-                      image_path=str(BASE_DIR / best["file_path"]))
+    return ToolResult(text=f"encontré {len(results)} imágenes: {summary}", image_path=best_path)
 
 
 # ─── T9 · Calendar: leer/escribir la tabla events (T4) como tools ────────────
@@ -3667,7 +3700,7 @@ class PostReplyNode:
                 parent_cid = state["mention_cid"],
                 root_uri   = state["thread_root_uri"],
                 root_cid   = state["thread_root_cid"],
-                image_path = image_path,
+                media_path = image_path,
             )
             log.info("Replied to @%s: %s", state["author_handle"], state["reply_text"][:60])
             update_status(self.db, uri, "replied")
