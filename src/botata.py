@@ -1354,7 +1354,9 @@ def resolve_catalog_image(conn: sqlite3.Connection, query: str | None,
     if mark_used:
         dbmod.mark_image_used(conn, img["id"])
     log.info("imagen elegida: %r → %s", query, img["file_path"])
-    return img["file_path"]
+    # file_path se guarda relativo a la raíz del repo; el bot puede correr desde
+    # otro cwd, así que devolvemos absoluto para que bsky.post/reply lo encuentre.
+    return str(BASE_DIR / img["file_path"])
 
 
 class PostFeedNode:
@@ -2099,7 +2101,10 @@ def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     best = results[0]
     dbmod.mark_image_used(ctx.conn, best["id"])
     summary = ", ".join(f"{r['description'][:50]}… [{r['category']}]" for r in results[:3])
-    return ToolResult(text=f"encontré {len(results)} imágenes: {summary}", image_path=best["file_path"])
+    # Path absoluto (file_path es relativo a la raíz del repo) para que funcione
+    # sin importar desde qué cwd corra el bot.
+    return ToolResult(text=f"encontré {len(results)} imágenes: {summary}",
+                      image_path=str(BASE_DIR / best["file_path"]))
 
 
 # ─── T9 · Calendar: leer/escribir la tabla events (T4) como tools ────────────

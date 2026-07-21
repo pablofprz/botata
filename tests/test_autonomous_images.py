@@ -38,7 +38,9 @@ def _mock_search(monkeypatch, rows):
 # ─── guardrail ───────────────────────────────────────────────────────────────
 def test_valid_image_resolves_and_marks_used(monkeypatch, used):
     _mock_search(monkeypatch, [_row()])
-    assert b.resolve_catalog_image(None, "gato") == "scrape/pictures/manual/x.jpg"
+    # Devuelve path ABSOLUTO (relativo a la raíz del repo) para que bsky.post/reply
+    # lo encuentre sin importar el cwd desde el que corra el bot.
+    assert b.resolve_catalog_image(None, "gato") == str(b.BASE_DIR / "scrape/pictures/manual/x.jpg")
     assert used == [1]
 
 
