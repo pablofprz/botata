@@ -135,7 +135,18 @@ BSKY_HANDLE        : str  = settings["BOT_HANDLE"]
 BSKY_PASSWORD      : str  = os.environ["BSKY_PASSWORD"]
 OPENROUTER_API_KEY : str  = os.environ["OPENROUTER_API_KEY"]
 BRAVE_API_KEY      : str | None = os.environ.get("BRAVE_API_KEY")  # opcional (tool web_search, T8)
-ADMIN_HANDLE       : str  = settings["ADMIN_HANDLE"]
+ADMIN_HANDLE       : str  = settings["ADMIN_HANDLE"]   # owner (primario, para mensajes)
+# Admins = owner + los handles extra de ADMIN_HANDLES (lista opcional en settings.json).
+# Todos tienen acceso total (Scope.ADMIN). Para agregar un admin: sumá su handle a
+# ADMIN_HANDLES. Es un PROTECTED_SETTING: no se puede cambiar por comando del bot.
+ADMIN_HANDLES : frozenset[str] = frozenset(
+    [ADMIN_HANDLE, *(settings.get("ADMIN_HANDLES") or [])]
+)
+
+
+def is_admin_handle(handle: str | None) -> bool:
+    """True si `handle` es admin (owner o de la lista ADMIN_HANDLES)."""
+    return bool(handle) and handle in ADMIN_HANDLES
 REASONING_MODEL    : str  = settings.get("REASONING_MODEL", "deepseek/deepseek-r1")
 LITE_MODEL         : str  = settings.get("LITE_MODEL") or REASONING_MODEL
 IMAGE_MODEL        : str  = settings.get("IMAGE_MODEL", "google/gemini-2.5-flash")
@@ -1642,8 +1653,8 @@ _RUNTIME_TASKS: list[PeriodicTask] = []
 # Claves que JAMÁS se cambian desde un post. Identidad (lock-out/secuestro) y
 # endpoints/modelos (redirigir el tráfico LLM = exfiltración de prompts+memoria).
 # Defensa en profundidad: aunque un handler futuro lo intente, el guard rechaza.
-_PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "MODELS", "OPENAI_ENDPOINT",
-                       "REASONING_MODEL", "LITE_MODEL", "IMAGE_MODEL",
+_PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "ADMIN_HANDLES", "MODELS",
+                       "OPENAI_ENDPOINT", "REASONING_MODEL", "LITE_MODEL", "IMAGE_MODEL",
                        "SPOTIFY_REDIRECT_URI", "USER_GROUPS")
 
 # Las tools de config no se tocan a sí mismas (anti auto-lockout / escalación).
@@ -2182,7 +2193,7 @@ def _tool_get_upcoming_events(args: dict, ctx: ToolContext) -> ToolResult:
     """Lee la agenda. Un usuario ve sus eventos + los de comunidad; el admin y el
     loop proactivo (sin author) ven todos. Incluye los de hoy aunque ya hayan pasado."""
     author = ctx.state.get("author_handle")
-    scope_handle = None if (not author or author == ADMIN_HANDLE) else author
+    scope_handle = None if (not author or is_admin_handle(author)) else author
     limit  = int(args.get("limit") or 10)
     today  = dbmod.events_today(ctx.conn, handle=scope_handle)
     up     = dbmod.upcoming_events(ctx.conn, handle=scope_handle, limit=limit)
@@ -2197,7 +2208,7 @@ def _tool_create_event(args: dict, ctx: ToolContext) -> ToolResult:
     (handle omitido) o para cualquier usuario; un usuario común SIEMPRE crea para sí
     mismo (nunca para otro). Idempotente por (día + dueño + título)."""
     author   = ctx.state.get("author_handle")
-    is_admin = author == ADMIN_HANDLE
+    is_admin = is_admin_handle(author)
     title    = (args.get("title") or "").strip()
     event_at = (args.get("event_at") or "").strip()
     if not title or len(event_at) < 10:
@@ -3009,7 +3020,7 @@ def build_tool_registry(config: dict | None = None, *,
         log.info("MCP: %d tool(s) externas registradas", n)
     if config:
         reg.apply_config(config)
-    reg.set_groups(USER_GROUPS, admin_handle=ADMIN_HANDLE,
+    reg.set_groups(USER_GROUPS, admin_handle=ADMIN_HANDLES,
                    feed_resolver=_make_group_feed_resolver(bsky) if bsky is not None else None)
     return reg
 
@@ -3615,7 +3626,7 @@ class HandleRoleQueryNode:
     def run(self, state: MentionState) -> dict:
         handle = state["author_handle"]
         base = "mencionarme y charlar, /remember, /bloques, /check-role"
-        if state.get("is_admin") or handle == ADMIN_HANDLE:
+        if state.get("is_admin") or is_admin_handle(handle):
             return {"reply_text": (
                 f"sos el admin (@{handle}): acceso total — configuración, memoria, "
                 f"tareas programadas y todos los comandos del bot.")[:300]}
@@ -3916,7 +3927,7 @@ def process_mention(graph, db: sqlite3.Connection, mention: dict, mode: str) -> 
         log.debug("Already handled %s — skipping", uri)
         return
 
-    if mode == "admin_only" and author != ADMIN_HANDLE:
+    if mode == "admin_only" and not is_admin_handle(author):
         log.info("admin_only: ignorando a @%s (no es admin)", author)
         mark_pending(db, uri, mention["cid"], author, mode)
         update_status(db, uri, "ignored")
@@ -3931,7 +3942,7 @@ def process_mention(graph, db: sqlite3.Connection, mention: dict, mode: str) -> 
         "thread_root_uri"      : mention.get("thread_root_uri", uri),
         "thread_root_cid"      : mention.get("thread_root_cid", mention["cid"]),
         "mode"                 : mode,
-        "is_admin"             : author == ADMIN_HANDLE,
+        "is_admin"             : is_admin_handle(author),
         "classification"       : None,
         "reply_text"           : None,
         "should_update_profile": False,

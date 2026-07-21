@@ -118,14 +118,15 @@ class ToolRegistry:
                                  enabled, frozenset(groups) if groups else None)
 
     def set_groups(self, groups: dict[str, list[str]] | None,
-                   admin_handle: str | None = None,
+                   admin_handle: "str | Iterable[str] | None" = None,
                    feed_resolver: "Callable[[str], Any] | None" = None) -> None:
-        """Carga las membresías (settings.json → USER_GROUPS) y el admin (bypass).
+        """Carga las membresías (settings.json → USER_GROUPS) y los admins (bypass).
 
-        Cada entrada de un grupo es un handle o una ref "feed:<name>" (todos los
-        miembros de ese feed, resueltos en vivo por `feed_resolver`). Un grupo
-        referenciado por una tool pero ausente acá no matchea a nadie: default
-        cerrado — un typo restringe de más, nunca abre de más.
+        `admin_handle` acepta un handle o un conjunto de handles (multi-admin): todos
+        bypassean el check de grupo. Cada entrada de un grupo es un handle o una ref
+        "feed:<name>" (todos los miembros de ese feed, resueltos en vivo por
+        `feed_resolver`). Un grupo referenciado por una tool pero ausente acá no
+        matchea a nadie: default cerrado — un typo restringe de más, nunca abre de más.
         """
         self._group_members, self._group_feeds = {}, {}
         for g, members in (groups or {}).items():
@@ -136,7 +137,8 @@ class ToolRegistry:
                                 and norm_handle(m))
             self._group_members[g] = statics
             self._group_feeds[g] = feeds
-        self._admins = frozenset({norm_handle(admin_handle)} if norm_handle(admin_handle) else ())
+        admin_iter = [admin_handle] if isinstance(admin_handle, str) else list(admin_handle or ())
+        self._admins = frozenset(norm_handle(a) for a in admin_iter if norm_handle(a))
         self._feed_resolver = feed_resolver
 
     def _in_group(self, handle: str, group: str) -> bool:

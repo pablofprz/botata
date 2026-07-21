@@ -83,3 +83,27 @@ def test_groups_for():
     assert reg.groups_for("juan.bsky.social") == ["power_users"]
     assert reg.groups_for("random.bsky.social") == []
     assert reg.groups_for(None) == []
+
+
+# ─── multi-admin ─────────────────────────────────────────────────────────────
+def test_is_admin_handle_owner_y_extra(monkeypatch):
+    monkeypatch.setattr(b, "ADMIN_HANDLES",
+                        frozenset([b.ADMIN_HANDLE, "segundo.bsky.social"]))
+    assert b.is_admin_handle(b.ADMIN_HANDLE)
+    assert b.is_admin_handle("segundo.bsky.social")
+    assert not b.is_admin_handle("random.bsky.social")
+    assert not b.is_admin_handle(None)
+
+
+def test_set_groups_acepta_multiples_admins():
+    from tools import Scope, ToolRegistry
+    reg = ToolRegistry()
+    reg.register("solo_power", "x", {}, lambda a, c: None, {Scope.REPLY},
+                 groups={"power_users"})
+    reg.set_groups({"power_users": ["juan.bsky.social"]},
+                   admin_handle=["ppolci.com", "segundo.bsky.social"])
+    t = reg.get("solo_power")
+    # ambos admins bypassean el gate de grupo; un ajeno no
+    assert reg.allowed_for(t, "ppolci.com")
+    assert reg.allowed_for(t, "segundo.bsky.social")
+    assert not reg.allowed_for(t, "random.bsky.social")
