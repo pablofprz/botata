@@ -55,6 +55,23 @@ def test_guardrail_rejects_invalid_category(monkeypatch, used):
     assert b.resolve_catalog_image(None, "gato") is None
 
 
+def test_video_frame_skipped_falls_back_to_postable(monkeypatch, used):
+    # Un frame de video (tiktok, <id>_f<n>.jpg) NO se postea suelto: se saltea y
+    # se elige la siguiente imagen posteable.
+    _mock_search(monkeypatch, [
+        _row(id=9, file_path="scrape/pictures/tiktok/7654201315853208840_f1.jpg"),
+        _row(id=2, file_path="scrape/pictures/instagram/ok_0.jpg"),
+    ])
+    assert b.resolve_catalog_image(None, "gato") == str(b.BASE_DIR / "scrape/pictures/instagram/ok_0.jpg")
+    assert used == [2]  # marca la posteable, nunca el frame
+
+
+def test_all_frames_returns_none(monkeypatch, used):
+    _mock_search(monkeypatch, [_row(file_path="scrape/pictures/tiktok/vid_f0.jpg")])
+    assert b.resolve_catalog_image(None, "gato") is None
+    assert used == []
+
+
 def test_no_match_returns_none(monkeypatch, used):
     _mock_search(monkeypatch, [])
     assert b.resolve_catalog_image(None, "gato") is None

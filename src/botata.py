@@ -1331,32 +1331,47 @@ class ReflectDecideNode:
 _VALID_IMAGE_CATEGORIES = {"meme", "foto", "arte", "captura", "otro"}
 
 
+_FRAME_RE = re.compile(r"_f\d+$")  # <id>_f<n>.jpg → frame de video (TikTok)
+
+
+def _is_video_frame(file_path: str) -> bool:
+    """True si el archivo es un frame extraído de un video (ej. TikTok).
+
+    Los frames son proyecciones del video para que el consumidor lo entienda, no
+    imágenes posteables: un fotograma suelto a mitad de movimiento, descontextualizado.
+    El bot no los postea (siguen en el catálogo para búsqueda).
+    """
+    return bool(_FRAME_RE.search(Path(file_path).stem))
+
+
 def resolve_catalog_image(conn: sqlite3.Connection, query: str | None,
                           *, mark_used: bool = True) -> str | None:
-    """Selecciona la mejor imagen del catálogo para `query`, o None.
+    """Selecciona la mejor imagen POSTEABLE del catálogo para `query`, o None.
 
-    **Guardrail (T12):** nunca devuelve una imagen sin descripción o con categoría
-    inválida — el bot no postea imágenes que no 'entiende'. Compartido por el reply
-    (a pedido) y el loop proactivo (autónomo).
+    **Guardrail (T12):** nunca devuelve una imagen sin descripción, con categoría
+    inválida, o que sea un frame de video (no se postean solos). Recorre los mejores
+    candidatos y devuelve el primero posteable. Compartido por el reply (a pedido) y
+    el loop proactivo (autónomo).
     """
     if not query or not query.strip():
         return None
-    results = dbmod.hybrid_search_image_catalog(conn, query.strip(), limit=1)
-    if not results:
-        log.info("imagen: sin match para %r", query)
-        return None
-    img  = results[0]
-    desc = (img.get("description") or "").strip()
-    cat  = (img.get("category") or "").strip().lower()
-    if not desc or cat not in _VALID_IMAGE_CATEGORIES:
-        log.info("guardrail imagen: descarto %s (desc/categoría inválida)", img.get("file_path"))
-        return None
-    if mark_used:
-        dbmod.mark_image_used(conn, img["id"])
-    log.info("imagen elegida: %r → %s", query, img["file_path"])
-    # file_path se guarda relativo a la raíz del repo; el bot puede correr desde
-    # otro cwd, así que devolvemos absoluto para que bsky.post/reply lo encuentre.
-    return str(BASE_DIR / img["file_path"])
+    results = dbmod.hybrid_search_image_catalog(conn, query.strip(), limit=8)
+    for img in results:
+        desc = (img.get("description") or "").strip()
+        cat  = (img.get("category") or "").strip().lower()
+        fp   = img.get("file_path") or ""
+        if not desc or cat not in _VALID_IMAGE_CATEGORIES:
+            continue  # guardrail: no posteamos lo que no 'entendemos'
+        if _is_video_frame(fp):
+            continue  # frame de video: no se postea suelto
+        if mark_used:
+            dbmod.mark_image_used(conn, img["id"])
+        log.info("imagen elegida: %r → %s", query, fp)
+        # file_path se guarda relativo a la raíz del repo; el bot puede correr desde
+        # otro cwd, así que devolvemos absoluto para que bsky.post/reply lo encuentre.
+        return str(BASE_DIR / fp)
+    log.info("imagen: sin match posteable para %r", query)
+    return None
 
 
 class PostFeedNode:
@@ -2095,7 +2110,9 @@ def _tool_use_skill(args: dict, ctx: ToolContext) -> ToolResult:
 def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     query    = args.get("query", "")
     category = args.get("category")
-    results  = dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category, limit=5)
+    results  = dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category, limit=8)
+    # Frames de video no se postean solos (ver _is_video_frame).
+    results  = [r for r in results if not _is_video_frame(r.get("file_path") or "")][:5]
     if not results:
         return ToolResult(text=f"no encontré imágenes para '{query}'")
     best = results[0]
