@@ -350,6 +350,14 @@ class MentionClassification(BaseModel):
             "'who blocks me'. Conservative: when in doubt, false."
         ),
     )
+    is_role_query: bool = Field(
+        default=False,
+        description=(
+            "True if the user is asking about their own role/permissions with the bot: "
+            "'/check-role', '/rol', '/permisos', 'qué permisos tengo', 'cuál es mi rol', "
+            "'soy admin?', 'qué puedo hacer', 'what can I do'. Conservative: when in doubt, false."
+        ),
+    )
 
 
 class BotReply(BaseModel):
@@ -2126,7 +2134,7 @@ def _tool_get_debug_info(args: dict, ctx: ToolContext) -> ToolResult:
 def _tool_get_help(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(text=(
         "comandos: /remember <texto>, /bloques (quién te bloquea, vía ClearSky), "
-        "/imagen <búsqueda>, /debug, /help"
+        "/check-role (tu rol y permisos), /imagen <búsqueda>, /debug, /help"
     ))
 
 
@@ -3592,6 +3600,35 @@ class HandleAdminCommandNode:
         return result
 
 
+class HandleRoleQueryNode:
+    """
+    Node 3d: /check-role — responde el rol y permisos del usuario, deterministamente
+    (sin LLM). Se calcula desde el modelo REAL de permisos (ADMIN_HANDLE + USER_GROUPS
+    del registry), no desde el SOUL. Abierto a cualquier usuario: route_after_classify
+    lo deriva antes del gate admin. Reply ≤ 300 chars (límite de Bluesky).
+    """
+
+    def __init__(self, registry: ToolRegistry, conn: sqlite3.Connection):
+        self.registry = registry
+        self.conn = conn
+
+    def run(self, state: MentionState) -> dict:
+        handle = state["author_handle"]
+        base = "mencionarme y charlar, /remember, /bloques, /check-role"
+        if state.get("is_admin") or handle == ADMIN_HANDLE:
+            return {"reply_text": (
+                f"sos el admin (@{handle}): acceso total — configuración, memoria, "
+                f"tareas programadas y todos los comandos del bot.")[:300]}
+        groups = self.registry.groups_for(handle)
+        tools  = [t.name for t in self.registry.available(Scope.REPLY, handle)]
+        extra  = f" y estas tools: {', '.join(tools)}" if tools else ""
+        if groups:
+            reply = f"sos parte de {', '.join(groups)}. podés: {base}{extra}."
+        else:
+            reply = f"sos de la comunidad (sin rol especial). podés: {base}{extra}."
+        return {"reply_text": reply[:300]}
+
+
 class HandleBlockQueryNode:
     """
     Node 3c: Responde "quién me bloquea" consultando ClearSky (proxy + cache).
@@ -3788,16 +3825,19 @@ class UpdateProfileNode:
 def route_after_classify(state: MentionState) -> str:
     cls = state.get("classification")
     log.info(
-        "Routing: is_command=%s command=%r is_admin=%s skip=%s block_query=%s",
+        "Routing: is_command=%s command=%r is_admin=%s skip=%s block_query=%s role_query=%s",
         cls.is_admin_command if cls else None,
         cls.command if cls else None,
         state.get("is_admin"),
         cls.skip if cls else None,
         cls.is_block_query if cls else None,
+        cls.is_role_query if cls else None,
     )
-    # Block query va antes del gate admin: /bloques es abierto a cualquier usuario.
+    # Block query y role query van antes del gate admin: son abiertos a cualquiera.
     if cls and cls.is_block_query:
         return "handle_block_query"
+    if cls and cls.is_role_query:
+        return "handle_role_query"
     if cls and cls.skip:
         return "skip"
     if cls and cls.is_admin_command and state.get("is_admin"):
@@ -3827,6 +3867,7 @@ def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
     generate_reply = GenerateReplyNode(RoleLLM(router, "reply"), db, registry)
     handle_admin   = HandleAdminCommandNode(RoleLLM(router, "admin"), db, registry)
     handle_blocks  = HandleBlockQueryNode(bsky, db)
+    handle_role    = HandleRoleQueryNode(registry, db)
     post_reply     = PostReplyNode(bsky, db)
     update_profile = UpdateProfileNode(RoleLLM(router, "update_profile"), db)
 
@@ -3836,6 +3877,7 @@ def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
     g.add_node("generate_reply",        generate_reply.run)
     g.add_node("handle_admin_command",  handle_admin.run)
     g.add_node("handle_block_query",    handle_blocks.run)
+    g.add_node("handle_role_query",     handle_role.run)
     g.add_node("post_reply",            post_reply.run)
     g.add_node("update_profile",        update_profile.run)
 
@@ -3846,6 +3888,7 @@ def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
         {
             "handle_admin_command" : "handle_admin_command",
             "handle_block_query"   : "handle_block_query",
+            "handle_role_query"    : "handle_role_query",
             "load_context"         : "load_context",
             "skip"                 : END,
         },
@@ -3854,6 +3897,7 @@ def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
     g.add_edge("generate_reply",       "post_reply")
     g.add_edge("handle_admin_command", "post_reply")
     g.add_edge("handle_block_query",   "post_reply")
+    g.add_edge("handle_role_query",    "post_reply")
     g.add_edge("post_reply",           "update_profile")
     g.add_edge("update_profile",       END)
 

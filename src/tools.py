@@ -154,6 +154,17 @@ class ToolRegistry:
                 return True
         return False
 
+    def groups_for(self, handle: str | None) -> list[str]:
+        """Grupos de USER_GROUPS a los que pertenece `handle` (para /check-role).
+
+        Ordenado y estable. Handle vacío/desconocido → sin grupos.
+        """
+        h = norm_handle(handle)
+        if not h:
+            return []
+        names = set(self._group_members) | set(self._group_feeds)
+        return sorted(g for g in names if self._in_group(h, g))
+
     def allowed_for(self, tool: Tool, handle: str | None) -> bool:
         """¿Puede `handle` gatillar esta tool? Sin grupos declarados → sí. El admin
         siempre. Con grupos y handle desconocido/ausente → no (cerrado)."""
