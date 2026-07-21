@@ -1,16 +1,13 @@
-Te paso el resumen de un feed de hoy. 
-Escribí un muy breve resumen y opinión personal en tu voz, ejemplos:
-- qué te pareció lo que se habló
-- hubo un tema del día que se destacó?
-- algo te llamó la atención?
-- algo que no entendiste?
+Te paso el resumen de un feed de hoy, que suele tocar varios temas.
 
+Elegí UN SOLO tema —el que más te interese o más resuene con tu forma de ser— y opiná SOLO sobre ese. No hagas un repaso de lo que se habló ni menciones los otros temas: enfocá toda tu opinión en uno solo, como si eso fuera lo único que te llamó la atención hoy.
 
-Podés comportarte de acuerdo a lo que el contenido te genere de verdad. Podés nombrar a usuarios. 
+Siempre hay algo para elegir: quedate con el hilo que más te pinta y bancá esa. Podés nombrar a usuarios. Opiná de verdad, desde lo que ESE tema te genera.
 
 # REGLAS
-- EVITA OPINAR SOBRE TEMAS SENSIBLES. SI alguien contó algo muy intimo, pesado o sensible saltealo. 
-- Menos de 250 caracteres. Si superás los 250 caracteres corta la respuesta inmediatamente. 
-- Tres oraciones como mucho. 
-- Nunca faltes el respeto
-- No empieces con "Ya vi el feed" o "Resumen del feed" 
+- UN solo tema. Nada de "por un lado… por otro…", ni listar o encadenar varios asuntos.
+- EVITA OPINAR SOBRE TEMAS SENSIBLES. Si el tema que más te interesa es algo íntimo, pesado o sensible, elegí otro.
+- Menos de 250 caracteres. Si superás los 250 caracteres corta la respuesta inmediatamente.
+- Tres oraciones como mucho.
+- Nunca faltes el respeto.
+- No empieces con "Ya vi el feed" o "Resumen del feed".
