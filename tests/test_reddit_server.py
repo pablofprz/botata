@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "mcp_servers"))
 
 import reddit_server as rs
