@@ -702,10 +702,18 @@ def list_uncataloged_files(
 
             file_path = str(img_file.relative_to(base_dir)).replace("\\", "/")
 
-            # Parsear external_id del nombre: <external_id>_<n>.jpg
+            # Parsear external_id del nombre. Dos sufijos que deja Membrilla:
+            #   <external_id>_<n>.jpg    → media n (foto simple / slide de carrusel)
+            #   <external_id>_f<n>.jpg   → frame n de un video (TikTok)
+            # Ambos resuelven al mismo <external_id> base, que es el nombre del
+            # sidecar <external_id>.json. Sin esto, los frames de TikTok no
+            # encuentran su sidecar y caen a source_name='manual'.
             stem = img_file.stem
             parts = stem.rsplit("_", 1)
-            if len(parts) == 2 and parts[1].isdigit():
+            suffix = parts[1] if len(parts) == 2 else ""
+            is_media = suffix.isdigit()
+            is_frame = suffix.startswith("f") and suffix[1:].isdigit()
+            if len(parts) == 2 and (is_media or is_frame):
                 external_id = parts[0]
             else:
                 external_id = stem  # fallback: nombre completo sin extensión
