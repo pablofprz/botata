@@ -55,23 +55,58 @@ DESCRIBE_SYSTEM = (
     "- category: 'meme' | 'foto' | 'arte' | 'captura' | 'otro'\n"
     "- description: una oración describiendo qué hay en la imagen (máx 100 chars)\n"
     "- tags: array de 3-8 strings con tags relevantes (minúsculas, sin hashtags)\n"
-    "- ocr_text: texto visible en la imagen (si no hay, string vacío)"
+    "- ocr_text: texto visible en la imagen, máx 200 chars (si no hay, string vacío)"
 )
 
 
 # ─── Descripción de imágenes ─────────────────────────────────────────────────
+def _detect_mime(raw: bytes) -> str:
+    """Detecta el mime real por magic bytes, no por la extensión del archivo.
+
+    Los scrapers a veces guardan WebP/PNG con extensión .jpg (ej. el CDN de IG);
+    mandar el mime equivocado hace que el modelo de visión falle o alucine.
+    """
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"  # fallback razonable
+
+
+def _loads_lenient(raw: str) -> dict:
+    """json.loads tolerante a respuestas truncadas del modelo.
+
+    Si el modelo corta la salida a mitad de un string/array (ej. OCR largo), se
+    intenta cerrar comillas/corchetes/llaves abiertos y reparsear, para rescatar
+    al menos category/description/tags en vez de perder la imagen entera.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        s = raw.rstrip().rstrip(",")
+        if s.count('"') % 2 == 1:
+            s += '"'
+        s += "]" * (s.count("[") - s.count("]"))
+        s += "}" * (s.count("{") - s.count("}"))
+        return json.loads(s)  # si sigue roto, propaga y la imagen se reintenta luego
+
+
 def describe_image(image_path: Path, llm: OpenAI) -> dict:
     """Usa IMAGE_MODEL para describir una imagen.
 
     Devuelve {"category", "description", "tags", "ocr_text"}.
     Si el modelo falla, devuelve un dict con error.
     """
-    ext = image_path.suffix.lower()
-    mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
-    data = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    blob = image_path.read_bytes()
+    mime = _detect_mime(blob)
+    data = base64.b64encode(blob).decode("utf-8")
     data_url = f"data:{mime};base64,{data}"
 
-    try:
+    def _call() -> dict:
         response = llm.chat.completions.create(
             model=IMAGE_MODEL,
             messages=[
@@ -82,12 +117,26 @@ def describe_image(image_path: Path, llm: OpenAI) -> dict:
                 ]},
             ],
             response_format={"type": "json_object"},
-            max_tokens=300,
+            # 800 (no 300): con 300 el JSON se truncaba a mitad del ocr_text en
+            # memes con mucho texto → "Unterminated string" y la imagen se perdía.
+            max_tokens=800,
         )
         raw = response.choices[0].message.content
         if not raw:
             raise ValueError("respuesta vacía del modelo")
-        return json.loads(raw)
+        return _loads_lenient(raw)
+
+    # Un reintento ante JSON malformado no-truncado (ej. comilla sin escapar a
+    # mitad de un OCR largo): el modelo samplea distinto y suele salir bien.
+    try:
+        return _call()
+    except json.JSONDecodeError:
+        log.warning("describe_image: JSON inválido para %s, reintentando…", image_path.name)
+        try:
+            return _call()
+        except Exception as e:
+            log.error("describe_image falló para %s: %s", image_path.name, e)
+            raise
     except Exception as e:
         log.error("describe_image falló para %s: %s", image_path.name, e)
         raise
