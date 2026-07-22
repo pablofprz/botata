@@ -2199,8 +2199,9 @@ def run_reflection_loop() -> None:
 # los system prompts outward vía mood_line(). Los moods viven en moods/*.md; el
 # toggle/modo/schedule, en MOODS_CONFIG (settings.json). Ver moods/README.md.
 
-# Índices de _WEEKDAY_KEYS == datetime.weekday() (lunes=0). Claves del schedule.
-_WEEKDAY_KEYS = ("lun", "mar", "mie", "jue", "vie", "sab", "dom")
+# Índices de _WEEKDAY_KEYS == datetime.weekday() (Monday=0). Claves del schedule
+# (en inglés: la config del core es portable, no atada al español).
+_WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 class MoodDecision(BaseModel):

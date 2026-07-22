@@ -67,10 +67,10 @@ def test_disabled_returns_none(conn):
 
 
 def test_manual_fixed(conn):
-    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"fixed": "filoso"}}
+    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"fixed": "snarky"}}
     m = b.current_mood(conn)
-    assert m and m.name == "filoso"
-    assert "filoso" in b.mood_line(conn)
+    assert m and m.name == "snarky"
+    assert "snarky" in b.mood_line(conn)
 
 
 def test_manual_fixed_nonexistent(conn):
@@ -80,21 +80,21 @@ def test_manual_fixed_nonexistent(conn):
 
 def test_manual_schedule_today(conn):
     key = b._WEEKDAY_KEYS[b.now_ar().weekday()]
-    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"schedule": {key: "bajon"}}}
+    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"schedule": {key: "gloomy"}}}
     m = b.current_mood(conn)
-    assert m and m.name == "bajon"
+    assert m and m.name == "gloomy"
 
 
 def test_manual_schedule_unmapped_day(conn):
-    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"schedule": {"zzz": "bajon"}}}
+    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"schedule": {"zzz": "gloomy"}}}
     assert b.current_mood(conn) is None
 
 
 def test_manual_fixed_beats_schedule(conn):
     key = b._WEEKDAY_KEYS[b.now_ar().weekday()]
     b.MOODS_CONFIG = {"enabled": True, "mode": "manual",
-                      "manual": {"fixed": "pila", "schedule": {key: "bajon"}}}
-    assert b.current_mood(conn).name == "pila"
+                      "manual": {"fixed": "upbeat", "schedule": {key: "gloomy"}}}
+    assert b.current_mood(conn).name == "upbeat"
 
 
 def test_auto_undecided_returns_none(conn):
@@ -113,20 +113,20 @@ def _fake_rolellm(monkeypatch, mood, reason):
 
 def test_run_mood_pass_persists(conn, monkeypatch):
     b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
-    _fake_rolellm(monkeypatch, "arisco", "me trataron mal")
+    _fake_rolellm(monkeypatch, "prickly", "me trataron mal")
     b.run_mood_pass(None, conn, force=True)
     st = json.loads(d.kv_get(conn, "mood_state"))
-    assert st["mood"] == "arisco" and st["reason"] == "me trataron mal"
-    assert b.current_mood(conn).name == "arisco"
+    assert st["mood"] == "prickly" and st["reason"] == "me trataron mal"
+    assert b.current_mood(conn).name == "prickly"
 
 
 def test_run_mood_pass_idempotent_same_day(conn, monkeypatch):
     b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
-    _fake_rolellm(monkeypatch, "pila", "buena onda")
+    _fake_rolellm(monkeypatch, "upbeat", "buena onda")
     b.run_mood_pass(None, conn)                       # decide
-    _fake_rolellm(monkeypatch, "bajon", "cambió")     # no debería re-decidir
+    _fake_rolellm(monkeypatch, "gloomy", "cambió")     # no debería re-decidir
     b.run_mood_pass(None, conn)
-    assert json.loads(d.kv_get(conn, "mood_state"))["mood"] == "pila"
+    assert json.loads(d.kv_get(conn, "mood_state"))["mood"] == "upbeat"
 
 
 def test_run_mood_pass_hallucinated_name_falls_back(conn, monkeypatch):
@@ -139,13 +139,13 @@ def test_run_mood_pass_hallucinated_name_falls_back(conn, monkeypatch):
 
 def test_run_mood_pass_noop_when_disabled(conn, monkeypatch):
     b.MOODS_CONFIG = {"enabled": False}
-    _fake_rolellm(monkeypatch, "pila", "x")
+    _fake_rolellm(monkeypatch, "upbeat", "x")
     b.run_mood_pass(None, conn, force=True)
     assert d.kv_get(conn, "mood_state") is None
 
 
 def test_run_mood_pass_noop_when_manual(conn, monkeypatch):
-    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"fixed": "pila"}}
-    _fake_rolellm(monkeypatch, "bajon", "x")
+    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"fixed": "upbeat"}}
+    _fake_rolellm(monkeypatch, "gloomy", "x")
     b.run_mood_pass(None, conn, force=True)
     assert d.kv_get(conn, "mood_state") is None

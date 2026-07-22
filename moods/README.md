@@ -11,12 +11,16 @@ que postea ese día (replies + proactivo), a diferencia de:
 
 ```markdown
 ---
-name: bajon
-description: Melancólico y parco — responde corto, sin ganas de joda
+name: gloomy
+description: Melancholic and terse — short replies, no mood for jokes
 enabled: true          # default true; ponelo false para archivar sin borrar
 ---
 (instrucciones de tono que ve el LLM cuando este mood está activo)
 ```
+
+Los `name` y las claves de config van en **inglés** a propósito: el core es
+portable, no atado al español. El cuerpo (el tono) escribilo en el idioma que
+prefieras — el bot igual responde en su idioma (lo dicta SOUL.md, no el mood).
 
 El `body` se inyecta al system prompt como "tu estado de ánimo HOY es …". Escribí
 tono, NO personalidad nueva: el mood modula, no reemplaza a SOUL.md.
@@ -31,18 +35,18 @@ Se configura en `settings.json` → sección `MOODS`:
   "mode": "manual",              // "manual" | "auto"
   "manual": {
     "fixed": "",                 // un name de acá → siempre ese mood (pisa el schedule)
-    "schedule": {                // si fixed está vacío: día de semana → mood
-      "lun": "pila", "vie": "filoso", "dom": "bajon"
+    "schedule": {                // si fixed está vacío: día de semana (mon..sun) → mood
+      "mon": "upbeat", "fri": "snarky", "sun": "gloomy"
     }
   }
 }
 ```
 
 - **manual + fixed** → siempre ese humor.
-- **manual + schedule** → el humor del día (`lun`..`dom`); día sin mapear = sin mood.
+- **manual + schedule** → el humor del día (`mon`..`sun`); día sin mapear = sin mood.
 - **auto** → el bot elige UNA vez por día leyendo el clima de la comunidad + su
   propia actividad reciente, y guarda el porqué (tabla `kv`, visible en
-  `get_bot_config`). Reacciona: si lo tratan mal, puede caer en `bajon`/`arisco`.
+  `get_bot_config`). Reacciona: si lo tratan mal, puede caer en `gloomy`/`prickly`/`angry`.
 
 ## Seguridad
 
