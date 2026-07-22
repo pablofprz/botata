@@ -181,6 +181,13 @@ NEWS_SOURCES : list = _load_news_sources()
 # Master toggle del posteo de noticias (outward-facing). OFF por default: el admin lo prende.
 NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 
+# Leer la media (imágenes/video/GIF) de los posts del hilo: corre el modelo
+# vision (rol image_describe) sobre el frame/thumbnail y suma la descripción al
+# contexto que ve el LLM. Sin esto, un post que es solo un video o un GIF le
+# llega vacío al bot. Best-effort y toggleable (cuesta 1 llamada vision por
+# pieza de media). ON por default.
+READ_THREAD_MEDIA : bool = bool(settings.get("READ_THREAD_MEDIA", True))
+
 # Quién puede agendarle ACCIONES al bot (eventos kind='bot_action': "posteá X a
 # tal hora"). 'admin' (default) = solo el admin; 'any' = cualquier usuario.
 # Superficie de prompt injection en bot público → default cerrado. Semilla del
@@ -453,6 +460,45 @@ def build_link_facets(text: str):
     return facets
 
 
+# Un @handle de Bluesky es un nombre de dominio (ppolci.com, user.bsky.social).
+# El @ debe estar al inicio o precedido por un no-word char (evita mails: foo@bar.com).
+# Trabaja sobre BYTES: los offsets de facet.index se miden en bytes UTF-8.
+_MENTION_RE = re.compile(
+    rb"(?:^|(?<=\W))(@([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,62}[a-zA-Z0-9])?"
+    rb"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,62}[a-zA-Z0-9])?)+))"
+)
+
+
+def _find_mentions_with_offsets(text: str) -> list[tuple[str, int, int]]:
+    """(handle, byte_start, byte_end) por cada @handle. Los offsets abarcan el @."""
+    out: list[tuple[str, int, int]] = []
+    data = text.encode("utf-8")
+    for m in _MENTION_RE.finditer(data):
+        handle = m.group(2).decode("utf-8")  # grupo 2 = handle sin el '@'
+        out.append((handle, m.start(1), m.end(1)))
+    return out
+
+
+def build_mention_facets(text: str, resolver):
+    """Facets de tipo mention para cada @handle → el usuario queda linkeable.
+
+    `resolver(handle) -> did | None`. Un handle que no resuelve (typo, cuenta
+    borrada) se deja como texto plano (sin facet), no rompe el post.
+    """
+    facets = []
+    for handle, bs, be in _find_mentions_with_offsets(text):
+        did = resolver(handle)
+        if not did:
+            continue
+        facets.append(
+            models.AppBskyRichtextFacet.Main(
+                features=[models.AppBskyRichtextFacet.Mention(did=did)],
+                index=models.AppBskyRichtextFacet.ByteSlice(byte_start=bs, byte_end=be),
+            )
+        )
+    return facets
+
+
 def _meta_content(html: str, prop: str) -> str | None:
     """Extrae el content de un <meta property|name="prop"> (orden de atributos indistinto)."""
     p = re.escape(prop)
@@ -508,6 +554,139 @@ def _fetch_og_card(url: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Lectura de media del hilo (imágenes/video/GIF)
+# ---------------------------------------------------------------------------
+# Los posts que ve el bot pueden traer media. `_extract_text` solo devuelve el
+# texto → un post que es SOLO un video o un GIF le llega vacío. Acá aplanamos el
+# embed VIEW a piezas describibles y corremos vision sobre el frame/thumbnail
+# (los GIF de Bluesky son embeds `external` de Tenor; los videos exponen un
+# `thumbnail` de portada; las imágenes, `fullsize`). Best-effort: todo falla en
+# silencio y el post simplemente pierde la anotación.
+
+_MEDIA_MAX_ITEMS = 4  # tope de piezas a describir por post (evita blow-ups de costo)
+_VISION_DESCRIBE_SYSTEM = (
+    "Describí la imagen en UNA sola frase concisa en español rioplatense "
+    "(máx. 25 palabras). Si es un fotograma de video o un GIF, describí lo que "
+    "se ve en ese cuadro. Sin preámbulos ni comillas."
+)
+
+
+def _sniff_image_mime(blob: bytes) -> str:
+    """MIME por magic bytes (suficiente para lo que sirve el CDN de Bluesky)."""
+    if blob[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _iter_media_views(embed) -> list[dict]:
+    """Aplana un embed VIEW a piezas de media visual.
+
+    Devuelve dicts {kind, image_url?, alt?, title?}. `kind` ∈
+    imagen|video|GIF|enlace. `image_url` es la URL del CDN a describir con vision
+    (None si no hay cuadro que mirar, ej. enlace sin thumbnail)."""
+    if embed is None:
+        return []
+    pt = getattr(embed, "py_type", "") or ""
+    out: list[dict] = []
+    if pt == "app.bsky.embed.images#view":
+        for img in getattr(embed, "images", None) or []:
+            out.append({
+                "kind": "imagen",
+                "image_url": getattr(img, "fullsize", None) or getattr(img, "thumb", None),
+                "alt": (getattr(img, "alt", "") or "").strip(),
+            })
+    elif pt == "app.bsky.embed.video#view":
+        out.append({
+            "kind": "video",
+            "image_url": getattr(embed, "thumbnail", None),  # frame de portada
+            "alt": (getattr(embed, "alt", "") or "").strip(),
+        })
+    elif pt == "app.bsky.embed.external#view":
+        ext = getattr(embed, "external", None)
+        if ext is not None:
+            uri = (getattr(ext, "uri", "") or "")
+            low = uri.lower()
+            is_gif = ".gif" in low or "tenor.com" in low or "giphy.com" in low
+            out.append({
+                "kind": "GIF" if is_gif else "enlace",
+                "image_url": getattr(ext, "thumb", None),
+                "title": (getattr(ext, "title", "") or "").strip(),
+            })
+    elif pt == "app.bsky.embed.recordWithMedia#view":
+        # post con texto/cita + media adjunta → describimos solo la media
+        out.extend(_iter_media_views(getattr(embed, "media", None)))
+    # app.bsky.embed.record#view (cita a otro post) → no se describe acá
+    return out[:_MEDIA_MAX_ITEMS]
+
+
+def _vision_describe_url(vision_llm, url: str) -> str:
+    """Baja la imagen del CDN y la describe con el modelo vision. '' si falla."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _OG_UA})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            blob = r.read(4_000_000)
+        data_url = f"data:{_sniff_image_mime(blob)};base64,{base64.b64encode(blob).decode('ascii')}"
+        text = vision_llm.chat(
+            [
+                {"role": "system", "content": _VISION_DESCRIBE_SYSTEM},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": "Describí esta imagen."},
+                ]},
+            ],
+            max_tokens=120,
+        )
+        return " ".join((text or "").split())[:220]
+    except Exception as e:
+        log.debug("vision describe falló %s: %s", url, e)
+        return ""
+
+
+def _format_media_piece(kind: str, desc: str, extra: str) -> str:
+    """Etiqueta legible de una pieza de media para el contexto del LLM."""
+    if kind == "GIF":
+        bits = [b for b in (extra, desc) if b]
+        return f"[GIF: {' — '.join(bits)}]" if bits else "[GIF adjunto]"
+    if kind == "video":
+        core = desc or extra
+        return f"[video, primer frame: {core}]" if core else "[video adjunto]"
+    if kind == "enlace":
+        return f"[enlace: {extra or desc}]" if (extra or desc) else "[enlace adjunto]"
+    # imagen
+    core = desc or extra
+    return f"[imagen: {core}]" if core else "[imagen adjunta]"
+
+
+def make_media_describer(vision_llm):
+    """Fábrica: devuelve fn(post_view)->str que anota la media del post con vision.
+
+    Best-effort: cualquier pieza que falle se saltea; '' si el post no trae media
+    describible. `vision_llm` = RoleLLM(router, 'image_describe')."""
+    def describe(post_view) -> str:
+        try:
+            items = _iter_media_views(getattr(post_view, "embed", None))
+        except Exception:
+            log.debug("iter_media_views falló", exc_info=True)
+            return ""
+        pieces: list[str] = []
+        for it in items:
+            desc = ""
+            if it.get("image_url"):
+                desc = _vision_describe_url(vision_llm, it["image_url"])
+            extra = it.get("title") or it.get("alt") or ""
+            pieces.append(_format_media_piece(it["kind"], desc, extra))
+        return " ".join(pieces)
+
+    return describe
+
+
+# ---------------------------------------------------------------------------
 # Bluesky client
 # ---------------------------------------------------------------------------
 
@@ -520,6 +699,8 @@ class BskyClient:
 
     def __init__(self, handle: str, password: str):
         self.handle = handle
+        self._did_cache: dict[str, str | None] = {}
+        self._media_describer = None  # fn(post_view)->str; inyectado en el arranque
         request = AtprotoRequest(timeout=httpx.Timeout(30.0, connect=15.0))
         self._client = Client(request=request)
         for attempt in range(1, self._LOGIN_RETRIES + 1):
@@ -602,6 +783,19 @@ class BskyClient:
             log.warning("Could not resolve DID for %s: %s", handle, e)
             return None
 
+    def _resolve_did_cached(self, handle: str) -> str | None:
+        """resolve_did con cache por proceso (evita un fetch por cada @mención)."""
+        h = handle.lstrip("@").lower()
+        if h not in self._did_cache:
+            self._did_cache[h] = self.resolve_did(h)
+        return self._did_cache[h]
+
+    def _all_facets(self, text: str):
+        """Facets de links + menciones combinados (offsets en bytes, no se pisan)."""
+        facets = build_link_facets(text)
+        facets += build_mention_facets(text, self._resolve_did_cached)
+        return facets or None
+
     def get_profile_handles(self, dids: list[str]) -> dict[str, str]:
         """Map DIDs → handles in batches of 25 (AppView getProfiles limit).
         DIDs that don't resolve (deleted/deactivated accounts) are omitted."""
@@ -615,6 +809,21 @@ class BskyClient:
             except Exception as e:
                 log.warning("get_profiles failed for batch of %d: %s", len(batch), e)
         return out
+
+    def set_media_describer(self, fn) -> None:
+        """Inyecta el describidor de media (vision). Sin él, la media no se anota."""
+        self._media_describer = fn
+
+    def _describe_media(self, post_view) -> str:
+        """Descripción de la media del post (vía el describidor inyectado). '' si
+        no hay describidor o no hay media. Jamás lanza."""
+        if self._media_describer is None:
+            return ""
+        try:
+            return self._media_describer(post_view)
+        except Exception:
+            log.debug("describe_media falló", exc_info=True)
+            return ""
 
     def _thread_context(self, leaf) -> tuple[str, str, str]:
         """Parent chain of `leaf` as chronological context (leaf excluded),
@@ -630,29 +839,37 @@ class BskyClient:
         node = getattr(leaf, "parent", None)
         while node is not None:
             if hasattr(node, "post"):
-                lines.append(f"{node.post.author.handle}: {self._extract_text(node.post.record)}")
+                text = self._extract_text(node.post.record)
+                media = self._describe_media(node.post)
+                if media:
+                    text = f"{text} {media}".strip()
+                lines.append(f"{node.post.author.handle}: {text}")
                 root_uri = node.post.uri
                 root_cid = node.post.cid
             node = getattr(node, "parent", None)
         lines.reverse()
         return "\n".join(lines), root_uri, root_cid
 
-    def get_thread_info(self, uri: str, cid: str) -> tuple[str, str, str]:
+    def get_thread_info(self, uri: str, cid: str) -> tuple[str, str, str, str]:
         """
-        Returns (context_text, root_uri, root_cid).
+        Returns (context_text, root_uri, root_cid, leaf_media).
         context_text: chronological PRIOR conversation for the LLM (parent chain only).
         root_uri/cid: the original post that started the thread — required by Bluesky
                       to maintain thread structure when replying.
+        leaf_media:   descripción vision de la media del post actual (la mención),
+                      '' si no trae media. El poll la anexa al texto de la mención
+                      (que viene del record de la notificación, sin la vista/CDN).
         """
         try:
             resp = self._client.app.bsky.feed.get_post_thread({"uri": uri})
         except Exception as e:
             log.warning("Could not fetch thread for %s: %s", uri, e)
-            return "", uri, cid
+            return "", uri, cid, ""
         leaf = resp.thread
         if not hasattr(leaf, "post"):
-            return "", uri, cid
-        return self._thread_context(leaf)
+            return "", uri, cid, ""
+        ctx, root_uri, root_cid = self._thread_context(leaf)
+        return ctx, root_uri, root_cid, self._describe_media(leaf.post)
 
     def get_mention_by_uri(self, uri: str) -> dict | None:
         """Reconstruct a mention dict (with thread context) from a single post URI.
@@ -669,11 +886,15 @@ class BskyClient:
             return None
         post = leaf.post
         context, root_uri, root_cid = self._thread_context(leaf)
+        text = self._extract_text(post.record)
+        media = self._describe_media(post)
+        if media:
+            text = f"{text} {media}".strip()
         return {
             "uri"            : post.uri,
             "cid"            : post.cid,
             "author_handle"  : post.author.handle,
-            "text"           : self._extract_text(post.record),
+            "text"           : text,
             "thread_context" : context,
             "thread_root_uri": root_uri,
             "thread_root_cid": root_cid,
@@ -878,7 +1099,7 @@ class BskyClient:
             "root"  : {"uri": root_uri,   "cid": root_cid},
             "parent": {"uri": parent_uri, "cid": parent_cid},
         }
-        facets = build_link_facets(text) or None
+        facets = self._all_facets(text)
         if media_path:
             resp = self._send_media(text, media_path, facets=facets, reply_to=reply_to)
         else:
@@ -905,7 +1126,7 @@ class BskyClient:
             else:
                 # No punctuation found — cut at last space
                 text = cut[: cut.rfind(" ")] if " " in cut else cut
-        facets = build_link_facets(text) or None
+        facets = self._all_facets(text)
         if media_path:
             resp = self._send_media(text, media_path, facets=facets)
         else:
@@ -3873,6 +4094,11 @@ def build_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
     registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
     log.info("Tool registry: %s", ", ".join(registry.names()) or "(vacío)")
 
+    # Lectura de media del hilo (video/GIF/imagen) → descripción vision en el
+    # contexto. Gateado por READ_THREAD_MEDIA (ON por default), best-effort.
+    if READ_THREAD_MEDIA:
+        bsky.set_media_describer(make_media_describer(RoleLLM(router, "image_describe")))
+
     classify       = ClassifyNode(RoleLLM(router, "classify"))
     load_context   = LoadContextNode(RoleLLM(router, "bio_interp"), bsky, db)
     generate_reply = GenerateReplyNode(RoleLLM(router, "reply"), db, registry)
@@ -4118,10 +4344,12 @@ def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -
     if mentions:
         log.info("Found %d mention(s) to process", len(mentions))
         for mention in mentions:
-            ctx, root_uri, root_cid = bsky.get_thread_info(mention["uri"], mention["cid"])
+            ctx, root_uri, root_cid, leaf_media = bsky.get_thread_info(mention["uri"], mention["cid"])
             mention["thread_context"]  = ctx
             mention["thread_root_uri"] = root_uri
             mention["thread_root_cid"] = root_cid
+            if leaf_media:  # media del post que menciona al bot (video/GIF/imagen)
+                mention["text"] = f"{mention['text']} {leaf_media}".strip()
             _bump_thread_relationships(db, mention["author_handle"], ctx)
             process_mention(graph, db, mention, mode)
         # mark_all_read is UI hygiene only (keeps Polci's notif tab clean);
