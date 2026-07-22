@@ -42,6 +42,7 @@ import budget as budgetmod  # guard de presupuesto diario de tokens
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
 from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope, ALL_SCOPES  # framework de tools
 from skills import skills_prompt_block, get_skill_body  # workspace de skills (T26)
+import moods as moodmod  # estados de ánimo del bot (registro conductual por día)
 from scheduler import PeriodicTask, apply_tasks_config, run_due  # tareas periódicas (T27)
 from router import ModelRouter, RoleLLM, build_router  # router de modelos + fallbacks
 
@@ -65,6 +66,7 @@ CONFIG_DIR  = BASE_DIR / "config"
 CONTEXT_DIR = BASE_DIR / "context"
 PROMPTS_DIR = BASE_DIR / "prompts"
 SKILLS_DIR  = BASE_DIR / "skills"   # T26: workspace de skills en markdown
+MOODS_DIR   = BASE_DIR / "moods"    # estados de ánimo del bot (markdown)
 POSTED_DIR  = BASE_DIR / "posted"
 FEEDS_DIR   = CONTEXT_DIR / "feeds"
 
@@ -187,6 +189,11 @@ NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 # llega vacío al bot. Best-effort y toggleable (cuesta 1 llamada vision por
 # pieza de media). ON por default.
 READ_THREAD_MEDIA : bool = bool(settings.get("READ_THREAD_MEDIA", True))
+
+# Estados de ánimo (moods): un registro afectivo que tiñe el tono del bot por día.
+# {enabled, mode: manual|auto, manual: {fixed, schedule}}. Los moods en sí viven en
+# moods/*.md (markdown). Off por default = comportamiento normal. Ver moods/README.md.
+MOODS_CONFIG : dict = settings.get("MOODS", {})
 
 # Quién puede agendarle ACCIONES al bot (eventos kind='bot_action': "posteá X a
 # tal hora"). 'admin' (default) = solo el admin; 'any' = cualquier usuario.
@@ -1513,6 +1520,7 @@ class ReflectDecideNode:
         parts = [
             soul,
             f"\n---\n{current_datetime_line()}",
+            mood_line(self.conn),
             f"\n---\n{reflect}" if reflect else "",
             f"\n---\n{guidance}",
         ]
@@ -2001,7 +2009,7 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
             f" — {e['description']}" if e.get("description") else "")
 
     soul = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
-    parts = [soul, f"\n---\n{current_datetime_line()}",
+    parts = [soul, f"\n---\n{current_datetime_line()}", mood_line(conn),
              f"\n---\n{load_text(PROMPTS_DIR / 'heartbeat_engine.md')}"]
     skills_block = skills_prompt_block(SKILLS_DIR, Scope.FEED_REFLECTION)
     if skills_block:
@@ -2184,6 +2192,130 @@ def run_reflection_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Estados de ánimo (moods)
+# ---------------------------------------------------------------------------
+# Un mood tiñe el tono del bot durante un día (más pila, más bajón, filoso…),
+# transversal a replies + proactivo. Resolución en current_mood(); inyección en
+# los system prompts outward vía mood_line(). Los moods viven en moods/*.md; el
+# toggle/modo/schedule, en MOODS_CONFIG (settings.json). Ver moods/README.md.
+
+# Índices de _WEEKDAY_KEYS == datetime.weekday() (lunes=0). Claves del schedule.
+_WEEKDAY_KEYS = ("lun", "mar", "mie", "jue", "vie", "sab", "dom")
+
+
+class MoodDecision(BaseModel):
+    mood: str = Field(description="El name EXACTO de uno de los moods disponibles.")
+    reason: str = Field(description="Por qué te sentís así hoy, en una frase.")
+
+
+def _mood_state_get(conn: sqlite3.Connection) -> dict | None:
+    """Lee el mood decidido (modo auto) de la tabla kv. None si no hay/roto."""
+    raw = dbmod.kv_get(conn, "mood_state")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def current_mood(conn: sqlite3.Connection):
+    """El mood vigente HOY, o None si moods está apagado / no resuelve.
+
+    - disabled            → None (comportamiento normal).
+    - manual + fixed      → ese mood.
+    - manual + schedule   → el del día de la semana (None si el día no está mapeado).
+    - auto                → el guardado en kv para la fecha de hoy (lo escribe
+                            run_mood_pass); None hasta que corra el pase del día.
+    """
+    cfg = MOODS_CONFIG
+    if not cfg.get("enabled"):
+        return None
+    if str(cfg.get("mode", "manual")).lower() == "auto":
+        st = _mood_state_get(conn)
+        if st and st.get("date") == now_ar().date().isoformat() and st.get("mood"):
+            return moodmod.get_mood(MOODS_DIR, st["mood"])
+        return None
+    manual = cfg.get("manual", {}) or {}
+    fixed = (manual.get("fixed") or "").strip()
+    if fixed:
+        return moodmod.get_mood(MOODS_DIR, fixed)
+    schedule = manual.get("schedule", {}) or {}
+    name = (schedule.get(_WEEKDAY_KEYS[now_ar().weekday()]) or "").strip()
+    return moodmod.get_mood(MOODS_DIR, name) if name else None
+
+
+def mood_line(conn: sqlite3.Connection) -> str:
+    """Sección de mood para inyectar en un system prompt outward. "" si no hay.
+    Best-effort: jamás bloquea la generación."""
+    try:
+        mood = current_mood(conn)
+    except Exception:
+        log.debug("current_mood falló", exc_info=True)
+        return ""
+    return f"\n---\n{moodmod.mood_prompt_block(mood)}" if mood else ""
+
+
+def run_mood_pass(router: ModelRouter, conn: sqlite3.Connection, *,
+                  activity_limit: int = 10, climate_limit: int = 20,
+                  force: bool = False) -> None:
+    """Modo auto: elige el mood del día leyendo el CLIMA de la comunidad
+    (interacciones recientes) + la ACTIVIDAD propia, y lo guarda en kv con el
+    porqué. Reactivo: si lo vienen tratando mal, puede caer en bajón/arisco.
+
+    Idempotente por día (si ya se decidió hoy no repite, salvo force=True). No-op
+    si moods está apagado, no está en modo auto, o no hay moods disponibles."""
+    cfg = MOODS_CONFIG
+    if not cfg.get("enabled") or str(cfg.get("mode", "manual")).lower() != "auto":
+        return
+    index = moodmod.mood_index(MOODS_DIR)
+    if not index:
+        log.info("mood: no hay moods disponibles en %s", MOODS_DIR)
+        return
+    today = now_ar().date().isoformat()
+    st = _mood_state_get(conn)
+    if not force and st and st.get("date") == today and st.get("mood"):
+        return  # ya decidido hoy
+
+    climate  = dbmod.recent_interactions_all(conn, limit=climate_limit)
+    activity = recent_bot_activity(conn, limit=activity_limit)
+
+    options   = "\n".join(f"- {name}: {desc}" for name, desc in index)
+    clima_txt = "\n".join(
+        f"- [{c['created_at'][:10]}] @{c['handle']}: {c['summary']}" for c in climate
+    ) or "Sin interacciones recientes."
+    act_txt   = "\n".join(f"- {a.get('text', '')}" for a in activity) or "Sin actividad reciente."
+
+    soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
+    prompt = load_text(PROMPTS_DIR / "mood_decide_prompt.md").format(moods=options)
+    system = f"{soul}\n---\n{current_datetime_line()}\n---\n{prompt}"
+    user   = (f"Clima de la comunidad (interacciones recientes con vos):\n{clima_txt}\n\n"
+              f"Tu actividad reciente:\n{act_txt}")
+
+    try:
+        decision = RoleLLM(router, "feed_opinion").complete(system, user, MoodDecision)
+    except Exception as e:
+        log.error("mood: %s", e)
+        return
+    chosen = moodmod.get_mood(MOODS_DIR, decision.mood)
+    if not chosen:  # el modelo alucinó un name → fallback al primero disponible
+        log.warning("mood: el modelo eligió %r (inexistente) — uso %r", decision.mood, index[0][0])
+        chosen = moodmod.get_mood(MOODS_DIR, index[0][0])
+    dbmod.kv_set(conn, "mood_state", json.dumps(
+        {"date": today, "mood": chosen.name, "reason": decision.reason, "mode": "auto"}))
+    log.info("mood: hoy el bot está %s — %s", chosen.name, decision.reason)
+
+
+def run_mood_loop() -> None:
+    """Pase único de mood desde CLI (`--mood`). Fuerza recalcular (force=True)."""
+    db     = init_db()
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    run_mood_pass(router, db, force=True)
+    m = current_mood(db)
+    log.info("Mood vigente: %s", m.name if m else "(ninguno)")
+
+
+# ---------------------------------------------------------------------------
 # Reflexión PÚBLICA (portado de maripobot: reflect_on_history/auto_reflect)
 # ---------------------------------------------------------------------------
 def run_public_reflection_pass(bsky: "BskyClient", router: ModelRouter,
@@ -2208,7 +2340,7 @@ def run_public_reflection_pass(bsky: "BskyClient", router: ModelRouter,
 
     soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
     prompt = load_text(PROMPTS_DIR / "public_reflection_prompt.md")
-    parts  = [soul, f"\n---\n{current_datetime_line()}", f"\n---\n{prompt}"]
+    parts  = [soul, f"\n---\n{current_datetime_line()}", mood_line(conn), f"\n---\n{prompt}"]
     if lessons:
         parts.append("\n---\nLecciones que destilaste últimamente:\n"
                      + "\n".join(f"- {t}" for t in lessons))
@@ -2297,7 +2429,7 @@ def run_playlist_share_pass(bsky: "BskyClient", router: ModelRouter,
         soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
         prompt = load_text(PROMPTS_DIR / "playlist_share_prompt.md")
         system = "\n".join(p for p in [
-            soul, f"\n---\n{current_datetime_line()}", f"\n---\n{prompt}",
+            soul, f"\n---\n{current_datetime_line()}", mood_line(conn), f"\n---\n{prompt}",
             "\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md")] if p)
         user = f"El tema que te tocó compartir: {label}\nLink: {track['url']}"
         try:
@@ -3278,6 +3410,17 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             f"({f.get('posting_policy', 'balanced')}, {f.get('interval_hours', 6)}h)"
             for f in FEEDS_CONFIG))
         lines.append(f"noticias (NEWS_ENABLED): {'on' if NEWS_ENABLED else 'off'}")
+        if MOODS_CONFIG.get("enabled"):
+            mode = str(MOODS_CONFIG.get("mode", "manual")).lower()
+            m = current_mood(ctx.conn)
+            extra = ""
+            if mode == "auto":
+                st = _mood_state_get(ctx.conn)
+                if st and st.get("reason"):
+                    extra = f" — «{st['reason'][:100]}»"
+            lines.append(f"mood: {mode}, hoy {(m.name if m else 'sin definir')}{extra}")
+        else:
+            lines.append("mood: off (tono normal)")
         if BUDGET_CONFIG.get("enabled"):
             lines.append(f"budget diario: ${float(BUDGET_CONFIG.get('daily_usd', 1.0)):.2f} "
                          f"(announce={'on' if BUDGET_CONFIG.get('announce', True) else 'off'})")
@@ -3684,6 +3827,9 @@ class GenerateReplyNode:
         recent  = dbmod.recent_interactions(self.conn, handle, limit=5)
 
         parts = [soul, f"\n---\n{current_datetime_line()}"]
+        mood = mood_line(self.conn)
+        if mood:
+            parts.append(mood)
         if memory:
             parts.append(f"\n---\nTu memoria general:\n{memory}")
         if facts:
@@ -4248,6 +4394,8 @@ def run(mode: str) -> None:
                      interval_hours=24, enabled=True),  # outward: reflexión en primera persona
         PeriodicTask("playlist_share", lambda: run_playlist_share_pass(bsky, router, db),
                      interval_hours=24, enabled=True),  # outward: tema de la playlist comunitaria
+        PeriodicTask("mood", lambda: run_mood_pass(router, db),
+                     interval_hours=6, enabled=True),  # inward: decide el humor del día (solo modo auto)
     ]
     apply_tasks_config(tasks, TASKS_CONFIG)
     _RUNTIME_TASKS[:] = tasks  # T30: las tools de config del admin mutan esta lista en vivo
@@ -4423,6 +4571,12 @@ if __name__ == "__main__":
         help="Post a random track from the community playlist once (LLM comment per "
              "TASKS.playlist_share.comment) and exit. Requires spotify_auth.py token.",
     )
+    parser.add_argument(
+        "--mood",
+        action="store_true",
+        help="Decide the bot's mood for today once (auto mode) and exit. Forces a "
+             "recompute; no-op unless MOODS.enabled and MOODS.mode='auto'.",
+    )
     args = parser.parse_args()
 
     if args.proactive:
@@ -4442,6 +4596,9 @@ if __name__ == "__main__":
 
     elif args.share_playlist:
         run_playlist_share_loop()
+
+    elif args.mood:
+        run_mood_loop()
 
     elif args.fetch_feeds:
         db        = init_db()

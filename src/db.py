@@ -986,6 +986,20 @@ def recent_interactions(conn: sqlite3.Connection, handle: str, limit: int = 5) -
     return [dict(r) for r in rows]
 
 
+def recent_interactions_all(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
+    """Últimas notas de interacción de CUALQUIER usuario, de más nueva a más vieja.
+
+    Señal de "clima de la comunidad": cómo viene tratando la gente al bot en las
+    conversaciones recientes (insultos, buena onda, temas). La usa el pase de
+    mood en modo auto. Cronológico (recencia), sin embeddings."""
+    rows = conn.execute(
+        "SELECT handle, summary, created_at FROM interactions "
+        "ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def purge_user_memory(
     conn: sqlite3.Connection,
     handle: str,
