@@ -30,6 +30,7 @@ from pathlib import Path
 
 from tools import ALL_SCOPES
 from skills import load_skills, _parse_frontmatter
+from moods import mood_index
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
 UI_HTML = BASE_DIR / "ui" / "config.html"
@@ -44,6 +45,11 @@ _FEED_TYPES = {"list", "feed", "following"}
 _POLICIES = {"conservative", "balanced", "active"}
 _NEWS_MODES = {"comment", "post"}
 _MCP_TRANSPORTS = {"stdio", "http"}
+_MOOD_MODES = {"manual", "auto"}
+_WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+_PREF_MODES = {"manual", "add_only", "full_auto"}
+_PREF_KINDS = {"like", "dislike"}
+_EVENT_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$")
 
 
 # ─── Validadores (puros: devuelven lista de errores) ─────────────────────────
@@ -117,6 +123,28 @@ def validate_settings(s: dict) -> list[str]:
             if flag in budget and not isinstance(budget[flag], bool):
                 errs.append(f"BUDGET.{flag} debe ser booleano")
 
+    moods = s.get("MOODS")
+    if moods is not None:
+        if "enabled" in moods and not isinstance(moods["enabled"], bool):
+            errs.append("MOODS.enabled debe ser booleano")
+        if moods.get("mode", "manual") not in _MOOD_MODES:
+            errs.append(f"MOODS.mode inválido '{moods.get('mode')}' (manual|auto)")
+        sus = moods.get("susceptibility", 0.5)
+        if not isinstance(sus, (int, float)) or isinstance(sus, bool) or not (0 <= sus <= 1):
+            errs.append("MOODS.susceptibility debe ser un número entre 0 y 1")
+        hyst = moods.get("hysteresis_hours", 2)
+        if not isinstance(hyst, (int, float)) or isinstance(hyst, bool) or hyst < 0:
+            errs.append("MOODS.hysteresis_hours debe ser un número >= 0")
+        sched = (moods.get("manual") or {}).get("schedule") or {}
+        bad_days = set(sched) - _WEEKDAYS
+        if bad_days:
+            errs.append(f"MOODS.manual.schedule: día(s) inválido(s) {sorted(bad_days)} "
+                        "(usar mon..sun)")
+
+    prefs = s.get("PREFS")
+    if prefs is not None and prefs.get("mode", "manual") not in _PREF_MODES:
+        errs.append(f"PREFS.mode inválido '{prefs.get('mode')}' (manual|add_only|full_auto)")
+
     errs += validate_mcp(s.get("MCP", {}))
 
     models = s.get("MODELS")
@@ -177,6 +205,15 @@ class ConfigStore:
         self.news_path = self.base / "config" / "news_sites.json"
         self.env_path = self.base / ".env"
         self.skills_dir = self.base / "skills"
+        self.moods_dir = self.base / "moods"
+        self.db_path = self.base / "posted" / "botata.db"
+
+    def _db(self):
+        """Conexión al DB del bot (WAL: convive con el bot corriendo). Lazy
+        import para que la UI arranque aunque falte sqlite-vec."""
+        import db as dbmod
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        return dbmod, dbmod.init_db(self.db_path)
 
     # -- helpers ---------------------------------------------------------------
     @staticmethod
@@ -192,12 +229,116 @@ class ConfigStore:
         settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
         news = (json.loads(self.news_path.read_text(encoding="utf-8"))
                 if self.news_path.exists() else [])
+        moods = []
+        try:
+            moods = [{"name": n, "description": d} for n, d in mood_index(self.moods_dir)]
+        except Exception:
+            pass
         return {
             "settings": settings,
             "news": news,
             "env_keys": self._env_status(),
             "skills": self._skills_info(),
+            "moods": moods,
         }
+
+    def read_data(self) -> dict:
+        """Datos vivos del DB del bot: memoria general, preferencias, calendario
+        y el estado de mood. Best-effort: sin DB accesible devuelve vacío."""
+        try:
+            dbmod, conn = self._db()
+        except Exception as e:
+            return {"error": f"DB no accesible: {e}", "memory": [],
+                    "preferences": [], "events": [], "mood_state": None}
+        try:
+            mood_state = None
+            raw = dbmod.kv_get(conn, "mood_state")
+            if raw:
+                try:
+                    mood_state = json.loads(raw)
+                except json.JSONDecodeError:
+                    pass
+            events = conn.execute(
+                "SELECT * FROM events "
+                "WHERE datetime(replace(event_at,'T',' ')) >= datetime('now','-3 hours','-1 day') "
+                "ORDER BY event_at ASC LIMIT 100").fetchall()
+            return {
+                "memory": dbmod.list_bot_memory(conn),
+                "preferences": dbmod.list_preferences(conn),
+                "events": [dict(r) for r in events],
+                "mood_state": mood_state,
+            }
+        finally:
+            conn.close()
+
+    def edit_memory(self, body: dict) -> list[str]:
+        dbmod, conn = self._db()
+        try:
+            if body.get("action") == "add":
+                text = (body.get("text") or "").strip()
+                if not text:
+                    return ["falta el texto"]
+                dbmod.add_bot_memory(conn, text, source="admin")
+            elif body.get("action") == "delete":
+                if not dbmod.delete_bot_memory(conn, int(body.get("id", 0))):
+                    return ["id inexistente"]
+            else:
+                return ["action inválida (add|delete)"]
+            return []
+        finally:
+            conn.close()
+
+    def edit_preferences(self, body: dict) -> list[str]:
+        dbmod, conn = self._db()
+        try:
+            if body.get("action") == "add":
+                kind = (body.get("kind") or "").strip()
+                text = (body.get("text") or "").strip()
+                if kind not in _PREF_KINDS:
+                    return ["kind inválido (like|dislike)"]
+                if not text:
+                    return ["falta el texto"]
+                if dbmod.add_preference(conn, kind, text, source="admin") is None:
+                    return ["ya existe una preferencia con ese texto"]
+            elif body.get("action") == "delete":
+                if not dbmod.delete_preference(conn, int(body.get("id", 0))):
+                    return ["id inexistente"]
+            else:
+                return ["action inválida (add|delete)"]
+            return []
+        finally:
+            conn.close()
+
+    def edit_events(self, body: dict) -> list[str]:
+        dbmod, conn = self._db()
+        try:
+            if body.get("action") == "add":
+                title = (body.get("title") or "").strip()
+                event_at = (body.get("event_at") or "").strip()
+                errs = []
+                if not title:
+                    errs.append("falta title")
+                if not _EVENT_AT_RE.match(event_at):
+                    errs.append("event_at inválido (YYYY-MM-DD o YYYY-MM-DDTHH:MM)")
+                if errs:
+                    return errs
+                handle = (body.get("handle") or "").strip().lstrip("@").lower() or None
+                if handle and not dbmod.user_exists(conn, handle):
+                    return [f"@{handle} no tiene perfil en el bot — dejá el handle "
+                            "vacío para un evento de comunidad"]
+                dbmod.create_event(
+                    conn, title=title, event_at=event_at, handle=handle,
+                    description=(body.get("description") or "").strip() or None,
+                    kind=(body.get("kind") or "other").strip() or "other",
+                    source="ui")
+            elif body.get("action") == "delete":
+                if not dbmod.delete_event(conn, int(body.get("id", 0))):
+                    return ["id inexistente"]
+            else:
+                return ["action inválida (add|delete)"]
+            return []
+        finally:
+            conn.close()
 
     def _env_status(self) -> dict[str, bool]:
         """Qué claves están seteadas. NUNCA los valores."""
@@ -317,6 +458,8 @@ def make_handler(store: ConfigStore):
                 self._send(200, UI_HTML.read_bytes(), ctype="text/html")
             elif self.path == "/api/config":
                 self._send(200, store.read_all())
+            elif self.path == "/api/data":
+                self._send(200, store.read_data())
             else:
                 self._send(404, {"error": "not found"})
 
@@ -331,6 +474,12 @@ def make_handler(store: ConfigStore):
                     errs = store.update_env(body)
                 elif self.path == "/api/skills":
                     errs = store.set_skill_enabled(body.get("name", ""), bool(body.get("enabled")))
+                elif self.path == "/api/memory":
+                    errs = store.edit_memory(body)
+                elif self.path == "/api/preferences":
+                    errs = store.edit_preferences(body)
+                elif self.path == "/api/events":
+                    errs = store.edit_events(body)
                 else:
                     self._send(404, {"error": "not found"})
                     return

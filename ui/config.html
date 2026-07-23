@@ -60,6 +60,10 @@
   <a href="#tools">Tools</a>
   <a href="#grupos">Grupos</a>
   <a href="#tareas">Tareas</a>
+  <a href="#moods">Moods</a>
+  <a href="#prefs">Gustos</a>
+  <a href="#memoria">Memoria</a>
+  <a href="#calendario">Calendario</a>
   <a href="#mcp">MCP</a>
   <a href="#noticias">Noticias</a>
   <a href="#skills">Skills</a>
@@ -113,6 +117,36 @@
   <section id="tareas"><h2>Tareas periódicas</h2><div class="card" id="c-tasks"></div>
     <button onclick="saveSettings()">Guardar</button></section>
 
+  <section id="moods"><h2>Moods (estados de ánimo)</h2>
+    <p class="hint">Registro afectivo del día: modula el tono, no reemplaza a SOUL.md. Los moods
+      se editan en <code>moods/*.md</code>. En <b>auto</b> el bot elige una vez por día y puede
+      cambiar durante el día vía la tool <code>choose_mood</code>: la <b>susceptibilidad</b> (0–1)
+      calibra cuán fácil cede (0 = nunca) y la <b>histéresis</b> es el mínimo de horas entre
+      cambios. Requiere reiniciar el bot.</p>
+    <div class="card" id="c-moods"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="prefs"><h2>Gustos y disgustos</h2>
+    <p class="hint">Identidad editable del bot, separada de SOUL.md. El <b>modo</b> gobierna qué
+      puede hacer el bot solo: <code>manual</code> = nada, <code>add_only</code> = solo agregar,
+      <code>full_auto</code> = agregar y sacar (nunca los del admin). Los cambios de la tabla son
+      <b>en vivo</b> (van directo a la DB); el modo requiere reiniciar.</p>
+    <div class="card" id="c-prefsmode"></div>
+    <button onclick="saveSettings()">Guardar modo</button>
+    <div class="card" id="c-prefs"></div></section>
+
+  <section id="memoria"><h2>Memoria general del bot</h2>
+    <p class="hint">Antes vivía en <code>context/MEMORY.md</code> (retirado): ahora es la tabla
+      <code>bot_memory</code> de la DB y se inyecta completa en cada respuesta. Cambios
+      <b>en vivo</b>.</p>
+    <div class="card" id="c-memory"></div></section>
+
+  <section id="calendario"><h2>Calendario</h2>
+    <p class="hint">Eventos de la comunidad (tabla <code>events</code>): se inyectan siempre al
+      contexto de reply y alimentan el heartbeat. Cambios <b>en vivo</b>. Handle vacío =
+      evento de comunidad.</p>
+    <div class="card" id="c-events"></div></section>
+
   <section id="mcp"><h2>Servers MCP</h2>
     <p class="hint">Conectores externos. Las tools MCP nacen scope admin (regla T29).</p>
     <div id="c-mcp"></div>
@@ -135,6 +169,8 @@ let S = null;   // settings (mutado en vivo por los inputs)
 let NEWS = [];
 let ENV_KEYS = {};
 let SKILLS = [];
+let MOODS = [];   // [{name, description}] disponibles en moods/
+let DATA = {memory: [], preferences: [], events: [], mood_state: null};  // DB en vivo
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -191,6 +227,110 @@ function render() {
     </div>`).join("");
 
   renderModels(); renderFeeds(); renderTools(); renderGroups(); renderTasks(); renderMcp(); renderNews(); renderSkills();
+  renderMoods(); renderPrefsMode(); renderData();
+}
+
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const DAY_ES = {mon:"lunes", tue:"martes", wed:"miércoles", thu:"jueves", fri:"viernes", sat:"sábado", sun:"domingo"};
+
+function renderMoods() {
+  const m = S.MOODS ?? (S.MOODS = {enabled: false, mode: "manual", manual: {fixed: "", schedule: {}}});
+  m.manual ??= {fixed: "", schedule: {}};
+  m.manual.schedule ??= {};
+  const names = ["", ...MOODS.map(x => x.name)];
+  const st = DATA.mood_state;
+  const today = st && st.mood ? `hoy: <b>${esc(st.mood)}</b>${st.reason ? ` — «${esc(st.reason)}»` : ""} <span class="hint">(${esc(st.mode ?? "")})</span>` : "hoy: sin definir";
+  let html = `<div class="row">
+    <div style="max-width:120px;padding-bottom:6px">${check(m, "enabled", "activo", false)}</div>
+    <div style="max-width:140px">${selectInput(m, "mode", "modo", ["manual", "auto"], "manual")}</div>
+    <div style="max-width:170px">${textInput(m, "susceptibility", "susceptibilidad (0–1)", "number")}</div>
+    <div style="max-width:170px">${textInput(m, "hysteresis_hours", "histéresis (horas)", "number")}</div>
+  </div>
+  <p class="hint">${m.enabled ? today : "moods apagados — tono normal"}</p>
+  <div class="row">
+    <div style="max-width:220px">${selectInput(m.manual, "fixed", "manual: mood fijo (pisa el schedule)", names, "")}</div>
+  </div>
+  <label>manual: schedule por día</label><table><tr>${WEEKDAYS.map(d => `<th>${DAY_ES[d]}</th>`).join("")}</tr><tr>`;
+  for (const d of WEEKDAYS)
+    html += `<td>${selectInput(m.manual.schedule, d, "", names, "")}</td>`;
+  html += `</tr></table>
+    <p class="hint">moods disponibles: ${MOODS.map(x => `<code>${esc(x.name)}</code>`).join(" ") || "(no hay .md en moods/)"}</p>`;
+  $("c-moods").innerHTML = html;
+}
+
+function renderPrefsMode() {
+  const p = S.PREFS ?? (S.PREFS = {mode: "manual"});
+  $("c-prefsmode").innerHTML = `<div style="max-width:220px">
+    ${selectInput(p, "mode", "modo (qué puede hacer el bot)", ["manual", "add_only", "full_auto"], "manual")}</div>`;
+}
+
+function renderData() {
+  const prefs = DATA.preferences ?? [];
+  const rows = (kind) => prefs.filter(p => p.kind === kind).map(p =>
+    `<tr><td>${esc(p.text)}</td><td class="hint">${esc(p.source ?? "")}</td>
+     <td><button class="danger" onclick="delData('/api/preferences',${p.id})">borrar</button></td></tr>`).join("");
+  $("c-prefs").innerHTML = `
+    <b>Le gusta</b><table>${rows("like") || "<tr><td class='hint'>nada anotado</td></tr>"}</table>
+    <b style="display:block;margin-top:10px">No le gusta</b>
+    <table>${rows("dislike") || "<tr><td class='hint'>nada anotado</td></tr>"}</table>
+    <div class="row" style="margin-top:10px">
+      <div style="max-width:140px"><label>tipo<select id="pref-kind"><option value="like">gusto</option><option value="dislike">disgusto</option></select></label></div>
+      <div><label>texto<input id="pref-text" type="text" placeholder="los panchos"></label></div>
+      <div style="max-width:110px"><button onclick="addPref()">+ agregar</button></div></div>`;
+
+  const mem = DATA.memory ?? [];
+  $("c-memory").innerHTML = `<table>${mem.map(r =>
+    `<tr><td class="hint" style="white-space:nowrap">${esc((r.created_at ?? "").slice(0, 10))}</td>
+     <td>${esc(r.text)}</td><td class="hint">${esc(r.source ?? "")}</td>
+     <td><button class="danger" onclick="delData('/api/memory',${r.id})">borrar</button></td></tr>`).join("")
+    || "<tr><td class='hint'>memoria vacía</td></tr>"}</table>
+    <div class="row" style="margin-top:10px">
+      <div><label>nueva entrada<input id="mem-text" type="text" placeholder="directiva o dato que el bot debe recordar siempre"></label></div>
+      <div style="max-width:110px"><button onclick="addMem()">+ agregar</button></div></div>`;
+
+  const evs = DATA.events ?? [];
+  $("c-events").innerHTML = `<table><tr><th>fecha</th><th>título</th><th>tipo</th><th>de</th><th></th></tr>
+    ${evs.map(e => `<tr><td style="white-space:nowrap">${esc(e.event_at)}</td>
+      <td>${esc(e.title)}${e.description ? ` <span class="hint">— ${esc(e.description)}</span>` : ""}</td>
+      <td>${esc(e.kind)}${e.kind === "bot_action" && e.done ? ' <span class="badge on">hecha</span>' : ""}</td>
+      <td>${e.handle ? "@" + esc(e.handle) : "<span class='hint'>comunidad</span>"}</td>
+      <td><button class="danger" onclick="delData('/api/events',${e.id})">borrar</button></td></tr>`).join("")
+      || "<tr><td class='hint'>sin eventos próximos</td></tr>"}</table>
+    <div class="row" style="margin-top:10px">
+      <div><label>título<input id="ev-title" type="text"></label></div>
+      <div style="max-width:190px"><label>fecha (YYYY-MM-DD[THH:MM])<input id="ev-at" type="text" placeholder="2026-08-01T21:00"></label></div>
+      <div style="max-width:140px"><label>tipo<select id="ev-kind">${["other", "birthday", "meetup", "reminder", "bot_action"].map(k => `<option>${k}</option>`).join("")}</select></label></div>
+      <div style="max-width:170px"><label>handle (vacío = comunidad)<input id="ev-handle" type="text"></label></div>
+    </div>
+    <div class="row"><div><label>descripción<input id="ev-desc" type="text"></label></div>
+      <div style="max-width:110px"><button onclick="addEvent()">+ agendar</button></div></div>`;
+}
+
+async function loadData() {
+  try {
+    DATA = await api("/api/data");
+    if (DATA.error) toast(DATA.error, false);
+  } catch (e) { toast("datos del DB no disponibles: " + e.message, false); }
+}
+async function dataAction(path, body) {
+  try { await api(path, body); await loadData(); render(); toast("hecho ✓ (en vivo)"); }
+  catch (e) { toast(e.message, false); }
+}
+function delData(path, id) { dataAction(path, {action: "delete", id}); }
+function addPref() {
+  const text = $("pref-text").value.trim();
+  if (!text) return toast("falta el texto", false);
+  dataAction("/api/preferences", {action: "add", kind: $("pref-kind").value, text});
+}
+function addMem() {
+  const text = $("mem-text").value.trim();
+  if (!text) return toast("falta el texto", false);
+  dataAction("/api/memory", {action: "add", text});
+}
+function addEvent() {
+  dataAction("/api/events", {action: "add", title: $("ev-title").value.trim(),
+    event_at: $("ev-at").value.trim(), kind: $("ev-kind").value,
+    handle: $("ev-handle").value.trim(), description: $("ev-desc").value.trim()});
 }
 
 function renderBudget() {
@@ -389,6 +529,8 @@ async function saveEnv() {
 async function load() {
   const data = await api("/api/config");
   S = data.settings; NEWS = data.news; ENV_KEYS = data.env_keys; SKILLS = data.skills;
+  MOODS = data.moods ?? [];
+  await loadData();
   render();
 }
 load().catch(e => toast("no pude cargar la config: " + e.message, false));

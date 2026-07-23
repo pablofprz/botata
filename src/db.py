@@ -128,6 +128,30 @@ CREATE TABLE IF NOT EXISTS interactions (
 );
 CREATE INDEX IF NOT EXISTS idx_interactions_handle ON interactions(handle, created_at);
 
+-- ─── bot_memory: memoria general del bot (reemplaza context/MEMORY.md) ──
+-- Hechos de comunidad, directivas del admin y contexto de mundo que el bot
+-- carga SIEMPRE (completa, sin retrieval — es chica y transversal). Antes
+-- vivía en un archivo de texto (context/MEMORY.md), retirado: la DB es el
+-- source of truth único.
+CREATE TABLE IF NOT EXISTS bot_memory (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    text       TEXT NOT NULL,
+    source     TEXT,                            -- 'admin'|'tool:@handle'|'migration:MEMORY.md'
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ─── preferences: gustos y disgustos del bot ─────────────────────────
+-- Capa de identidad EDITABLE (a diferencia de SOUL.md): el admin siempre
+-- puede tocarla (tools admin + UI); el bot según PREFS.mode (manual |
+-- add_only | full_auto). Se inyecta completa en los prompts outward.
+CREATE TABLE IF NOT EXISTS preferences (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL CHECK (kind IN ('like','dislike')),
+    text       TEXT NOT NULL,
+    source     TEXT,                            -- 'admin' | 'bot'
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ─── replied_posts: idempotencia de procesamiento (entrada) ─────────
 -- (preexistente en botata.py — se preserva tal cual)
 CREATE TABLE IF NOT EXISTS replied_posts (
@@ -894,6 +918,83 @@ def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
         (key, value),
     )
     conn.commit()
+
+
+def _norm_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def add_bot_memory(conn: sqlite3.Connection, text: str, *,
+                   source: str | None = None,
+                   created_at: str | None = None) -> int | None:
+    """Agrega una entrada a la memoria general del bot. Devuelve su id,
+    o None si ya existía una entrada con el mismo texto normalizado (dedup)."""
+    norm = _norm_text(text)
+    for row in conn.execute("SELECT id, text FROM bot_memory").fetchall():
+        if _norm_text(row["text"]) == norm:
+            return None
+    if created_at:
+        cur = conn.execute(
+            "INSERT INTO bot_memory (text, source, created_at) VALUES (?, ?, ?)",
+            (text, source, created_at))
+    else:
+        cur = conn.execute(
+            "INSERT INTO bot_memory (text, source) VALUES (?, ?)", (text, source))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_bot_memory(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
+    """Memoria general del bot, cronológica (más vieja primero — lectura natural)."""
+    rows = conn.execute(
+        "SELECT * FROM bot_memory ORDER BY created_at ASC, id ASC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_bot_memory(conn: sqlite3.Connection, mem_id: int) -> bool:
+    cur = conn.execute("DELETE FROM bot_memory WHERE id = ?", (mem_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def add_preference(conn: sqlite3.Connection, kind: str, text: str, *,
+                   source: str = "bot") -> int | None:
+    """Agrega un gusto/disgusto. Devuelve su id, o None si ya existía uno
+    equivalente (dedup por texto normalizado, cross-kind: un mismo texto no
+    puede ser gusto Y disgusto a la vez)."""
+    if kind not in ("like", "dislike"):
+        raise ValueError(f"kind inválido: {kind!r} (like|dislike)")
+    norm = _norm_text(text)
+    for row in conn.execute("SELECT text FROM preferences").fetchall():
+        if _norm_text(row["text"]) == norm:
+            return None
+    cur = conn.execute(
+        "INSERT INTO preferences (kind, text, source) VALUES (?, ?, ?)",
+        (kind, text, source))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_preferences(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM preferences ORDER BY kind, created_at ASC, id ASC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def find_preference(conn: sqlite3.Connection, text: str) -> dict | None:
+    """Busca una preferencia por texto normalizado (para remove por texto)."""
+    norm = _norm_text(text)
+    for row in conn.execute("SELECT * FROM preferences").fetchall():
+        if _norm_text(row["text"]) == norm:
+            return dict(row)
+    return None
+
+
+def delete_preference(conn: sqlite3.Connection, pref_id: int) -> bool:
+    cur = conn.execute("DELETE FROM preferences WHERE id = ?", (pref_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def due_bot_actions(conn: sqlite3.Connection, *, now: str | None = None) -> list[dict]:

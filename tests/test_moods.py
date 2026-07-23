@@ -149,3 +149,93 @@ def test_run_mood_pass_noop_when_manual(conn, monkeypatch):
     _fake_rolellm(monkeypatch, "gloomy", "x")
     b.run_mood_pass(None, conn, force=True)
     assert d.kv_get(conn, "mood_state") is None
+
+
+# ─── choose_mood: cambio de mood DENTRO del día (tool) ────────────────────────
+
+from tools import ToolContext  # noqa: E402
+
+
+def _ctx(conn, handle="user.test"):
+    return ToolContext(state={"author_handle": handle}, conn=conn)
+
+
+@pytest.fixture()
+def admin_de_test(monkeypatch):
+    monkeypatch.setattr(b, "ADMIN_HANDLES", frozenset({"admin.test"}))
+
+
+def test_choose_mood_cambia_y_persiste(conn, admin_de_test):
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "susceptibility": 1.0}
+    res = b._tool_choose_mood({"mood": "upbeat", "reason": "me pasaron memes"}, _ctx(conn))
+    assert "upbeat" in res.text
+    st = json.loads(d.kv_get(conn, "mood_state"))
+    assert st["mood"] == "upbeat" and st["mode"] == "reactive" and st["changed_at"]
+    assert b.current_mood(conn).name == "upbeat"
+
+
+def test_choose_mood_histeresis_bloquea(conn, admin_de_test):
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto",
+                      "susceptibility": 1.0, "hysteresis_hours": 2}
+    b._tool_choose_mood({"mood": "angry", "reason": "me putearon"}, _ctx(conn))
+    res = b._tool_choose_mood({"mood": "upbeat", "reason": "ya fue"}, _ctx(conn))
+    assert "hace poco" in res.text
+    assert json.loads(d.kv_get(conn, "mood_state"))["mood"] == "angry"
+
+
+def test_choose_mood_admin_bypasea_histeresis(conn, admin_de_test):
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto",
+                      "susceptibility": 1.0, "hysteresis_hours": 24}
+    b._tool_choose_mood({"mood": "angry", "reason": "x"}, _ctx(conn))
+    res = b._tool_choose_mood({"mood": "chill", "reason": "orden"}, _ctx(conn, "admin.test"))
+    assert "chill" in res.text
+    st = json.loads(d.kv_get(conn, "mood_state"))
+    assert st["mood"] == "chill" and st["mode"] == "admin"
+
+
+def test_choose_mood_susceptibilidad_cero(conn, admin_de_test):
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "susceptibility": 0}
+    res = b._tool_choose_mood({"mood": "upbeat", "reason": "x"}, _ctx(conn))
+    assert d.kv_get(conn, "mood_state") is None and "susceptibility" in res.text
+
+
+def test_choose_mood_apagado_o_manual(conn, admin_de_test):
+    b.MOODS_CONFIG = {"enabled": False}
+    assert "apagados" in b._tool_choose_mood({"mood": "upbeat", "reason": "x"}, _ctx(conn)).text
+    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"fixed": "upbeat"}}
+    assert "manual" in b._tool_choose_mood({"mood": "gloomy", "reason": "x"}, _ctx(conn)).text
+    assert d.kv_get(conn, "mood_state") is None
+
+
+def test_choose_mood_name_desconocido(conn, admin_de_test):
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "susceptibility": 1.0}
+    res = b._tool_choose_mood({"mood": "no-existe", "reason": "x"}, _ctx(conn))
+    assert "no conozco" in res.text and "upbeat" in res.text  # lista los disponibles
+    assert d.kv_get(conn, "mood_state") is None
+
+
+def test_choose_mood_scopes_segun_config(monkeypatch):
+    from tools import Scope
+    monkeypatch.setattr(b, "MOODS_CONFIG",
+                        {"enabled": True, "mode": "auto", "susceptibility": 0.5})
+    reg = b.build_tool_registry()
+    assert Scope.REPLY in reg.get("choose_mood").scopes
+    monkeypatch.setattr(b, "MOODS_CONFIG",
+                        {"enabled": True, "mode": "auto", "susceptibility": 0})
+    reg = b.build_tool_registry()
+    assert reg.get("choose_mood").scopes == {Scope.ADMIN}
+
+
+def test_pref_tools_scopes_segun_modo(monkeypatch):
+    from tools import Scope
+    monkeypatch.setattr(b, "PREFS_MODE", "manual")
+    reg = b.build_tool_registry()
+    assert reg.get("add_preference").scopes == {Scope.ADMIN}
+    assert reg.get("remove_preference").scopes == {Scope.ADMIN}
+    monkeypatch.setattr(b, "PREFS_MODE", "add_only")
+    reg = b.build_tool_registry()
+    assert Scope.REPLY in reg.get("add_preference").scopes
+    assert reg.get("remove_preference").scopes == {Scope.ADMIN}
+    monkeypatch.setattr(b, "PREFS_MODE", "full_auto")
+    reg = b.build_tool_registry()
+    assert Scope.REPLY in reg.get("remove_preference").scopes

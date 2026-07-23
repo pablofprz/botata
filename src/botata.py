@@ -191,9 +191,20 @@ NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 READ_THREAD_MEDIA : bool = bool(settings.get("READ_THREAD_MEDIA", True))
 
 # Estados de ánimo (moods): un registro afectivo que tiñe el tono del bot por día.
-# {enabled, mode: manual|auto, manual: {fixed, schedule}}. Los moods en sí viven en
-# moods/*.md (markdown). Off por default = comportamiento normal. Ver moods/README.md.
+# {enabled, mode: manual|auto, manual: {fixed, schedule}, susceptibility,
+# hysteresis_hours}. En modo auto el bot además puede CAMBIAR de mood dentro del
+# día vía la tool choose_mood: susceptibility (0–1) calibra cuán fácil cede (0 =
+# la tool ni se ofrece) y hysteresis_hours es el mínimo entre cambios (anti-
+# oscilación). Los moods en sí viven en moods/*.md. Off por default. README de moods/.
 MOODS_CONFIG : dict = settings.get("MOODS", {})
+
+# Gustos y disgustos del bot (tabla preferences): capa de identidad EDITABLE,
+# separada de SOUL.md a propósito. PREFS.mode gobierna qué puede hacer el BOT
+# solo (el admin siempre puede todo, por tools admin o UI):
+#   manual (default) = el bot no toca nada · add_only = puede agregar, no sacar
+#   · full_auto = agrega y saca (pero jamás los source='admin').
+PREFS_CONFIG : dict = settings.get("PREFS", {})
+PREFS_MODE   : str  = str(PREFS_CONFIG.get("mode", "manual")).lower()
 
 # Quién puede agendarle ACCIONES al bot (eventos kind='bot_action': "posteá X a
 # tal hora"). 'admin' (default) = solo el admin; 'any' = cualquier usuario.
@@ -232,7 +243,42 @@ _LEGACY_MODELS = {
 
 def init_db() -> sqlite3.Connection:
     """Conexión a botata.db con sqlite-vec cargado y esquema completo (delegado a dbmod)."""
-    return dbmod.init_db(DB_PATH)
+    conn = dbmod.init_db(DB_PATH)
+    _migrate_memory_file(conn)
+    return conn
+
+
+def _migrate_memory_file(conn: sqlite3.Connection) -> None:
+    """One-shot: ingiere el viejo context/MEMORY.md a la tabla bot_memory.
+
+    MEMORY.md queda RETIRADO como fuente (la DB es el source of truth único);
+    el archivo no se borra pero ya nadie lo lee. Guard por kv para no
+    re-ingestar. Formato del archivo: headers `## YYYY-MM-DD` + bullets `- …`
+    (la fecha del header se preserva como created_at)."""
+    if dbmod.kv_get(conn, "memory_file_migrated"):
+        return
+    try:
+        raw = load_text(MEMORY_PATH)
+        n, current_date = 0, None
+        for line in raw.splitlines():
+            line = line.strip()
+            m = re.match(r"^#{1,6}\s*(\d{4}-\d{2}-\d{2})\s*$", line)
+            if m:
+                current_date = m.group(1)
+                continue
+            if line.startswith(("- ", "* ")):
+                text = line[2:].strip()
+                if text and dbmod.add_bot_memory(
+                        conn, text, source="migration:MEMORY.md",
+                        created_at=current_date) is not None:
+                    n += 1
+        dbmod.kv_set(conn, "memory_file_migrated", now_ar().isoformat())
+        if n:
+            log.info("bot_memory: migradas %d entradas de context/MEMORY.md (archivo retirado)", n)
+    except Exception:
+        # best-effort: un archivo roto no debe impedir arrancar; se reintenta
+        # el próximo arranque (el kv solo se setea si la pasada terminó).
+        log.warning("no pude migrar context/MEMORY.md a bot_memory", exc_info=True)
 
 
 def has_replied(conn: sqlite3.Connection, uri: str) -> bool:
@@ -1521,6 +1567,8 @@ class ReflectDecideNode:
             soul,
             f"\n---\n{current_datetime_line()}",
             mood_line(self.conn),
+            memory_block(self.conn),
+            prefs_block(self.conn),
             f"\n---\n{reflect}" if reflect else "",
             f"\n---\n{guidance}",
         ]
@@ -2010,6 +2058,7 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
 
     soul = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
     parts = [soul, f"\n---\n{current_datetime_line()}", mood_line(conn),
+             memory_block(conn), prefs_block(conn),
              f"\n---\n{load_text(PROMPTS_DIR / 'heartbeat_engine.md')}"]
     skills_block = skills_prompt_block(SKILLS_DIR, Scope.FEED_REFLECTION)
     if skills_block:
@@ -2257,6 +2306,65 @@ def mood_line(conn: sqlite3.Connection) -> str:
     return f"\n---\n{moodmod.mood_prompt_block(mood)}" if mood else ""
 
 
+# ---------------------------------------------------------------------------
+# Bloques de contexto desde la DB (memoria general, gustos, calendario)
+# Best-effort: devuelven "" ante cualquier falla — jamás bloquean la generación.
+# ---------------------------------------------------------------------------
+
+def memory_block(conn: sqlite3.Connection) -> str:
+    """Memoria general del bot (tabla bot_memory), completa. Reemplaza al viejo
+    context/MEMORY.md: mismas entradas, pero con la DB como source of truth."""
+    try:
+        rows = dbmod.list_bot_memory(conn)
+    except Exception:
+        log.debug("memory_block falló", exc_info=True)
+        return ""
+    if not rows:
+        return ""
+    lines = "\n".join(f"- [{r['created_at'][:10]}] {r['text']}" for r in rows)
+    return f"\n---\nTu memoria general (las fechas son de cuándo lo anotaste):\n{lines}"
+
+
+def prefs_block(conn: sqlite3.Connection) -> str:
+    """Gustos y disgustos del bot (tabla preferences)."""
+    try:
+        rows = dbmod.list_preferences(conn)
+    except Exception:
+        log.debug("prefs_block falló", exc_info=True)
+        return ""
+    likes    = [r["text"] for r in rows if r["kind"] == "like"]
+    dislikes = [r["text"] for r in rows if r["kind"] == "dislike"]
+    if not likes and not dislikes:
+        return ""
+    parts = ["\n---\nTus gustos y disgustos:"]
+    if likes:
+        parts.append("Te gusta:\n" + "\n".join(f"- {t}" for t in likes))
+    if dislikes:
+        parts.append("No te gusta:\n" + "\n".join(f"- {t}" for t in dislikes))
+    return "\n".join(parts)
+
+
+def calendar_block(conn: sqlite3.Connection, *, handle: str | None = None,
+                   limit: int = 8) -> str:
+    """Eventos de hoy y próximos, para que el bot tenga percepción temporal en
+    cada reply (no depende de que el modelo llame get_upcoming_events). Excluye
+    kind='bot_action': esas son órdenes del heartbeat, no contexto."""
+    try:
+        events = dbmod.upcoming_events(conn, limit=limit + 4, handle=handle)
+    except Exception:
+        log.debug("calendar_block falló", exc_info=True)
+        return ""
+    events = [e for e in events if e.get("kind") != "bot_action"][:limit]
+    if not events:
+        return ""
+    def _fmt(e: dict) -> str:
+        who  = f" (de @{e['handle']})" if e.get("handle") else ""
+        desc = f" — {e['description']}" if e.get("description") else ""
+        return f"- [{e['event_at']}] {e['title']}{who}{desc}"
+    return ("\n---\nCalendario (hoy y próximos eventos agendados):\n"
+            + "\n".join(_fmt(e) for e in events))
+
+
 def run_mood_pass(router: ModelRouter, conn: sqlite3.Connection, *,
                   activity_limit: int = 10, climate_limit: int = 20,
                   force: bool = False) -> None:
@@ -2303,7 +2411,8 @@ def run_mood_pass(router: ModelRouter, conn: sqlite3.Connection, *,
         log.warning("mood: el modelo eligió %r (inexistente) — uso %r", decision.mood, index[0][0])
         chosen = moodmod.get_mood(MOODS_DIR, index[0][0])
     dbmod.kv_set(conn, "mood_state", json.dumps(
-        {"date": today, "mood": chosen.name, "reason": decision.reason, "mode": "auto"}))
+        {"date": today, "mood": chosen.name, "reason": decision.reason,
+         "mode": "auto", "changed_at": now_ar().isoformat()}))
     log.info("mood: hoy el bot está %s — %s", chosen.name, decision.reason)
 
 
@@ -2341,7 +2450,8 @@ def run_public_reflection_pass(bsky: "BskyClient", router: ModelRouter,
 
     soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
     prompt = load_text(PROMPTS_DIR / "public_reflection_prompt.md")
-    parts  = [soul, f"\n---\n{current_datetime_line()}", mood_line(conn), f"\n---\n{prompt}"]
+    parts  = [soul, f"\n---\n{current_datetime_line()}", mood_line(conn),
+              memory_block(conn), prefs_block(conn), f"\n---\n{prompt}"]
     if lessons:
         parts.append("\n---\nLecciones que destilaste últimamente:\n"
                      + "\n".join(f"- {t}" for t in lessons))
@@ -2430,7 +2540,8 @@ def run_playlist_share_pass(bsky: "BskyClient", router: ModelRouter,
         soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
         prompt = load_text(PROMPTS_DIR / "playlist_share_prompt.md")
         system = "\n".join(p for p in [
-            soul, f"\n---\n{current_datetime_line()}", mood_line(conn), f"\n---\n{prompt}",
+            soul, f"\n---\n{current_datetime_line()}", mood_line(conn), prefs_block(conn),
+            f"\n---\n{prompt}",
             "\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md")] if p)
         user = f"El tema que te tocó compartir: {label}\nLink: {track['url']}"
         try:
@@ -2479,14 +2590,98 @@ def _tool_save_to_user_profile(args: dict, ctx: ToolContext) -> ToolResult:
 
 
 def _tool_save_to_memory(args: dict, ctx: ToolContext) -> ToolResult:
-    content   = args["content"]
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    existing  = load_text(MEMORY_PATH)
-    updated   = existing.rstrip() + f"\n\n## {timestamp}\n- {content}\n"
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MEMORY_PATH.write_text(updated, encoding="utf-8")
-    log.info("/remember → MEMORY.md: %s", content)
+    content = args["content"]
+    who     = (ctx.state or {}).get("author_handle") or "?"
+    mem_id  = dbmod.add_bot_memory(ctx.conn, content, source=f"tool:@{who}")
+    if mem_id is None:
+        return ToolResult(text=f"eso ya lo tenía anotado: {content}")
+    log.info("/remember → bot_memory: %s", content)
     return ToolResult(text=f"anotado en mi memoria: {content}")
+
+
+def _mood_susceptibility() -> float:
+    """Susceptibilidad 0–1 de MOODS.susceptibility (default 0.5), clampeada."""
+    try:
+        s = float(MOODS_CONFIG.get("susceptibility", 0.5))
+    except (TypeError, ValueError):
+        s = 0.5
+    return min(1.0, max(0.0, s))
+
+
+def _mood_hysteresis_hours() -> float:
+    try:
+        h = float(MOODS_CONFIG.get("hysteresis_hours", 2))
+    except (TypeError, ValueError):
+        h = 2.0
+    return max(0.0, h)
+
+
+def _tool_choose_mood(args: dict, ctx: ToolContext) -> ToolResult:
+    """Cambia el mood VIGENTE (estado persistido, tiñe todo lo que sigue) — no
+    un tono efímero de esta respuesta. El admin bypassea susceptibilidad e
+    histéresis; el bot solo puede en modo auto."""
+    name   = (args.get("mood") or "").strip().lower()
+    reason = (args.get("reason") or "").strip() or "sin razón declarada"
+    admin  = is_admin_handle((ctx.state or {}).get("author_handle"))
+    cfg    = MOODS_CONFIG
+    if not cfg.get("enabled"):
+        return ToolResult(text="los moods están apagados (MOODS.enabled=false); no hay mood que cambiar.")
+    if str(cfg.get("mode", "manual")).lower() != "auto":
+        return ToolResult(text="el mood está en modo manual (lo fija el admin por config); no puedo cambiarlo solo.")
+    if not admin and _mood_susceptibility() <= 0:
+        return ToolResult(text="con susceptibility=0 mi humor no se mueve; sigo como estaba.")
+    st = _mood_state_get(ctx.conn) or {}
+    if not admin and st.get("changed_at"):
+        try:
+            elapsed_h = (now_ar() - datetime.fromisoformat(st["changed_at"])).total_seconds() / 3600
+            if elapsed_h < _mood_hysteresis_hours():
+                return ToolResult(text=f"cambié de humor hace poco (estoy {st.get('mood')}); "
+                                       "todavía no me muevo de ahí.")
+        except (TypeError, ValueError):
+            pass
+    chosen = moodmod.get_mood(MOODS_DIR, name)
+    if not chosen:
+        options = ", ".join(n for n, _ in moodmod.mood_index(MOODS_DIR))
+        return ToolResult(text=f"no conozco el mood '{name}'. Disponibles: {options}")
+    dbmod.kv_set(ctx.conn, "mood_state", json.dumps({
+        "date": now_ar().date().isoformat(), "mood": chosen.name, "reason": reason,
+        "mode": "admin" if admin else "reactive", "changed_at": now_ar().isoformat()}))
+    log.info("mood: cambio %s → %s (%s) — %s",
+             st.get("mood") or "(ninguno)", chosen.name, "admin" if admin else "reactivo", reason)
+    return ToolResult(text=f"listo: ahora estoy {chosen.name} ({reason}).")
+
+
+def _tool_add_preference(args: dict, ctx: ToolContext) -> ToolResult:
+    kind  = (args.get("kind") or "").strip().lower()
+    text  = (args.get("text") or "").strip()
+    admin = is_admin_handle((ctx.state or {}).get("author_handle"))
+    if kind not in ("like", "dislike"):
+        return ToolResult(text="kind inválido: usá 'like' o 'dislike'.")
+    if not text:
+        return ToolResult(text="falta el texto de la preferencia.")
+    if not admin and PREFS_MODE == "manual":
+        return ToolResult(text="mis gustos están en modo manual: solo el admin los toca.")
+    pid = dbmod.add_preference(ctx.conn, kind, text, source="admin" if admin else "bot")
+    if pid is None:
+        return ToolResult(text=f"eso ya estaba entre mis preferencias: {text}")
+    verbo = "me gusta" if kind == "like" else "no me gusta"
+    log.info("preferences: +%s %r (source=%s)", kind, text, "admin" if admin else "bot")
+    return ToolResult(text=f"anotado: {verbo} {text}.")
+
+
+def _tool_remove_preference(args: dict, ctx: ToolContext) -> ToolResult:
+    text  = (args.get("text") or "").strip()
+    admin = is_admin_handle((ctx.state or {}).get("author_handle"))
+    if not admin and PREFS_MODE != "full_auto":
+        return ToolResult(text="no puedo sacar gustos en este modo (PREFS.mode); solo el admin puede.")
+    pref = dbmod.find_preference(ctx.conn, text)
+    if pref is None:
+        return ToolResult(text=f"no tenía anotado '{text}' entre mis preferencias.")
+    if not admin and pref.get("source") == "admin":
+        return ToolResult(text=f"'{pref['text']}' lo definió el admin — no lo puedo sacar yo.")
+    dbmod.delete_preference(ctx.conn, pref["id"])
+    log.info("preferences: -%s %r", pref["kind"], pref["text"])
+    return ToolResult(text=f"listo, saqué '{pref['text']}' de mis preferencias.")
 
 
 def _tool_get_debug_info(args: dict, ctx: ToolContext) -> ToolResult:
@@ -3142,7 +3337,7 @@ def build_tool_registry(config: dict | None = None, *,
     )
     reg.register(
         "save_to_memory",
-        "Save a general fact to the bot's own MEMORY.md. "
+        "Save a general fact to the bot's own memory (always loaded into context). "
         "Use for community context, standing instructions for the bot, or world-facts.",
         {
             "type": "object",
@@ -3153,6 +3348,80 @@ def build_tool_registry(config: dict | None = None, *,
         },
         _tool_save_to_memory,
         {Scope.ADMIN},
+    )
+
+    # choose_mood: solo se le ofrece al BOT (scopes reply/feed_reflection) si los
+    # moods están en auto con susceptibility > 0 — la config requiere reinicio,
+    # igual que toda la sección MOODS, así que decidir los scopes acá es correcto.
+    # El admin la tiene siempre (control desde Bluesky, bypassea los guards).
+    s = _mood_susceptibility()
+    mood_scopes = {Scope.ADMIN}
+    if (MOODS_CONFIG.get("enabled")
+            and str(MOODS_CONFIG.get("mode", "manual")).lower() == "auto" and s > 0):
+        mood_scopes |= {Scope.REPLY, Scope.FEED_REFLECTION}
+    if s >= 0.7:
+        mood_hint = ("Cambiá de humor cuando la conversación te mueva: si te alegran, "
+                     "te hacen reír, te insultan o te conmueven, reaccioná.")
+    elif s >= 0.3:
+        mood_hint = ("Cambiá de humor solo si algo te afecta de verdad (te levantan el "
+                     "ánimo cuando estabas mal, te maltratan seguido) — no por cualquier cosa.")
+    else:
+        mood_hint = ("Cambiá de humor SOLO ante algo muy fuerte (agresión seria, gesto "
+                     "excepcional). Casi siempre la respuesta correcta es NO usar esta tool.")
+    reg.register(
+        "choose_mood",
+        "Cambia tu estado de ánimo VIGENTE (persiste y tiñe todo lo que sigas "
+        "posteando, no solo esta respuesta). " + mood_hint,
+        {
+            "type": "object",
+            "properties": {
+                "mood":   {"type": "string", "description": "El name EXACTO de uno de tus moods disponibles (los ves en tu system prompt)."},
+                "reason": {"type": "string", "description": "Por qué cambiás de humor, en una frase."},
+            },
+            "required": ["mood", "reason"],
+        },
+        _tool_choose_mood,
+        mood_scopes,
+    )
+
+    # Preferencias (gustos/disgustos): el admin siempre puede; el bot según
+    # PREFS.mode (manual = ni se le ofrecen, add_only = solo agregar,
+    # full_auto = agregar y sacar — nunca las source='admin').
+    add_pref_scopes = {Scope.ADMIN}
+    rm_pref_scopes  = {Scope.ADMIN}
+    if PREFS_MODE in ("add_only", "full_auto"):
+        add_pref_scopes |= {Scope.REPLY, Scope.FEED_REFLECTION}
+    if PREFS_MODE == "full_auto":
+        rm_pref_scopes |= {Scope.REPLY, Scope.FEED_REFLECTION}
+    reg.register(
+        "add_preference",
+        "Anotá un gusto (kind='like') o disgusto (kind='dislike') TUYO, del bot — "
+        "algo que descubriste que te gusta o no. Es identidad duradera, no una "
+        "opinión pasajera: usala solo cuando algo realmente se vuelve parte tuya.",
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "description": "'like' o 'dislike'."},
+                "text": {"type": "string", "description": "La preferencia, corta y concreta (ej. 'los panchos', 'que me traten de usted')."},
+            },
+            "required": ["kind", "text"],
+        },
+        _tool_add_preference,
+        add_pref_scopes,
+    )
+    reg.register(
+        "remove_preference",
+        "Sacá un gusto o disgusto tuyo que ya no va (aparecen en tu system prompt). "
+        "Los que definió el admin no se pueden sacar.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "El texto EXACTO de la preferencia a sacar."},
+            },
+            "required": ["text"],
+        },
+        _tool_remove_preference,
+        rm_pref_scopes,
     )
     reg.register(
         "get_debug_info",
@@ -3412,16 +3681,28 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             for f in FEEDS_CONFIG))
         lines.append(f"noticias (NEWS_ENABLED): {'on' if NEWS_ENABLED else 'off'}")
         if MOODS_CONFIG.get("enabled"):
-            mode = str(MOODS_CONFIG.get("mode", "manual")).lower()
-            m = current_mood(ctx.conn)
-            extra = ""
-            if mode == "auto":
-                st = _mood_state_get(ctx.conn)
-                if st and st.get("reason"):
-                    extra = f" — «{st['reason'][:100]}»"
-            lines.append(f"mood: {mode}, hoy {(m.name if m else 'sin definir')}{extra}")
+            try:
+                mode = str(MOODS_CONFIG.get("mode", "manual")).lower()
+                m = current_mood(ctx.conn)
+                extra = ""
+                if mode == "auto":
+                    st = _mood_state_get(ctx.conn)
+                    if st and st.get("reason"):
+                        extra = f" — «{st['reason'][:100]}»"
+                sus = f", susceptibilidad {_mood_susceptibility():.1f}" if mode == "auto" else ""
+                lines.append(f"mood: {mode}, hoy {(m.name if m else 'sin definir')}{extra}{sus}")
+            except Exception:
+                lines.append("mood: (estado no disponible)")
         else:
             lines.append("mood: off (tono normal)")
+        try:
+            prefs = dbmod.list_preferences(ctx.conn)
+            n_like = sum(1 for p in prefs if p["kind"] == "like")
+            lines.append(f"preferencias: modo {PREFS_MODE} — {n_like} gustos, "
+                         f"{len(prefs) - n_like} disgustos")
+            lines.append(f"memoria general: {len(dbmod.list_bot_memory(ctx.conn))} entradas (en DB)")
+        except Exception:
+            pass
         if BUDGET_CONFIG.get("enabled"):
             lines.append(f"budget diario: ${float(BUDGET_CONFIG.get('daily_usd', 1.0)):.2f} "
                          f"(announce={'on' if BUDGET_CONFIG.get('announce', True) else 'off'})")
@@ -3814,9 +4095,32 @@ class GenerateReplyNode:
         self.conn     = conn
         self.registry = registry
 
+    def _other_participants_facts(self, thread: str, *, author: str, query: str,
+                                  max_users: int = 3, k: int = 3) -> str:
+        """Facts de los demás participantes del hilo (excluye autor y bot).
+        Barato: una hybrid_search local por participante, sin LLM. Best-effort."""
+        if not thread:
+            return ""
+        try:
+            others = [h for h in _thread_participants(thread)
+                      if h not in (author, BSKY_HANDLE)][:max_users]
+            sections = []
+            for other in others:
+                if not dbmod.user_exists(self.conn, other):
+                    continue
+                ofacts = dbmod.hybrid_search_user_facts(self.conn, other, query, k=k)
+                if ofacts:
+                    sections.append(f"@{other}:\n" + "\n".join(f"- {t}" for _, t in ofacts))
+            if not sections:
+                return ""
+            return ("\n---\nHechos que sabés de otros participantes del hilo:\n"
+                    + "\n".join(sections))
+        except Exception:
+            log.debug("other_participants_facts falló", exc_info=True)
+            return ""
+
     def run(self, state: MentionState) -> dict:
         soul   = load_text(CONTEXT_DIR / "SOUL.md") or load_text(PROMPTS_DIR / "SOUL.md")
-        memory = load_text(MEMORY_PATH)
         handle = state["author_handle"]
 
         thread  = state.get("thread_context", "")
@@ -3831,14 +4135,21 @@ class GenerateReplyNode:
         mood = mood_line(self.conn)
         if mood:
             parts.append(mood)
-        if memory:
-            parts.append(f"\n---\nTu memoria general:\n{memory}")
+        for block in (memory_block(self.conn), prefs_block(self.conn),
+                      calendar_block(self.conn, handle=handle)):
+            if block:
+                parts.append(block)
         if facts:
             parts.append("\n---\nHechos que sabés del usuario:\n" + "\n".join(f"- {t}" for _, t in facts))
         if recent:
             parts.append(
                 "\n---\nTus últimas conversaciones con este usuario (de más nueva a más vieja):\n"
                 + "\n".join(f"- [{r['created_at'][:10]}] {r['summary']}" for r in recent))
+        # Facts de los OTROS participantes del hilo (no solo el autor): el bot
+        # ve la conversación completa, que sepa con quiénes está hablando.
+        others_block = self._other_participants_facts(thread, author=handle, query=query)
+        if others_block:
+            parts.append(others_block)
         if lessons:
             parts.append("\n---\nLecciones de comportamiento:\n" + "\n".join(f"- {t}" for _, t in lessons))
 

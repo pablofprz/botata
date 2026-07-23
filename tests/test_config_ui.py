@@ -185,5 +185,58 @@ def test_api_settings_valido_escribe(server, store):
     assert releido["TASKS"]["heartbeat"]["enabled"] is True
 
 
+# ─── Validadores MOODS / PREFS ────────────────────────────────────────────────
+@pytest.mark.parametrize("moods,fragmento", [
+    ({"mode": "banana"}, "MOODS.mode"),
+    ({"susceptibility": 1.5}, "susceptibility"),
+    ({"hysteresis_hours": -1}, "hysteresis_hours"),
+    ({"manual": {"schedule": {"lun": "upbeat"}}}, "día(s) inválido(s)"),
+])
+def test_validate_moods_invalido(moods, fragmento):
+    s = json.loads(json.dumps(_SETTINGS)); s["MOODS"] = moods
+    assert any(fragmento in e for e in cu.validate_settings(s))
+
+
+def test_validate_moods_y_prefs_validos():
+    s = json.loads(json.dumps(_SETTINGS))
+    s["MOODS"] = {"enabled": True, "mode": "auto", "susceptibility": 0.5,
+                  "hysteresis_hours": 2, "manual": {"fixed": "", "schedule": {"mon": "upbeat"}}}
+    s["PREFS"] = {"mode": "add_only"}
+    assert cu.validate_settings(s) == []
+
+
+def test_validate_prefs_invalido():
+    s = json.loads(json.dumps(_SETTINGS)); s["PREFS"] = {"mode": "yolo"}
+    assert any("PREFS.mode" in e for e in cu.validate_settings(s))
+
+
+# ─── Datos vivos del DB (memoria / preferencias / calendario) ─────────────────
+def test_data_endpoints_crud(store):
+    assert store.edit_memory({"action": "add", "text": "el bot es peronista"}) == []
+    assert store.edit_preferences({"action": "add", "kind": "like", "text": "los panchos"}) == []
+    assert store.edit_events({"action": "add", "title": "juntada",
+                              "event_at": "2099-01-01T21:00"}) == []
+    data = store.read_data()
+    assert data["memory"][0]["text"] == "el bot es peronista"
+    assert data["memory"][0]["source"] == "admin"
+    assert data["preferences"][0]["kind"] == "like"
+    assert data["events"][0]["title"] == "juntada"
+
+    assert store.edit_memory({"action": "delete", "id": data["memory"][0]["id"]}) == []
+    assert store.edit_preferences({"action": "delete", "id": data["preferences"][0]["id"]}) == []
+    assert store.edit_events({"action": "delete", "id": data["events"][0]["id"]}) == []
+    data = store.read_data()
+    assert data["memory"] == [] and data["preferences"] == [] and data["events"] == []
+
+
+def test_data_validaciones(store):
+    assert store.edit_memory({"action": "add", "text": "  "}) != []
+    assert store.edit_preferences({"action": "add", "kind": "meh", "text": "x"}) != []
+    assert store.edit_events({"action": "add", "title": "x", "event_at": "mañana"}) != []
+    assert store.edit_events({"action": "add", "title": "x", "event_at": "2099-01-01",
+                              "handle": "nadie.test"}) != []  # sin perfil → error claro
+    assert store.edit_memory({"action": "delete", "id": 999}) == ["id inexistente"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
