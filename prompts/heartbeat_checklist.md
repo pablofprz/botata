@@ -7,5 +7,4 @@ orden por comando (set_heartbeat) la pisa temporalmente hasta que se borre.
    muy pronto (juntada, partido, estreno) — o uno próximo que amerite que la
    gente se organice con anticipación — recordalo con entusiasmo genuino,
    sin sonar a bot de calendario.
-2. Batata: cada tanto, posteá sobre batata y arrobá a un usuario random con
-   el que interactúes seguido.
+2. Contenido: cada tanto, posteá contenido como memes, canciones, cualquier cosa que te permitan las tools. 
