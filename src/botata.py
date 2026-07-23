@@ -57,6 +57,22 @@ logging.basicConfig(
 )
 log = logging.getLogger("botata")
 
+# Silenciar el ruido de librerías HTTP ('POST .../chat/completions 200 OK' por
+# cada llamada al LLM no aporta nada). Errores/warnings siguen pasando.
+for _noisy in ("httpx", "httpcore", "openai", "urllib3"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+
+def log_llm_context(label: str, system: str, user: str) -> None:
+    """Imprime el contexto completo que se le manda al LLM (toggle LOG_CONTEXT).
+    Un solo log.info multilinea con delimitadores para poder grepear/plegar."""
+    if not LOG_CONTEXT:
+        return
+    log.info(
+        "\n╭──── contexto LLM: %s ────\n[SYSTEM]\n%s\n\n[USER]\n%s\n╰──── fin contexto: %s ────",
+        label, system, user, label,
+    )
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -189,6 +205,11 @@ NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
 # llega vacío al bot. Best-effort y toggleable (cuesta 1 llamada vision por
 # pieza de media). ON por default.
 READ_THREAD_MEDIA : bool = bool(settings.get("READ_THREAD_MEDIA", True))
+
+# Loguear el contexto COMPLETO (system + user) que se le manda al LLM al
+# generar una respuesta — visibilidad de qué está viendo el bot realmente.
+# Verboso a propósito; apagable por config.
+LOG_CONTEXT : bool = bool(settings.get("LOG_CONTEXT", True))
 
 # Estados de ánimo (moods): un registro afectivo que tiñe el tono del bot por día.
 # {enabled, mode: manual|auto, manual: {fixed, schedule}, susceptibility,
@@ -1618,6 +1639,7 @@ class ReflectDecideNode:
         parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
         system = "\n".join(p for p in parts if p)
 
+        log_llm_context(f"feed_reflection ({state['feed_name']})", system, summary)
         try:
             decision = self.llm.complete(system, summary, FeedDecision)
         except Exception as e:
@@ -2126,6 +2148,7 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
     parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
     system = "\n".join(p for p in parts if p)
 
+    log_llm_context("heartbeat", system, "¿Hay algo que valga la pena decir hoy?")
     try:
         decision = llm.complete(system, "¿Hay algo que valga la pena decir hoy?", FeedDecision)
     except Exception as e:
@@ -2471,6 +2494,7 @@ def run_public_reflection_pass(bsky: "BskyClient", router: ModelRouter,
         "\n".join(_fmt(a) for a in activity)
 
     llm = RoleLLM(router, "feed_opinion")
+    log_llm_context("public_reflection", system, user)
     try:
         decision = llm.complete(system, user, FeedDecision)
     except Exception as e:
@@ -4209,6 +4233,7 @@ class GenerateReplyNode:
         system = "\n".join(parts)
         user   = query
 
+        log_llm_context(f"reply → @{handle}", system, user)
         try:
             result = self.llm.complete(system, user, BotReply)
         except Exception as e:
@@ -4255,6 +4280,7 @@ class HandleAdminCommandNode:
         )
 
         admin_tools = self.registry.openai_schemas(Scope.ADMIN)
+        log_llm_context(f"admin → @{state['author_handle']}", system, user)
         text_reply, tool_calls = self.llm.call_with_tools(system, user, admin_tools)
 
         # No tool called — use direct text response as fallback
