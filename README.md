@@ -1,89 +1,187 @@
-# botata
+<p align="center">
+  <img src="botata.png" alt="Botata" width="340">
+</p>
 
-Bot comunitario de Bluesky construido como **agente**: no reacciona con plantillas, sino que
-un LLM decide qué responder, si postear, qué herramienta usar y qué recordar de cada persona.
-Refundación del monolito `maripobot.py` sobre langgraph + SQLite. Genérico y multi-comunidad
-(no atado a Argentina): la personalidad y las fuentes son config.
+<h1 align="center">Botata</h1>
 
-> Repo privado. Admin único: **Polci** (`ppolci.com`). Dev en Windows 11, prod en Linux Mint.
+<p align="center">
+  <b>Un bot comunitario con alma de agente, para Bluesky y Mastodon.</b><br>
+  No responde con plantillas: un LLM decide qué contestar, cuándo postear,
+  qué herramienta usar y qué recordar de cada persona.
+</p>
 
-## Pilares
+---
 
-- **Grafos de estado (`langgraph`)** para los flujos de decisión (menciones + pases proactivos).
-- **SQLite como única fuente de verdad** (`posted/botata.db`, WAL) con búsqueda semántica local:
-  `sqlite-vec` (vec0, embeddings **bge-m3** dim 1024, en CPU) + FTS5 (BM25), fusionados por RRF.
-- **Herramientas declarativas**: registry propio con scopes (`src/tools.py`) + conectores MCP
-  externos (`src/mcp_tools.py`).
-- **Comportamiento en archivos, no en código**: prompts (`prompts/`), skills en markdown
-  (`skills/`, hot-reload), settings (`config/settings.json`) — nada de prompts hardcodeados.
+## ¿Qué es Botata?
 
-## Estructura del workspace (reorg 2026-07-24)
+Botata es un bot para comunidades en redes sociales. Vive en una cuenta de **Bluesky** o
+**Mastodon**, responde cuando lo mencionan, lee el feed de su comunidad, aprende de la gente
+con la que habla y decide por sí mismo cuándo tiene algo que decir.
 
-La raíz del repo es el **workspace**; el motor vive en `core/` y cada agente desplegado es
-una **instancia** en `bots/<nombre>/` (gitignored — identidad + datos privados).
+Es **genérico y multi-comunidad**: la personalidad, el idioma, las fuentes y las herramientas
+son configuración, no código. El mismo motor puede correr un bot de shitposting argentino, uno
+de observación de aves o el asistente de un club de software libre — cada uno es una
+**instancia** con su propia identidad y su propia memoria.
 
-```
-core/                    ← el MOTOR (hay uno, sin identidad propia)
-  src/                   ← todo el código Python (botata.py = el corazón; db, router, tools,
-                           skills, scheduler, mcp_tools, catalog, config_ui, budget, ...)
-  instance_template/     ← TODA la identidad default: settings neutro, SOUL neutra,
-                           prompts/, moods/, skills/, config/ genéricos, .env.example
-  mcp_servers/           ← servers MCP propios (reddit_server.py; futuros: x, ig)
-  ui/                    ← panel web local de configuración (config_ui.py)
-  tests/                 ← suite pytest (crea una instancia efímera desde el template)
-  scripts/               ← sync de credenciales/DB, snapshot WAL, pipeline de chats al vault
-bots/                    ← instancias (gitignored): bots/botata-arg/ = la comunidad argentina
-vault/                   ← memoria de desarrollo Zettelkasten (gitignored, fuera del repo)
-docs/                    ← ARQUITECTURA.md · CLAUDE.md / ROADMAP.md en la raíz
-```
+### Lo que trae
 
-## Quickstart
+- 🧠 **Memoria real por usuario** — hechos autorrevelados, historial de conversaciones y
+  lecciones de comportamiento, con búsqueda híbrida (embeddings locales + keywords) en SQLite.
+  Sin servicios externos: los embeddings (`bge-m3`) corren en tu CPU.
+- 🕊️ **Multi-canal** — Bluesky y Mastodon con el mismo motor (Discord en el roadmap).
+- 🛠️ **Herramientas** — búsqueda web, música (Spotify), videos (YouTube), calendario,
+  noticias RSS, imágenes, y cualquier server **MCP** externo como tool extra.
+- 🎭 **Personalidad en archivos** — `SOUL.md` (quién es), `skills/` (cómo responder sobre
+  temas específicos, editable en caliente), `moods/` (estados de ánimo diarios que tiñen el
+  tono), gustos y disgustos editables.
+- 📅 **Proactividad** — lee el feed y decide si opinar, saluda cumpleaños, comparte música,
+  reflexiona en público. Todo con toggles, todo apagado por default.
+- 🔒 **Pensado para bots públicos** — scopes por herramienta, grupos de usuarios, config
+  protegida contra prompt injection, presupuesto diario de tokens.
+- 🖥️ **Panel de configuración local** — todo se configura desde el navegador, sin editar JSON.
+
+---
+
+## Requisitos
+
+- **Python 3.12+**
+- Una cuenta para el bot en **Bluesky** o en una instancia de **Mastodon**
+- Una API key de **[OpenRouter](https://openrouter.ai/)** (o cualquier endpoint compatible
+  con la API de OpenAI, incluido un Ollama local)
+- ~2 GB de disco para el modelo de embeddings (se descarga solo la primera vez)
+- Funciona en Windows y Linux
+
+---
+
+## Tutorial: tu primer bot en 10 minutos
+
+### 1. Instalá el motor
 
 ```bash
-python -m venv .venv && .venv/Scripts/activate      # (Linux: source .venv/bin/activate)
-pip install -e "core[dev]"                           # instala el motor en editable + dev tools
-python -m botata --init mi-bot                       # crea bots/mi-bot + abre la UI de config
-#   → en la UI: 1) canal y credenciales · 2) admin y grupos · 3) el resto
-#   → después editá bots/mi-bot/context/SOUL.md (la personalidad)
-python -m botata --instance bots/mi-bot --mode open  # arranca el bot (open | admin_only)
+git clone https://github.com/pablofprz/botata.git
+cd botata
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
+
+pip install -e core
 ```
 
-(`--init` acepta un nombre — va a `bots/<nombre>` — o un path. Para re-configurar una
-instancia existente: `python -m botata --init mi-bot` de nuevo, o
-`python core/src/config_ui.py --instance bots/mi-bot`.)
+### 2. Conseguí las credenciales del canal
 
-La primera corrida descarga el modelo de embeddings (bge-m3, ~2 GB, cacheado por HuggingFace).
+**Bluesky:** creá la cuenta del bot y generá una **app password** en
+*Settings → Privacy and Security → App Passwords* (nunca uses la contraseña principal).
 
-## Configuración
+**Mastodon:** creá la cuenta del bot en tu instancia y generá un token en
+*Preferencias → Desarrollo → Nueva aplicación*, con permisos `read` y `write`.
+Marcá la cuenta como bot en el perfil (buena ciudadanía fediversal).
 
-- **UI local** (`python config_ui.py`): edita `settings.json`, credenciales (`.env`, write-only),
-  noticias y toggles de skills desde el navegador (solo localhost).
-- **Desde Bluesky**: el admin ajusta config por mención (T30) — ver `ROADMAP.md`.
-- **Modelos**: router por rol con fallbacks entre endpoints OpenAI-compatibles (`config/settings.json`
-  → sección `MODELS`).
+Y tu API key de OpenRouter, de [openrouter.ai/keys](https://openrouter.ai/settings/keys).
 
-## Contenido y scraping
+### 3. Creá tu instancia
 
-El **scraping** vive en una suite aparte, **[Membrilla](https://github.com/pablofprz/membrilla)**
-(local-first, reusable por otros agentes). Membrilla deja media + un sidecar `<id>.json` en una
-carpeta; botata la ingiere con `src/catalog.py` (la describe con visión → `image_catalog`) sin
-compartir código ni DB. Contenido on-demand: Spotify, YouTube, noticias/RSS, búsqueda web (Brave),
-Reddit (MCP), navegador agéntico (`@playwright/mcp`).
+```bash
+python -m botata --init mi-bot
+```
+
+Esto crea la carpeta `bots/mi-bot/` con toda la configuración de plantilla y abre el panel
+de configuración en el navegador. Completá en orden:
+
+1. **Canal** — `bluesky` o `mastodon` (+ URL de tu instancia si es Mastodon) y el handle
+   del bot.
+2. **Credenciales** — `BSKY_PASSWORD` (la app password) o `MASTODON_ACCESS_TOKEN` (el
+   token), y `OPENROUTER_API_KEY`. Se guardan en el `.env` de tu instancia, nunca se
+   muestran de vuelta.
+3. **Admin** — TU handle. El admin controla el bot por menciones y es la única cuenta que
+   puede usar los comandos de administración. En Mastodon: si tu cuenta está en la misma
+   instancia que el bot es `usuario` a secas; si está en otra, `usuario@dominio`.
+4. El resto (grupos, feeds, herramientas, moods...) puede esperar — los defaults son sanos
+   y todo lo proactivo arranca apagado.
+
+Cerrá la UI con Ctrl+C cuando termines.
+
+### 4. Dale una personalidad
+
+Editá `bots/mi-bot/context/SOUL.md`. Ese archivo **es** tu bot: quién es, cómo habla, qué
+valora, en qué idioma responde. La plantilla trae la estructura con instrucciones — reemplazá
+los huecos. No hace falta tocar nada más para empezar (skills y moods son capas opcionales
+que podés sumar después).
+
+### 5. Arrancalo
+
+```bash
+# Primero en modo admin: solo te responde a vos
+python -m botata --instance bots/mi-bot --mode admin_only
+```
+
+La primera corrida descarga el modelo de embeddings (~2 GB, una sola vez). Cuando veas el
+loop corriendo, **mencioná al bot desde tu cuenta** y esperá la respuesta.
+
+¿Funciona? Abrilo al público:
+
+```bash
+python -m botata --instance bots/mi-bot --mode open
+```
+
+### 6. Manejalo desde la red
+
+Como admin podés hablarle al bot para administrarlo, en lenguaje natural:
+
+> «@mi-bot ¿qué tenés apagado?» · «prendé el heartbeat cada 6 horas» ·
+> «acordate de que a Ana le gusta el jazz» · «poné modo snarky»
+
+Y cualquier usuario puede pedirle cosas normales: opinar, buscar, resumir el feed,
+agendar su cumpleaños, o pedirle `resetme` para que borre todo lo que sabe de él.
+
+### 7. Cuando quieras más
+
+Volvé a abrir el panel (`python -m botata --init mi-bot`) y prendé de a uno:
+
+- **Feeds proactivos** — el bot lee el feed de la comunidad y decide si comentar.
+- **Heartbeat** — pase periódico con instrucciones tuyas («compartí un tema de jazz cada
+  tanto»).
+- **Moods** — estados de ánimo diarios (automáticos o por agenda).
+- **Noticias RSS**, **presupuesto diario de tokens**, **servers MCP**, **skills** temáticas.
+
+---
+
+## Conceptos en 30 segundos
+
+**Motor vs. instancia.** El repo es el motor (carpeta `core/`); tu bot es una instancia
+(carpeta `bots/<nombre>/`): su config, su `.env`, su SOUL, sus prompts y su base de datos.
+Podés correr N bots de N comunidades con el mismo motor — cada uno con su memoria separada.
+
+**Todo es un archivo.** Prompts, personalidad, skills y moods son markdown dentro de tu
+instancia. Editás el archivo, el bot cambia. Nada de personalidad hardcodeada.
+
+**El LLM decide, la config limita.** Cada herramienta tiene un scope (¿la puede usar
+cualquiera o solo el admin?) y opcionalmente un grupo de usuarios. Los settings críticos no
+se pueden cambiar por mención, ni siquiera del admin — solo desde el panel local.
+
+## Estructura del repo
+
+```
+core/                   ← el motor: src/ (código), tests/, ui/ (panel), mcp_servers/,
+                          instance_template/ (la plantilla de toda instancia nueva)
+bots/                   ← tus instancias (nunca se suben: identidad + datos privados)
+docs/ARQUITECTURA.md    ← cómo funciona por dentro, módulo por módulo
+```
 
 ## Tests
 
 ```bash
-pytest -q          # ~276 tests, <10s, sin red (salvo E2E de MCP marcados)
+pip install -e "core[dev]"
+pytest core/tests -q        # ~430 tests, <15s, sin red
 ```
 
 ## Documentación
 
-- **`CLAUDE.md`** — estado del proyecto, decisiones de arquitectura y su porqué.
-- **`ROADMAP.md`** — tareas T1–T36 con criterios de aceptación (espejo navegable en `vault/botata/roadmap.md`).
-- **`docs/ARQUITECTURA.md`** — cómo funciona el código, módulo por módulo.
-- **`vault/`** — notas permanentes (Zettelkasten), chats indexados, tablero de tareas.
-  Consulta antes de re-leer código: grafo `graphify-out/` → vault → código.
+- [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) — el código por dentro, módulo por módulo.
+- [`ROADMAP.md`](ROADMAP.md) — qué está hecho y qué viene.
+- Wiki con guías detalladas: próximamente.
 
 ## Licencia
 
-Ver `LICENSE`.
+[GPL-3.0](core/LICENSE)
