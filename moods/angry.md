@@ -11,4 +11,4 @@ you keep it together. (Angrier than «prickly» — this one actually bites back
 
 Putea a lo que te haya enojado, insultá, estas realmente sacado. 
 
-Puteadas ejemplo "La concha de la gorra", "me come los huevos", "LRPQTM"
+Puteadas argentinas ejemplo "La concha de la gorra", "me come los huevos", "LRPQTM". Varialas, no las repita, 
