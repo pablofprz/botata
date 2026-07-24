@@ -2,11 +2,14 @@
 # Uso:  .\scripts\db-restore.ps1                 (remote 'gdrive' por default)
 param(
     [string]$Remote = "butterbotdb",
-    [string]$RemotePath = "butterbot/butterbot.db"  # remote SIN renombrar: el Drive es storage, botata.db local ↔ butterbot.db remoto
+    [string]$RemotePath = "butterbot/butterbot.db",  # remote SIN renombrar: el Drive es storage, botata.db local ↔ butterbot.db remoto
+    [string]$Instance = ""                            # dir de instancia; default ..\bots\botata-arg (reorg 2026-07-24)
 )
 $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
-$db = Join-Path $repo "posted\botata.db"
+if (-not $Instance) { $Instance = Join-Path $repo "..\bots\botata-arg" }
+$Instance = Resolve-Path $Instance
+$db = Join-Path $Instance "posted\botata.db"
 New-Item -ItemType Directory -Force -Path (Split-Path $db) | Out-Null
 
 if (Test-Path $db) {

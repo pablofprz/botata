@@ -6,7 +6,9 @@ REMOTE="${1:-butterbotdb}"
 REMOTE_PATH="${2:-butterbot/butterbot.db}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-DB="$REPO/posted/botata.db"
+# Instancia (reorg 2026-07-24): 3er arg, o BOTATA_INSTANCE, o ../bots/botata-arg
+INSTANCE="${3:-${BOTATA_INSTANCE:-$REPO/../bots/botata-arg}}"
+DB="$INSTANCE/posted/botata.db"
 mkdir -p "$(dirname "$DB")"
 
 if [ -f "$DB" ]; then

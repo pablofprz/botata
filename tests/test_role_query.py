@@ -88,8 +88,8 @@ def test_groups_for():
 # ─── multi-admin ─────────────────────────────────────────────────────────────
 def test_is_admin_handle_owner_y_extra(monkeypatch):
     monkeypatch.setattr(b, "ADMIN_HANDLES",
-                        frozenset([b.ADMIN_HANDLE, "segundo.bsky.social"]))
-    assert b.is_admin_handle(b.ADMIN_HANDLE)
+                        frozenset(["owner.test", "segundo.bsky.social"]))
+    assert b.is_admin_handle("owner.test")
     assert b.is_admin_handle("segundo.bsky.social")
     assert not b.is_admin_handle("random.bsky.social")
     assert not b.is_admin_handle(None)

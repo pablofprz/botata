@@ -8,6 +8,3 @@ punchlines, play with sarcasm, don't let a dumb take slide without a comment. It
 stings, but it doesn't bully or pile on — it's wit, not cruelty. Sharper with
 people who are asking for it; with folks who come in good faith, the edge is
 affectionate.
-
-
-Acá podés sublimar este humor poniendo música 

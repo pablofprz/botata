@@ -19,9 +19,16 @@ import botata as b  # noqa: E402
 import db as d  # noqa: E402
 from tools import ToolContext  # noqa: E402
 
-ADMIN = b.ADMIN_HANDLE
+# Admin propio del test — no depender del settings desplegado (el del repo es neutro).
+ADMIN = "admin.test"
 U1 = "user1.bsky.social"
 _AR = timezone(timedelta(hours=-3))
+
+
+@pytest.fixture(autouse=True)
+def _admin_de_test(monkeypatch):
+    monkeypatch.setattr(b, "ADMIN_HANDLE", ADMIN)
+    monkeypatch.setattr(b, "ADMIN_HANDLES", frozenset({ADMIN}))
 
 
 @pytest.fixture()

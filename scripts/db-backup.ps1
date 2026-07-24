@@ -4,14 +4,17 @@
 #       .\scripts\db-backup.ps1 -Remote dropbox
 param(
     [string]$Remote = "butterbotdb",
-    [string]$RemotePath = "butterbot/butterbot.db"  # remote SIN renombrar: el Drive es storage, botata.db local ↔ butterbot.db remoto
+    [string]$RemotePath = "butterbot/butterbot.db",  # remote SIN renombrar: el Drive es storage, botata.db local ↔ butterbot.db remoto
+    [string]$Instance = ""                            # dir de instancia; default ..\bots\botata-arg (reorg 2026-07-24)
 )
 $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 $py = Join-Path $repo ".venv\Scripts\python.exe"
 if (-not (Test-Path $py)) { $py = "python" }
 
-$db   = Join-Path $repo "posted\botata.db"
+if (-not $Instance) { $Instance = Join-Path $repo "..\bots\botata-arg" }
+$Instance = Resolve-Path $Instance
+$db   = Join-Path $Instance "posted\botata.db"
 $snap = Join-Path $env:TEMP "botata.snapshot.db"
 if (-not (Test-Path $db)) { throw "no existe la DB: $db" }
 

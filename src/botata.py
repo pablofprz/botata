@@ -3594,7 +3594,9 @@ def build_tool_registry(config: dict | None = None, *,
             "required": ["title", "event_at"],
         },
         _tool_create_event,
-        {Scope.ADMIN},
+        # Default admin + reply: el handler ya distingue (usuario común solo
+        # agenda para sí; bot_action de no-admin degrada a reminder).
+        {Scope.ADMIN, Scope.REPLY},
     )
     reg.register(
         "get_my_recent_posts",

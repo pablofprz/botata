@@ -25,10 +25,11 @@ from pathlib import Path
 
 # ─── Rutas (Windows dev). Ajustar si se corre en prod Linux. ───────────────
 HOME = Path.home()
-PROJECT_SLUG = "C--Users-pablo-Documents-butterbot"
+PROJECT_SLUG = "C--Users-pablo-Documents-proyecto-botata-core"
 CODE_TRANSCRIPTS = HOME / ".claude" / "projects" / PROJECT_SLUG
 WEB_EXPORTS = HOME / "claude-exports" / "web"
-VAULT = Path(__file__).resolve().parent.parent / "vault"  # vault dentro del repo (desde 2026-07-20)
+# vault FUERA del repo desde la reorg 2026-07-24: proyecto-botata/{core (repo), vault}
+VAULT = Path(__file__).resolve().parent.parent.parent / "vault"
 CHATS_CODE = VAULT / "chats" / "code"
 CHATS_WEB = VAULT / "chats" / "web"
 MANIFEST = VAULT / "chats" / ".manifest.json"

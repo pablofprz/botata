@@ -7,7 +7,9 @@ REMOTE_PATH="${2:-butterbot/butterbot.db}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY="python3"
-DB="$REPO/posted/botata.db"
+# Instancia (reorg 2026-07-24): 3er arg, o BOTATA_INSTANCE, o ../bots/botata-arg
+INSTANCE="${3:-${BOTATA_INSTANCE:-$REPO/../bots/botata-arg}}"
+DB="$INSTANCE/posted/botata.db"
 SNAP="$(mktemp --suffix=.db)"
 [ -f "$DB" ] || { echo "no existe la DB: $DB" >&2; exit 1; }
 
