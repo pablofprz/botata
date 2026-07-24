@@ -57,8 +57,18 @@ class ModelRouter:
         max_retries: int = 2,
         backoff_base: float = 1.0,
     ) -> None:
+        # timeout explícito y max_retries=0 en el SDK: sin esto, el default del
+        # SDK de OpenAI es 600s por request CON 2 reintentos internos propios —
+        # una request colgada = ~30 min de silencio total ANTES de que el router
+        # se entere y pueda reintentar/fallbackear. Los reintentos viven en UNA
+        # sola capa: este router (backoff + cadena de fallback).
         self._clients: dict[str, OpenAI] = {
-            name: OpenAI(api_key=cfg.get("api_key") or "x", base_url=cfg["base_url"])
+            name: OpenAI(
+                api_key=cfg.get("api_key") or "x",
+                base_url=cfg["base_url"],
+                timeout=float(cfg.get("timeout_s", 120)),
+                max_retries=0,
+            )
             for name, cfg in endpoints.items()
         }
         self._aliases = aliases
@@ -200,6 +210,8 @@ def build_router(
             if not api_key and cfg.get("api_key_env"):
                 api_key = env.get(cfg["api_key_env"], "")
             endpoints[name] = {"base_url": cfg["base_url"], "api_key": api_key or "x"}
+            if "timeout_s" in cfg:
+                endpoints[name]["timeout_s"] = cfg["timeout_s"]
         aliases = models_config["aliases"]
         roles = models_config.get("roles", _DEFAULT_ROLES)
     else:

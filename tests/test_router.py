@@ -24,6 +24,29 @@ def _make_router() -> ModelRouter:
     return ModelRouter(endpoints, aliases, roles, max_retries=1, backoff_base=0)
 
 
+def test_clients_con_timeout_y_sin_retries_del_sdk():
+    """Sin timeout explícito el SDK default es 600s x 3 intentos internos =
+    ~30 min de cuelgue silencioso por request (bug real, 2026-07-23)."""
+    r = _make_router()
+    for client in r._clients.values():
+        assert float(client.timeout) == 120.0  # default sano
+        assert client.max_retries == 0         # los reintentos son del router
+
+    endpoints = {"lento": {"base_url": "http://a/v1", "api_key": "x", "timeout_s": 300}}
+    r2 = ModelRouter(endpoints, {"al": [{"endpoint": "lento", "model": "m"}]}, {"r": "al"})
+    assert float(r2._clients["lento"].timeout) == 300.0
+
+
+def test_build_router_propaga_timeout_s():
+    cfg = {
+        "endpoints": {"e": {"base_url": "http://x/v1", "api_key": "k", "timeout_s": 45}},
+        "aliases": {"a": [{"endpoint": "e", "model": "m"}]},
+        "roles": {"reply": "a"},
+    }
+    r = build_router(cfg, legacy={}, env={})
+    assert float(r._clients["e"].timeout) == 45.0
+
+
 def test_chain_resolves_role_to_targets():
     r = _make_router()
     chain = r._chain("r_dual")
