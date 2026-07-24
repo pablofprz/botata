@@ -1,211 +1,74 @@
-# Environment
+# ─── Workspace (no versionar) ───────────────────────────────────────
+# Instancias: identidad + datos privados de cada bot (config real, .env, DB, media)
+bots/
+# Vault de Obsidian (notas, chats indexados) — fuera del repo a propósito
+vault/
+# Grafo del código (regenerable con `graphify update .`)
+graphify-out/
+# Entorno virtual (raíz del workspace)
+.venv/
+# Cuarentena de la reorg 2026-07-24 — borrar tras revisar
+_reorg-leftovers/
+
+# Claude Code — settings locales y worktrees; los comandos SÍ se versionan
+.claude/settings.local.json
+.claude/worktrees/
+
+# ─── Environment / credenciales ─────────────────────────────────────
 .env
 .env.*
 !.env.example
+.envrc
+config/instagram.json
+config/bluesky.json
+.spotify_cache
+**/.spotify_cache
 
-# Butterbot runtime data
+# ─── Runtime data de instancia (por si aparece fuera de bots/) ──────
 posted/
 scrape/
 state/
 context/users/
 context/feeds/
 context/history.md
-context/timeline.md
-context/perfiles.json
-context/.spotify_cache
+context/heartbeat_override.md
+parsed_memory/
 
-# Butterbot databases
+# Databases
 *.db
 *.db-wal
 *.db-shm
 
-# Graphify — grafo del código (regenerable, no versionar)
-graphify-out/
+# Backups de las escrituras atómicas (config UI T22 / comandos admin T30)
+*.bak
 
-# Claude Code — settings locales (paths de la máquina); los comandos SÍ se versionan
-.claude/settings.local.json
-
-# Butterbot credentials & secrets
-config/instagram.json
-config/bluesky.json
-
-# Spotify token cache (real access/refresh tokens) — any location
-.spotify_cache
-**/.spotify_cache
-
-# Byte-compiled / optimized / DLL files
+# ─── Python ─────────────────────────────────────────────────────────
 __pycache__/
 *.py[codz]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
-.Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
 wheels/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
+.eggs/
 .cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
 .pytest_cache/
-cover/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-# .python-version
-
-# pdm
-.pdm-python
-.pdm-build/
-
-# PEP 582
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# Redis
-*.rdb
-*.aof
-*.pid
-
-# RabbitMQ
-mnesia/
-rabbitmq/
-rabbitmq-data/
-
-# ActiveMQ
-activemq-data/
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
+.ruff_cache/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+venv/
+env/
+ENV/
 
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# Abstra
-.abstra/
-
-# Visual Studio Code
-# .vscode/
-
-# Temporary file for partial code execution
-tempCodeRunnerFile.py
-
-# Ruff stuff:
-.ruff_cache/
-
-# PyPI configuration file
-.pypirc
-
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
-
-# Streamlit
-.streamlit/secrets.toml
-
-# Playwright MCP — artefactos del server browser (snapshots, sesiones)
+# ─── Misc ───────────────────────────────────────────────────────────
+*.log
 .playwright-mcp/
-
-# Backups de las escrituras atómicas (config UI T22 / comandos de admin T30)
-*.bak
-
-# Override runtime del heartbeat (lo escribe el comando set_heartbeat; auxiliar)
-context/heartbeat_override.md
-
-# Dump legible de la memoria (parse_memory.py) — data de usuarios, como la DB
-parsed_memory/
+.ipynb_checkpoints
+.vscode/

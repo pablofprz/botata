@@ -6,7 +6,8 @@ REMOTE="${1:-butterbotdb}"
 REMOTE_PATH="${2:-butterbot/butterbot.db}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY="python3"
+# venv en la raíz del workspace (reorg 2026-07-24)
+PY="$REPO/../.venv/bin/python"; [ -x "$PY" ] || PY="python3"
 # Instancia (reorg 2026-07-24): 3er arg, o BOTATA_INSTANCE, o ../bots/botata-arg
 INSTANCE="${3:-${BOTATA_INSTANCE:-$REPO/../bots/botata-arg}}"
 DB="$INSTANCE/posted/botata.db"

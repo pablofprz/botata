@@ -9,7 +9,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
-$py = Join-Path $repo ".venv\Scripts\python.exe"
+$py = Join-Path $repo "..\.venv\Scripts\python.exe"   # venv en la raíz del workspace (reorg 2026-07-24)
 if (-not (Test-Path $py)) { $py = "python" }
 
 if (-not $Instance) { $Instance = Join-Path $repo "..\bots\botata-arg" }

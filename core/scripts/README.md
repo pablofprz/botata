@@ -46,11 +46,11 @@ En prod, dejá `db-backup.sh` en un cron (ej. cada hora) para tener siempre la �
 copia en la nube; desde el dev hacés `db-restore` y trabajás sobre eso.
 
 ## Sync de chats → vault de Obsidian
-Importa conversaciones de Claude al vault (`vault/chats/`, dentro del repo) con frontmatter,
+Importa conversaciones de Claude al vault (`vault/chats/`, en la raíz del workspace, gitignored) con frontmatter,
 tags por keyword y wikilinks. Idempotente (manifest en `chats/.manifest.json`). Solo stdlib.
 
 - **code**: lee los transcripts `.jsonl` de Claude Code
-  (`~/.claude/projects/C--Users-pablo-Documents-butterbot/*.jsonl`) — automático, sin export manual.
+  (`~/.claude/projects/C--Users-pablo-Documents-proyecto-botata/*.jsonl`) — automático, sin export manual.
 - **web**: lee exports `.md` de claude.ai que dejes en `~/claude-exports/web/` (export manual).
 
 ```powershell
@@ -65,11 +65,11 @@ tags por keyword y wikilinks. Idempotente (manifest en `chats/.manifest.json`). 
 **Agendar (Windows Task Scheduler)** — diario 22:00, sin ventana:
 ```powershell
 $act = New-ScheduledTaskAction -Execute "powershell.exe" `
-  -Argument "-NoProfile -WindowStyle Hidden -File `"$HOME\Documents\butterbot\scripts\sync_claude_obsidian.ps1`""
+  -Argument "-NoProfile -WindowStyle Hidden -File `"$HOME\Documents\proyecto-botata\core\scripts\sync_claude_obsidian.ps1`""
 $trg = New-ScheduledTaskTrigger -Daily -At 22:00
 Register-ScheduledTask -TaskName "butterbot-sync-chats" -Action $act -Trigger $trg
 ```
-En Linux (prod), cron: `0 22 * * * $HOME/butterbot/scripts/sync_claude_obsidian.sh`.
+En Linux (prod), cron: `0 22 * * * $HOME/proyecto-botata/core/scripts/sync_claude_obsidian.sh`.
 
 ## Graphify (grafo del código)
 Grafo AST del repo (tree-sitter, 0 tokens) para consultar estructura sin re-leer archivos.
@@ -95,7 +95,7 @@ graphify path "LoadContextNode" "UpdateProfileNode"
 Ver el README del repo privado `butterbot-secrets` (repos hermanos):
 ```
 Documents/
-  butterbot/           <- este repo
-  butterbot-secrets/   <- .env + config/instagram.json (privado)
+  proyecto-botata/     <- este repo (raíz del workspace; motor en core/, instancias en bots/)
+  butterbot-secrets/   <- .env + config/instagram.json (privado) -> hidrata bots/botata-arg/
 ```
-`pull` hidrata las credenciales en butterbot; `push` guarda tus cambios locales.
+`pull` hidrata las credenciales en la instancia; `push` guarda tus cambios locales.

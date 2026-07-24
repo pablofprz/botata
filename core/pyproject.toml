@@ -3,7 +3,6 @@ name = "botata"
 version = "0.1.0"
 description = "Bot comunitario de Bluesky Argentina basado en agentes y grafos (langgraph)."
 requires-python = ">=3.12"
-readme = "README.md"
 dependencies = [
     # Orquestación de agentes
     "langgraph>=0.2.60",

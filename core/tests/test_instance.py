@@ -12,10 +12,22 @@ import instance  # noqa: E402
 from init_instance import init_instance  # noqa: E402
 
 
-def test_default_es_la_raiz_del_repo(monkeypatch):
+def test_sin_instancia_corta_con_mensaje(monkeypatch):
+    # El repo es motor puro (sin config/settings.json): sin flag ni env var, corta.
     monkeypatch.delenv("BOTATA_INSTANCE", raising=False)
     monkeypatch.setattr(sys, "argv", ["botata"])
-    assert instance.instance_dir() == instance.REPO_DIR
+    with pytest.raises(SystemExit, match="instancia"):
+        instance.instance_dir()
+
+
+def test_repo_como_instancia_backcompat(monkeypatch, tmp_path):
+    # Si la raíz del repo tiene config/settings.json (deploy viejo), sigue sirviendo de default.
+    monkeypatch.delenv("BOTATA_INSTANCE", raising=False)
+    monkeypatch.setattr(sys, "argv", ["botata"])
+    monkeypatch.setattr(instance, "REPO_DIR", tmp_path)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "settings.json").write_text("{}", encoding="utf-8")
+    assert instance.instance_dir() == tmp_path
 
 
 def test_env_var_resuelve(monkeypatch, tmp_path):

@@ -7,7 +7,10 @@ instancia; la carpeta la decide, en orden de precedencia:
 
   1. flag CLI  `--instance <dir>`  (cualquier entrypoint: botata, config_ui, mem_admin…)
   2. env var   `BOTATA_INSTANCE`
-  3. la raíz del repo (back-compat: el layout actual sigue funcionando igual)
+  3. la raíz del repo, SOLO si es una instancia (tiene config/settings.json) —
+     back-compat para deploys viejos que corren el repo-como-instancia. Desde la
+     reorg 2026-07-24 el repo es motor puro (sin identidad): sin flag ni env var,
+     el proceso corta con instrucciones claras.
 
 El flag se escanea de sys.argv directamente porque los módulos resuelven sus
 paths en import-time (antes de que corra cualquier argparse). Los argparse de
@@ -38,7 +41,13 @@ def instance_dir() -> Path:
     """El directorio de instancia vigente para este proceso."""
     raw = _from_argv(sys.argv) or os.environ.get("BOTATA_INSTANCE")
     if not raw:
-        return REPO_DIR
+        if (REPO_DIR / "config" / "settings.json").is_file():
+            return REPO_DIR  # back-compat: el repo mismo es una instancia
+        raise SystemExit(
+            "Botata necesita una instancia (identidad + datos del agente).\n"
+            "Indicala con --instance <dir> o la env var BOTATA_INSTANCE.\n"
+            "Para crear una nueva: python core/src/init_instance.py <dir>"
+        )
     path = Path(raw).expanduser().resolve()
     if not path.is_dir():
         raise SystemExit(

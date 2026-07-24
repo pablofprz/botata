@@ -17,29 +17,35 @@ Refundación del monolito `maripobot.py` sobre langgraph + SQLite. Genérico y m
 - **Comportamiento en archivos, no en código**: prompts (`prompts/`), skills en markdown
   (`skills/`, hot-reload), settings (`config/settings.json`) — nada de prompts hardcodeados.
 
-## Estructura del repo
+## Estructura del workspace (reorg 2026-07-24)
+
+La raíz del repo es el **workspace**; el motor vive en `core/` y cada agente desplegado es
+una **instancia** en `bots/<nombre>/` (gitignored — identidad + datos privados).
 
 ```
-src/          ← todo el código Python (botata.py = el corazón; db, router, tools, skills,
-                scheduler, mcp_tools, catalog, config_ui, budget, clearsky, mem_admin, ...)
-config/       ← settings.json (config central) + news_sites.json (credenciales gitignored)
-context/      ← SOUL.md (personalidad) + MEMORY.md (memoria general del bot)
-prompts/      ← todos los prompts del sistema · skills/ ← skills en markdown editables en caliente
-mcp_servers/  ← servers MCP propios (reddit_server.py; futuros: x, ig)
-ui/           ← panel web local de configuración (config_ui.py)
-vault/        ← memoria de desarrollo (Zettelkasten) + tablero de tareas (dentro del repo)
-docs/         ← ARQUITECTURA.md (cómo funciona el código) · tests/ ← ~276 tests (pytest)
-scripts/      ← sync de credenciales/DB, snapshot WAL, pipeline de chats al vault
+core/                    ← el MOTOR (hay uno, sin identidad propia)
+  src/                   ← todo el código Python (botata.py = el corazón; db, router, tools,
+                           skills, scheduler, mcp_tools, catalog, config_ui, budget, ...)
+  instance_template/     ← TODA la identidad default: settings neutro, SOUL neutra,
+                           prompts/, moods/, skills/, config/ genéricos, .env.example
+  mcp_servers/           ← servers MCP propios (reddit_server.py; futuros: x, ig)
+  ui/                    ← panel web local de configuración (config_ui.py)
+  tests/                 ← suite pytest (crea una instancia efímera desde el template)
+  scripts/               ← sync de credenciales/DB, snapshot WAL, pipeline de chats al vault
+bots/                    ← instancias (gitignored): bots/botata-arg/ = la comunidad argentina
+vault/                   ← memoria de desarrollo Zettelkasten (gitignored, fuera del repo)
+docs/                    ← ARQUITECTURA.md · CLAUDE.md / ROADMAP.md en la raíz
 ```
 
 ## Quickstart
 
 ```bash
 python -m venv .venv && .venv/Scripts/activate      # (Linux: source .venv/bin/activate)
-pip install -e ".[dev]"                              # instala botata en editable + dev tools
-cp env.example .env                                  # completá BSKY_PASSWORD, OPENROUTER_API_KEY, ...
-python config_ui.py                                  # panel web local (127.0.0.1) para configurar
-python -m botata --mode open                         # arranca el bot (open | admin_only)
+pip install -e "core[dev]"                           # instala el motor en editable + dev tools
+python core/src/init_instance.py bots/mi-bot         # crea una instancia desde la plantilla
+#   → completá bots/mi-bot/.env y editá SOUL.md + settings.json
+python core/src/config_ui.py --instance bots/mi-bot  # panel web local (127.0.0.1)
+python -m botata --instance bots/mi-bot --mode open  # arranca el bot (open | admin_only)
 ```
 
 La primera corrida descarga el modelo de embeddings (bge-m3, ~2 GB, cacheado por HuggingFace).

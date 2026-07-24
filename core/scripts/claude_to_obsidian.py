@@ -25,7 +25,8 @@ from pathlib import Path
 
 # ─── Rutas (Windows dev). Ajustar si se corre en prod Linux. ───────────────
 HOME = Path.home()
-PROJECT_SLUG = "C--Users-pablo-Documents-proyecto-botata-core"
+# Las sesiones de Claude Code se anclan a la RAÍZ del workspace desde la reorg 2026-07-24.
+PROJECT_SLUG = "C--Users-pablo-Documents-proyecto-botata"
 CODE_TRANSCRIPTS = HOME / ".claude" / "projects" / PROJECT_SLUG
 WEB_EXPORTS = HOME / "claude-exports" / "web"
 # vault FUERA del repo desde la reorg 2026-07-24: proyecto-botata/{core (repo), vault}

@@ -5,7 +5,7 @@ set -euo pipefail
 REMOTE="${1:-butterbotdb}"
 REMOTE_PATH="${2:-butterbot/butterbot.db}"
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"   # = core/ (el motor)
 # Instancia (reorg 2026-07-24): 3er arg, o BOTATA_INSTANCE, o ../bots/botata-arg
 INSTANCE="${3:-${BOTATA_INSTANCE:-$REPO/../bots/botata-arg}}"
 DB="$INSTANCE/posted/botata.db"
