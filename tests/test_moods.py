@@ -214,6 +214,32 @@ def test_choose_mood_name_desconocido(conn, admin_de_test):
     assert d.kv_get(conn, "mood_state") is None
 
 
+def test_choose_mood_aproxima_con_matcher(conn, admin_de_test, monkeypatch):
+    """'tierno' no existe pero el matcher (LLM lite en prod) lo mapea a chill."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "susceptibility": 1.0}
+    monkeypatch.setattr(b, "_MOOD_MATCHER", lambda name: "chill")
+    res = b._tool_choose_mood({"mood": "tierno", "reason": "me pasaron gatitos"}, _ctx(conn))
+    assert "chill" in res.text and "tierno" in res.text  # avisa la aproximación
+    assert json.loads(d.kv_get(conn, "mood_state"))["mood"] == "chill"
+
+
+def test_choose_mood_matcher_sin_match_lista_disponibles(conn, admin_de_test, monkeypatch):
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "susceptibility": 1.0}
+    monkeypatch.setattr(b, "_MOOD_MATCHER", lambda name: None)
+    res = b._tool_choose_mood({"mood": "zapato", "reason": "x"}, _ctx(conn))
+    assert "no conozco" in res.text and "upbeat" in res.text
+    assert d.kv_get(conn, "mood_state") is None
+
+
+def test_choose_mood_schema_tiene_enum(monkeypatch):
+    """El enum en el schema previene names alucinados en origen."""
+    monkeypatch.setattr(b, "MOODS_CONFIG",
+                        {"enabled": True, "mode": "auto", "susceptibility": 0.5})
+    reg = b.build_tool_registry()
+    enum = reg.get("choose_mood").parameters["properties"]["mood"].get("enum")
+    assert enum and "chill" in enum and "upbeat" in enum
+
+
 def test_choose_mood_scopes_segun_config(monkeypatch):
     from tools import Scope
     monkeypatch.setattr(b, "MOODS_CONFIG",

@@ -2640,6 +2640,39 @@ def _mood_hysteresis_hours() -> float:
     return max(0.0, h)
 
 
+class _MoodMatch(BaseModel):
+    mood: str  # name exacto de la lista, o "" si ninguno se parece
+
+
+# Aproximador semántico para choose_mood ('tierno' → chill). Lo setea
+# build_tool_registry cuando hay router; sin él (tests) no se aproxima.
+# LLM lite y no embeddings a propósito: bge-m3 sobre palabras sueltas
+# cross-idioma es ruido puro (medido 2026-07-24: 'tierno' → snarky).
+_MOOD_MATCHER: "Callable[[str], str | None] | None" = None
+
+
+def _make_mood_matcher(router: "ModelRouter") -> "Callable[[str], str | None]":
+    def match(name: str) -> str | None:
+        index = moodmod.mood_index(MOODS_DIR)
+        if not index:
+            return None
+        options = "\n".join(f"- {n}: {d}" for n, d in index)
+        try:
+            result = RoleLLM(router, "classify").complete(
+                "Sos un clasificador. El bot quiso ponerse en un estado de ánimo que no "
+                "existe con ese nombre. Elegí el mood MÁS CERCANO en significado de la "
+                "lista (devolvé su name exacto), o mood=\"\" si ninguno se parece razonablemente.",
+                f"Estado de ánimo pedido: '{name}'\n\nMoods disponibles:\n{options}",
+                _MoodMatch,
+            )
+            matched = (result.mood or "").strip().lower()
+            return matched if any(matched == n for n, _ in index) else None
+        except Exception as e:
+            log.warning("mood: aproximación LLM falló: %s", e)
+            return None
+    return match
+
+
 def _tool_choose_mood(args: dict, ctx: ToolContext) -> ToolResult:
     """Cambia el mood VIGENTE (estado persistido, tiñe todo lo que sigue) — no
     un tono efímero de esta respuesta. El admin bypassea susceptibilidad e
@@ -2663,16 +2696,21 @@ def _tool_choose_mood(args: dict, ctx: ToolContext) -> ToolResult:
                                        "todavía no me muevo de ahí.")
         except (TypeError, ValueError):
             pass
-    chosen = moodmod.get_mood(MOODS_DIR, name)
+    chosen, approx = moodmod.get_mood(MOODS_DIR, name), ""
+    if not chosen and _MOOD_MATCHER:
+        matched = _MOOD_MATCHER(name)
+        if matched:
+            chosen = moodmod.get_mood(MOODS_DIR, matched)
+            approx = f" — tomé '{name}' como {matched}, lo más parecido que tengo"
     if not chosen:
         options = ", ".join(n for n, _ in moodmod.mood_index(MOODS_DIR))
-        return ToolResult(text=f"no conozco el mood '{name}'. Disponibles: {options}")
+        return ToolResult(text=f"no conozco el mood '{name}' ni encontré uno parecido. Disponibles: {options}")
     dbmod.kv_set(ctx.conn, "mood_state", json.dumps({
         "date": now_ar().date().isoformat(), "mood": chosen.name, "reason": reason,
         "mode": "admin" if admin else "reactive", "changed_at": now_ar().isoformat()}))
     log.info("mood: cambio %s → %s (%s) — %s",
              st.get("mood") or "(ninguno)", chosen.name, "admin" if admin else "reactivo", reason)
-    return ToolResult(text=f"listo: ahora estoy {chosen.name} ({reason}).")
+    return ToolResult(text=f"listo: ahora estoy {chosen.name} ({reason}){approx}.")
 
 
 def _tool_add_preference(args: dict, ctx: ToolContext) -> ToolResult:
@@ -3392,6 +3430,17 @@ def build_tool_registry(config: dict | None = None, *,
     else:
         mood_hint = ("Cambiá de humor SOLO ante algo muy fuerte (agresión seria, gesto "
                      "excepcional). Casi siempre la respuesta correcta es NO usar esta tool.")
+    # El enum previene el bug de moods alucinados ('tierno') en origen: el modelo
+    # elige de la lista real. Red de seguridad si igual manda otra cosa (endpoint
+    # que ignora el enum): _MOOD_MATCHER aproxima con el rol classify.
+    global _MOOD_MATCHER
+    if router is not None:
+        _MOOD_MATCHER = _make_mood_matcher(router)
+    mood_names = [n for n, _ in moodmod.mood_index(MOODS_DIR)]
+    mood_param: dict = {"type": "string",
+                        "description": "Uno de tus moods disponibles (elegí el más cercano a lo que sentís)."}
+    if mood_names:
+        mood_param["enum"] = mood_names
     reg.register(
         "choose_mood",
         "Cambia tu estado de ánimo VIGENTE (persiste y tiñe todo lo que sigas "
@@ -3399,7 +3448,7 @@ def build_tool_registry(config: dict | None = None, *,
         {
             "type": "object",
             "properties": {
-                "mood":   {"type": "string", "description": "El name EXACTO de uno de tus moods disponibles (los ves en tu system prompt)."},
+                "mood":   mood_param,
                 "reason": {"type": "string", "description": "Por qué cambiás de humor, en una frase."},
             },
             "required": ["mood", "reason"],
