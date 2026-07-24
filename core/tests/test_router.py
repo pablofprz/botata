@@ -7,7 +7,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from router import ModelRouter, build_router  # noqa: E402
+import pytest
+
+from router import ModelRouter, build_router, llm_api_key  # noqa: E402
+
+
+def test_llm_api_key_generica_y_alias():
+    assert llm_api_key({"LLM_API_KEY": "gen"}) == "gen"
+    assert llm_api_key({"OPENROUTER_API_KEY": "or"}) == "or"
+    # la genérica gana si están las dos
+    assert llm_api_key({"LLM_API_KEY": "gen", "OPENROUTER_API_KEY": "or"}) == "gen"
+    assert llm_api_key({}) == ""
+
+
+def test_build_router_legacy_sin_key_corta_claro():
+    legacy = {"base_url": "http://x/v1", "api_key": "", "reasoning": "m",
+              "lite": "m", "vision": "m"}
+    with pytest.raises(SystemExit, match="LLM_API_KEY"):
+        build_router(None, legacy=legacy, env={})
 
 
 def _make_router() -> ModelRouter:

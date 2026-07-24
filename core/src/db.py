@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS replied_posts (
     uri        TEXT PRIMARY KEY,
     cid        TEXT NOT NULL,
     author     TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'pending',   -- pending|replied|failed
+    status     TEXT NOT NULL DEFAULT 'pending',   -- pending|replied|failed|ignored
     replied_at TEXT NOT NULL,
     mode       TEXT NOT NULL
 );

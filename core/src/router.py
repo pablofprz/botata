@@ -190,6 +190,18 @@ class RoleLLM:
         return self._router.chat(self._role, messages, **kwargs)
 
 
+def llm_api_key(env: Mapping[str, str] | None = None) -> str:
+    """API key del LLM para los caminos que no declaran la suya: `LLM_API_KEY`
+    (genérica — cualquier proveedor OpenAI-compatible) con `OPENROUTER_API_KEY`
+    como alias de back-compat. Devuelve '' si no hay ninguna: los endpoints de
+    la sección MODELS pueden traer su propia key (`api_key`/`api_key_env`), así
+    que la ausencia recién es error donde la key se usa de verdad."""
+    if env is None:
+        import os
+        env = os.environ
+    return env.get("LLM_API_KEY") or env.get("OPENROUTER_API_KEY") or ""
+
+
 def build_router(
     models_config: dict | None,
     *,
@@ -215,6 +227,12 @@ def build_router(
         aliases = models_config["aliases"]
         roles = models_config.get("roles", _DEFAULT_ROLES)
     else:
+        if not legacy.get("api_key"):
+            raise SystemExit(
+                "Falta la API key del LLM: seteá LLM_API_KEY (u OPENROUTER_API_KEY) en el "
+                ".env de la instancia, o definí settings.json → MODELS.endpoints con "
+                "api_key/api_key_env propios."
+            )
         endpoints = {"default": {"base_url": legacy["base_url"], "api_key": legacy["api_key"]}}
         aliases = {
             "reasoning": [{"endpoint": "default", "model": legacy["reasoning"]}],

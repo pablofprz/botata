@@ -81,6 +81,12 @@ Marcá la cuenta como bot en el perfil (buena ciudadanía fediversal).
 
 Y tu API key compatible con OpenAI API, recomiendo usar OpenRouter u otro enrutador para probar distintos modelos, [openrouter.ai/keys](https://openrouter.ai/settings/keys).
 
+> **¿Otro proveedor de LLM?** Botata habla con cualquier API OpenAI-compatible (OpenAI,
+> Groq, DeepSeek, un Ollama local...). Cargá la key como `LLM_API_KEY`, apuntá
+> `OPENAI_ENDPOINT` (o la sección `MODELS`, que soporta varios endpoints con fallback) a tu
+> proveedor, y elegí modelos que existan ahí. Único límite: el presupuesto diario de tokens
+> mide gasto contra la API de OpenRouter — con otro proveedor dejalo apagado (su default).
+
 ### 3. Creá tu instancia
 
 ```bash

@@ -39,7 +39,8 @@ BASE_DIR = instance_dir()      # T28c: la instancia a editar (default = raíz de
 UI_HTML = REPO_DIR / "ui" / "config.html"  # asset del motor, no de la instancia
 
 ENV_KEYS = [
-    "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "OPENROUTER_API_KEY", "BRAVE_API_KEY",
+    "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "OPENROUTER_API_KEY", "LLM_API_KEY",
+    "BRAVE_API_KEY",
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY",
     "IG_USERNAME", "IG_PASSWORD", "GOOGLE_OAUTH_ID", "GOOGLE_OAUTH_SECRET",
 ]

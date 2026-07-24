@@ -2,12 +2,12 @@
 botata.py — Phase 1 (LangGraph mention flow) + Feed reader
 
 Modes:
-  --mode admin_only   only responds to ADMIN_HANDLE (default)
-  --mode open         responds to any mention
+  --mode open         responds to any mention (default)
+  --mode admin_only   only responds to ADMIN_HANDLE (para pruebas)
 
 Usage:
-  python botata.py --mode admin_only
   python botata.py --mode open
+  python botata.py --mode admin_only
 """
 
 import argparse
@@ -53,7 +53,7 @@ from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope, ALL
 from skills import skills_prompt_block, get_skill_body  # workspace de skills (T26)
 import moods as moodmod  # estados de ánimo del bot (registro conductual por día)
 from scheduler import PeriodicTask, apply_tasks_config, run_due  # tareas periódicas (T27)
-from router import ModelRouter, RoleLLM, build_router  # router de modelos + fallbacks
+from router import ModelRouter, RoleLLM, build_router, llm_api_key as router_llm_api_key  # router de modelos + fallbacks
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -166,7 +166,10 @@ BSKY_HANDLE        : str  = settings["BOT_HANDLE"]
 CHANNEL            : str  = settings.get("CHANNEL", "bluesky")
 MASTODON_BASE_URL  : str  = settings.get("MASTODON_BASE_URL", "")
 BSKY_PASSWORD      : str  = os.environ.get("BSKY_PASSWORD", "")
-OPENROUTER_API_KEY : str  = os.environ["OPENROUTER_API_KEY"]
+# API key del LLM: LLM_API_KEY (genérica, cualquier proveedor OpenAI-compatible)
+# u OPENROUTER_API_KEY (alias back-compat). Puede ser '' si MODELS.endpoints
+# declara sus propias keys — el router valida donde corresponde.
+LLM_API_KEY        : str  = router_llm_api_key()
 BRAVE_API_KEY      : str | None = os.environ.get("BRAVE_API_KEY")  # opcional (tool web_search, T8)
 ADMIN_HANDLE       : str  = settings["ADMIN_HANDLE"]   # owner (primario, para mensajes)
 # Admins = owner + los handles extra de ADMIN_HANDLES (lista opcional en settings.json).
@@ -267,7 +270,7 @@ BUDGET_CONFIG : dict = settings.get("BUDGET", {})
 # Back-compat del router: si no hay sección MODELS, se derivan los aliases de estos.
 _LEGACY_MODELS = {
     "base_url":  OPENAI_ENDPOINT,
-    "api_key":   OPENROUTER_API_KEY,
+    "api_key":   LLM_API_KEY,
     "reasoning": REASONING_MODEL,
     "lite":      LITE_MODEL,
     "vision":    IMAGE_MODEL,
@@ -4779,9 +4782,20 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
       pasan a 'failed' porque has_replied saltea 'pending' y nunca se reintentarían.
     - 'failed' que cayeron fuera de la ventana de las últimas 25 notifs → la poll
       de Bluesky no los vuelve a traer, acá los refetcheamos por URI.
+    - En modo open, los 'ignored' que descartó el filtro admin_only (mode guardado
+      = 'admin_only') vuelven a 'failed' para responderles. Los 'ignored' de posts
+      borrados quedan como están.
 
     Posts borrados (get_mention_by_uri → None) se marcan 'ignored' para no reintentarlos.
     """
+    if mode == "open":
+        cur = db.execute(
+            "UPDATE replied_posts SET status = 'failed' "
+            "WHERE status = 'ignored' AND mode = 'admin_only'"
+        )
+        if cur.rowcount:
+            log.info("Modo open: %d mention(s) ignoradas por admin_only vuelven a la cola",
+                     cur.rowcount)
     db.execute("UPDATE replied_posts SET status = 'failed' WHERE status = 'pending'")
     db.commit()
     rows = db.execute(
@@ -4794,7 +4808,11 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
         mention = bsky.get_mention_by_uri(r["uri"])
         if mention is None:
             log.warning("Could not refetch %s (deleted?) — marking ignored", r["uri"])
-            update_status(db, r["uri"], "ignored")
+            # mode se pisa con el actual para que el rescate de arriba no lo
+            # vuelva a encolar en cada arranque
+            db.execute("UPDATE replied_posts SET status = 'ignored', mode = ? WHERE uri = ?",
+                       (mode, r["uri"]))
+            db.commit()
             continue
         try:
             process_mention(graph, db, mention, mode)
@@ -4880,7 +4898,7 @@ def build_budget_guard(conn: sqlite3.Connection) -> "budgetmod.BudgetGuard":
     return budgetmod.BudgetGuard(
         get=lambda k: dbmod.kv_get(conn, k),
         set=lambda k, v: dbmod.kv_set(conn, k, v),
-        fetch=lambda: budgetmod.fetch_openrouter_usage(OPENAI_ENDPOINT, OPENROUTER_API_KEY),
+        fetch=lambda: budgetmod.fetch_openrouter_usage(OPENAI_ENDPOINT, LLM_API_KEY),
         daily_usd=float(BUDGET_CONFIG.get("daily_usd", 1.0)),
         enabled=bool(BUDGET_CONFIG.get("enabled", False)),
     )
@@ -4969,7 +4987,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         choices=["admin_only", "open"],
-        default="admin_only",
+        default="open",
     )
     parser.add_argument(
         "--fetch-feeds",

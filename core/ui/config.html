@@ -81,7 +81,9 @@
   <section id="credenciales"><h2>2 · Credenciales (.env)</h2>
     <p class="hint">La contraseña de la cuenta del bot y las API keys. Write-only: los valores
       actuales nunca se muestran. Campo vacío = no tocar. Mínimo para arrancar:
-      <code>BSKY_PASSWORD</code> + <code>OPENROUTER_API_KEY</code>.</p>
+      <code>BSKY_PASSWORD</code> (o el token de Mastodon) + <code>OPENROUTER_API_KEY</code>
+      — o <code>LLM_API_KEY</code>, equivalente, para cualquier otro proveedor
+      OpenAI-compatible (el endpoint se elige en Modelos).</p>
     <div class="card" id="c-env"></div>
     <button onclick="saveEnv()">Guardar credenciales</button></section>
 

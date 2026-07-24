@@ -46,7 +46,9 @@ log = logging.getLogger("botata.catalog")
 _settings = json.loads((BASE_DIR / "config" / "settings.json").read_text(encoding="utf-8"))
 IMAGE_MODEL = _settings.get("IMAGE_MODEL", "google/gemini-2.5-flash")
 OPENAI_ENDPOINT = _settings.get("OPENAI_ENDPOINT", "https://openrouter.ai/api/v1")
-OPENROUTER_API_KEY = __import__("os").environ["OPENROUTER_API_KEY"]
+from router import llm_api_key  # LLM_API_KEY u OPENROUTER_API_KEY (alias); '' si no hay
+
+LLM_API_KEY = llm_api_key()
 
 DESCRIBE_SYSTEM = (
     "Sos un asistente que analiza imágenes para un bot de una comunidad argentina. "
@@ -167,7 +169,10 @@ def _read_sidecar(img_path: Path, external_id: str) -> dict:
 def cmd_sync(dry_run: bool = False) -> None:
     """Sincroniza el catálogo: para cada imagen sin catalogar, genera descripción y la inserta."""
     conn = dbmod.init_db()
-    llm = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENAI_ENDPOINT)
+    if not LLM_API_KEY:
+        raise SystemExit("Falta la API key del LLM: seteá LLM_API_KEY (u OPENROUTER_API_KEY) "
+                         "en el .env de la instancia.")
+    llm = OpenAI(api_key=LLM_API_KEY, base_url=OPENAI_ENDPOINT)
     # Asegura la carpeta de input manual (T12): lugar conocido para tirar imágenes a mano.
     MANUAL_DIR.mkdir(parents=True, exist_ok=True)
 
