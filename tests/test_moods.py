@@ -231,13 +231,35 @@ def test_choose_mood_matcher_sin_match_lista_disponibles(conn, admin_de_test, mo
     assert d.kv_get(conn, "mood_state") is None
 
 
+def test_default_mood_cuando_nada_resuelve(conn):
+    """MOODS.default = base cuando no hay estado del día (auto) ni schedule (manual)."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "default": "chill"}
+    assert b.current_mood(conn).name == "chill"          # sin pase del día → default
+    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "default": "chill",
+                      "manual": {"fixed": "", "schedule": {}}}
+    assert b.current_mood(conn).name == "chill"          # día sin mapear → default
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    assert b.current_mood(conn) is None                  # sin default → como antes
+
+
+def test_choose_mood_reset_vuelve_al_default(conn, admin_de_test):
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "default": "chill",
+                      "susceptibility": 1.0, "hysteresis_hours": 0}
+    b._tool_choose_mood({"mood": "angry", "reason": "me putearon"}, _ctx(conn))
+    assert b.current_mood(conn).name == "angry"
+    res = b._tool_choose_mood({"mood": "reset", "reason": "orden"}, _ctx(conn, "admin.test"))
+    assert "chill" in res.text
+    assert d.kv_get(conn, "mood_state") is None
+    assert b.current_mood(conn).name == "chill"
+
+
 def test_choose_mood_schema_tiene_enum(monkeypatch):
     """El enum en el schema previene names alucinados en origen."""
     monkeypatch.setattr(b, "MOODS_CONFIG",
                         {"enabled": True, "mode": "auto", "susceptibility": 0.5})
     reg = b.build_tool_registry()
     enum = reg.get("choose_mood").parameters["properties"]["mood"].get("enum")
-    assert enum and "chill" in enum and "upbeat" in enum
+    assert enum and "chill" in enum and "upbeat" in enum and "reset" in enum
 
 
 def test_choose_mood_scopes_segun_config(monkeypatch):

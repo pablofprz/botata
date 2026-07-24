@@ -920,6 +920,12 @@ def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+def kv_del(conn: sqlite3.Connection, key: str) -> None:
+    """Borra una clave del estado misceláneo (tabla kv). No-op si no existe."""
+    conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+    conn.commit()
+
+
 def _norm_text(text: str) -> str:
     return " ".join(text.lower().split())
 

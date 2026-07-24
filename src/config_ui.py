@@ -135,6 +135,8 @@ def validate_settings(s: dict) -> list[str]:
         hyst = moods.get("hysteresis_hours", 2)
         if not isinstance(hyst, (int, float)) or isinstance(hyst, bool) or hyst < 0:
             errs.append("MOODS.hysteresis_hours debe ser un número >= 0")
+        if not isinstance(moods.get("default", ""), str):
+            errs.append("MOODS.default debe ser un string (name de un mood, o vacío)")
         sched = (moods.get("manual") or {}).get("schedule") or {}
         bad_days = set(sched) - _WEEKDAYS
         if bad_days:

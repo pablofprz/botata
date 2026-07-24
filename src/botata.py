@@ -2292,14 +2292,21 @@ def _mood_state_get(conn: sqlite3.Connection) -> dict | None:
         return None
 
 
+def _default_mood():
+    """El mood de base (MOODS.default) o None si no está configurado/no existe."""
+    name = (MOODS_CONFIG.get("default") or "").strip()
+    return moodmod.get_mood(MOODS_DIR, name) if name else None
+
+
 def current_mood(conn: sqlite3.Connection):
-    """El mood vigente HOY, o None si moods está apagado / no resuelve.
+    """El mood vigente HOY, o el default (MOODS.default) si nada más resuelve.
 
     - disabled            → None (comportamiento normal).
     - manual + fixed      → ese mood.
-    - manual + schedule   → el del día de la semana (None si el día no está mapeado).
+    - manual + schedule   → el del día de la semana (default si el día no está mapeado).
     - auto                → el guardado en kv para la fecha de hoy (lo escribe
-                            run_mood_pass); None hasta que corra el pase del día.
+                            run_mood_pass); default hasta que corra el pase del día.
+    Sin MOODS.default configurado, el fallback sigue siendo None (sin mood).
     """
     cfg = MOODS_CONFIG
     if not cfg.get("enabled"):
@@ -2308,14 +2315,14 @@ def current_mood(conn: sqlite3.Connection):
         st = _mood_state_get(conn)
         if st and st.get("date") == now_ar().date().isoformat() and st.get("mood"):
             return moodmod.get_mood(MOODS_DIR, st["mood"])
-        return None
+        return _default_mood()
     manual = cfg.get("manual", {}) or {}
     fixed = (manual.get("fixed") or "").strip()
     if fixed:
         return moodmod.get_mood(MOODS_DIR, fixed)
     schedule = manual.get("schedule", {}) or {}
     name = (schedule.get(_WEEKDAY_KEYS[now_ar().weekday()]) or "").strip()
-    return moodmod.get_mood(MOODS_DIR, name) if name else None
+    return moodmod.get_mood(MOODS_DIR, name) if name else _default_mood()
 
 
 def mood_line(conn: sqlite3.Connection) -> str:
@@ -2696,6 +2703,14 @@ def _tool_choose_mood(args: dict, ctx: ToolContext) -> ToolResult:
                                        "todavía no me muevo de ahí.")
         except (TypeError, ValueError):
             pass
+    if name in ("reset", "default"):
+        dbmod.kv_del(ctx.conn, "mood_state")
+        base = _default_mood()
+        log.info("mood: reset %s → %s (%s)", st.get("mood") or "(ninguno)",
+                 base.name if base else "(sin default)", "admin" if admin else "reactivo")
+        if base:
+            return ToolResult(text=f"listo, humor reiniciado: vuelvo a mi base ({base.name}).")
+        return ToolResult(text="listo, humor reiniciado (sin mood hasta el próximo pase diario).")
     chosen, approx = moodmod.get_mood(MOODS_DIR, name), ""
     if not chosen and _MOOD_MATCHER:
         matched = _MOOD_MATCHER(name)
@@ -3438,9 +3453,10 @@ def build_tool_registry(config: dict | None = None, *,
         _MOOD_MATCHER = _make_mood_matcher(router)
     mood_names = [n for n, _ in moodmod.mood_index(MOODS_DIR)]
     mood_param: dict = {"type": "string",
-                        "description": "Uno de tus moods disponibles (elegí el más cercano a lo que sentís)."}
+                        "description": "Uno de tus moods disponibles (elegí el más cercano a lo que "
+                                       "sentís), o 'reset' para volver a tu humor de base."}
     if mood_names:
-        mood_param["enum"] = mood_names
+        mood_param["enum"] = mood_names + ["reset"]
     reg.register(
         "choose_mood",
         "Cambia tu estado de ánimo VIGENTE (persiste y tiñe todo lo que sigas "

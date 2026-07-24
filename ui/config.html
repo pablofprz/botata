@@ -122,7 +122,8 @@
       se editan en <code>moods/*.md</code>. En <b>auto</b> el bot elige una vez por día y puede
       cambiar durante el día vía la tool <code>choose_mood</code>: la <b>susceptibilidad</b> (0–1)
       calibra cuán fácil cede (0 = nunca) y la <b>histéresis</b> es el mínimo de horas entre
-      cambios. Requiere reiniciar el bot.</p>
+      cambios. El <b>mood por default</b> es la base cuando nada más resuelve (y adonde vuelve
+      <code>choose_mood reset</code>). Requiere reiniciar el bot.</p>
     <div class="card" id="c-moods"></div>
     <button onclick="saveSettings()">Guardar</button></section>
 
@@ -245,6 +246,7 @@ function renderMoods() {
     <div style="max-width:140px">${selectInput(m, "mode", "modo", ["manual", "auto"], "manual")}</div>
     <div style="max-width:170px">${textInput(m, "susceptibility", "susceptibilidad (0–1)", "number")}</div>
     <div style="max-width:170px">${textInput(m, "hysteresis_hours", "histéresis (horas)", "number")}</div>
+    <div style="max-width:170px">${selectInput(m, "default", "mood por default", names, "")}</div>
   </div>
   <p class="hint">${m.enabled ? today : "moods apagados — tono normal"}</p>
   <div class="row">
