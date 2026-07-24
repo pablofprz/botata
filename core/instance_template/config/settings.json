@@ -1,4 +1,6 @@
 {
+	"BOT_NAME": "",
+	"LANGUAGE": "es",
 	"CHANNEL": "bluesky",
 	"MASTODON_BASE_URL": "",
 	"BOT_HANDLE": "",

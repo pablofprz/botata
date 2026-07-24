@@ -21,12 +21,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+log = logging.getLogger("botata.config_ui")
 
 from tools import ALL_SCOPES
 from skills import load_skills, _parse_frontmatter
@@ -70,6 +75,10 @@ def validate_settings(s: dict) -> list[str]:
     channel = s.get("CHANNEL", "bluesky")
     if channel not in _CHANNELS:
         errs.append(f"CHANNEL inválido '{channel}' (usar {sorted(_CHANNELS)})")
+    if s.get("LANGUAGE", "es") not in ("es", "en"):
+        errs.append("LANGUAGE inválido (es|en)")
+    if not isinstance(s.get("BOT_NAME", ""), str):
+        errs.append("BOT_NAME debe ser un string")
     if channel == "mastodon" and not str(
             s.get("MASTODON_BASE_URL", "")).startswith(("http://", "https://")):
         errs.append("CHANNEL=mastodon requiere MASTODON_BASE_URL "
@@ -213,6 +222,68 @@ def validate_news(news: list) -> list[str]:
     return errs
 
 
+# ─── Catálogo de tools del motor ─────────────────────────────────────────────
+def tool_catalog(settings: dict) -> list[dict]:
+    """Todas las tools que el motor registra (nombre/descripción/scopes/enabled),
+    con la sección TOOLS del settings aplicada. Lazy-importa botata (pesado, ~seg
+    la primera vez); best-effort: si algo falla, lista vacía y la UI degrada."""
+    try:
+        import botata
+        reg = botata.build_tool_registry(settings.get("TOOLS", {}),
+                                         bsky=None, router=None, mcp_config=None)
+        return [{"name": t.name, "description": t.description,
+                 "scopes": sorted(t.scopes), "enabled": t.enabled,
+                 "groups": sorted(getattr(t, "groups", None) or [])}
+                for t in reg._tools.values()]
+    except Exception as e:
+        log.warning("tool_catalog no disponible: %s", e)
+        return []
+
+
+# ─── Proceso del bot (start/stop/restart desde la UI) ────────────────────────
+_BOT: dict = {"proc": None, "log": None}
+
+
+def bot_status(base_dir: Path) -> dict:
+    proc = _BOT.get("proc")
+    running = proc is not None and proc.poll() is None
+    log_path = base_dir / "bot.log"
+    tail = ""
+    if log_path.exists():
+        try:
+            tail = "\n".join(
+                log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:])
+        except Exception:
+            pass
+    return {"running": running, "pid": proc.pid if running else None, "log_tail": tail}
+
+
+def bot_control(base_dir: Path, action: str, mode: str = "open") -> list[str]:
+    proc = _BOT.get("proc")
+    if action in ("stop", "restart") and proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        _BOT["proc"] = None
+    if action in ("start", "restart"):
+        if _BOT.get("proc") is not None and _BOT["proc"].poll() is None:
+            return ["el bot ya está corriendo (pará primero)"]
+        if mode not in ("open", "admin_only"):
+            return ["mode inválido (open|admin_only)"]
+        logf = open(base_dir / "bot.log", "a", encoding="utf-8")
+        _BOT["log"] = logf
+        _BOT["proc"] = subprocess.Popen(
+            [sys.executable, "-m", "botata", "--instance", str(base_dir), "--mode", mode],
+            stdout=logf, stderr=subprocess.STDOUT)
+    elif action == "stop":
+        pass
+    elif action != "restart":
+        return ["action inválida (start|stop|restart)"]
+    return []
+
+
 # ─── Store: lectura/escritura atómica de los archivos de config ──────────────
 class ConfigStore:
     """Paths inyectables (tests usan un tmp_path con fixtures)."""
@@ -252,13 +323,83 @@ class ConfigStore:
             moods = [{"name": n, "description": d} for n, d in mood_index(self.moods_dir)]
         except Exception:
             pass
+        soul_path = self.base / "context" / "SOUL.md"
         return {
             "settings": settings,
             "news": news,
             "env_keys": self._env_status(),
             "skills": self._skills_info(),
             "moods": moods,
+            "soul": soul_path.read_text(encoding="utf-8") if soul_path.exists() else "",
+            "tools_catalog": tool_catalog(settings),
+            "instance": {"path": str(self.base), "name": self.base.name,
+                         "scrape_dir": str(self.base / "scrape")},
         }
+
+    def write_soul(self, text: str) -> list[str]:
+        if not (text or "").strip():
+            return ["SOUL.md no puede quedar vacío — es la personalidad del bot"]
+        path = self.base / "context" / "SOUL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write(path, text)
+        return []
+
+    def run_action(self, action: str) -> dict:
+        """Corre un script de mantenimiento del motor sobre esta instancia."""
+        src = Path(__file__).resolve().parent
+        cmds = {
+            "parse_memory": [sys.executable, str(src / "parse_memory.py"),
+                             "--instance", str(self.base)],
+            "catalog_sync": [sys.executable, str(src / "catalog.py"), "sync",
+                             "--instance", str(self.base)],
+        }
+        if action not in cmds:
+            return {"ok": False, "errors": [f"acción desconocida: {action}"]}
+        try:
+            r = subprocess.run(cmds[action], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=600)
+            out = ((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip()
+            return {"ok": r.returncode == 0, "output": out[-8000:],
+                    "errors": [] if r.returncode == 0 else [f"exit {r.returncode}"]}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "errors": ["timeout (10 min)"]}
+
+    def debug_chat(self, text: str, author: str | None = None) -> dict:
+        """Mensaje al pipeline REAL del bot (como mención del admin), sin red
+        social: la respuesta vuelve acá en vez de postearse."""
+        if not (text or "").strip():
+            return {"ok": False, "errors": ["mensaje vacío"]}
+        try:
+            import botata
+            reply = botata.debug_chat(text.strip(), author=author)
+            return {"ok": True, "reply": reply}
+        except SystemExit as e:
+            return {"ok": False, "errors": [str(e)]}
+        except Exception as e:
+            return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
+
+    def danger(self, action: str, confirm: str) -> list[str]:
+        """Acciones irreversibles. `confirm` debe ser el nombre de la instancia."""
+        if confirm != self.base.name:
+            return [f"confirmación incorrecta: escribí '{self.base.name}' para confirmar"]
+        if action == "reset_memory":
+            posted = self.base / "posted"
+            for f in ("botata.db", "botata.db-wal", "botata.db-shm"):
+                try:
+                    (posted / f).unlink(missing_ok=True)
+                except OSError as e:
+                    return [f"no pude borrar {f}: {e} (¿el bot está corriendo?)"]
+            return []
+        if action == "delete_instance":
+            repo_root = Path(__file__).resolve().parent.parent
+            if self.base in (repo_root, repo_root.parent):
+                return ["esta instancia es el repo mismo — borrala a mano si es lo que querés"]
+            try:
+                shutil.rmtree(self.base)
+            except OSError as e:
+                return [f"no pude borrar la instancia: {e} (¿el bot está corriendo?)"]
+            return []
+        return ["action inválida (reset_memory|delete_instance)"]
 
     def read_data(self) -> dict:
         """Datos vivos del DB del bot: memoria general, preferencias, calendario
@@ -478,6 +619,8 @@ def make_handler(store: ConfigStore):
                 self._send(200, store.read_all())
             elif self.path == "/api/data":
                 self._send(200, store.read_data())
+            elif self.path == "/api/bot":
+                self._send(200, bot_status(store.base))
             else:
                 self._send(404, {"error": "not found"})
 
@@ -498,6 +641,20 @@ def make_handler(store: ConfigStore):
                     errs = store.edit_preferences(body)
                 elif self.path == "/api/events":
                     errs = store.edit_events(body)
+                elif self.path == "/api/soul":
+                    errs = store.write_soul(body.get("text", ""))
+                elif self.path == "/api/bot":
+                    errs = bot_control(store.base, body.get("action", ""),
+                                       body.get("mode", "open"))
+                elif self.path == "/api/run":
+                    self._send(200, store.run_action(body.get("action", "")))
+                    return
+                elif self.path == "/api/debug/chat":
+                    self._send(200, store.debug_chat(body.get("text", ""),
+                                                     body.get("author")))
+                    return
+                elif self.path == "/api/danger":
+                    errs = store.danger(body.get("action", ""), body.get("confirm", ""))
                 else:
                     self._send(404, {"error": "not found"})
                     return

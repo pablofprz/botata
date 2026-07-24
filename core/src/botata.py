@@ -1258,6 +1258,76 @@ def build_channel():
     return BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
 
 
+class _DebugChannel:
+    """Canal falso para el chat de debug (config UI): corre el pipeline REAL
+    (clasificación, tools, LLM, memoria) sin tocar ninguna red social — las
+    replies se capturan en `.sent` en vez de postearse."""
+
+    def __init__(self, handle: str):
+        self.handle = handle
+        self.sent: list[str] = []
+
+    def get_mentions(self): return []
+    def mark_all_read(self): pass
+    def get_thread_info(self, uri, cid): return "", uri, cid, ""
+    def get_mention_by_uri(self, uri): return None
+    def get_profile(self, handle): return None
+    def resolve_did(self, handle): return None
+    def block_user(self, handle): return False
+    def set_media_describer(self, fn): pass
+    def get_feed_posts(self, *a, **k): return []
+    def get_list_members(self, uri): return []
+    def get_follows(self): return []
+
+    def reply(self, text, parent_uri, parent_cid, root_uri, root_cid, media_path=None):
+        self.sent.append(text)
+        return f"debug://reply/{len(self.sent)}"
+
+    def post(self, text, limit=295, media_path=None):
+        self.sent.append(text)
+        return f"debug://post/{len(self.sent)}"
+
+
+_DEBUG_CHAT: dict = {}
+
+
+def debug_chat(text: str, author: str | None = None) -> str:
+    """Procesa `text` como una mención del admin por el grafo completo (LLM y
+    tools REALES — un comando de config acá cambia la config de verdad), pero
+    contra un canal falso: la respuesta se devuelve en vez de postearse.
+    Lo usa la pestaña Debug de la config UI."""
+    if "graph" not in _DEBUG_CHAT:
+        conn = init_db()
+        router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+        channel = _DebugChannel(BSKY_HANDLE or "botata")
+        _DEBUG_CHAT.update(graph=build_graph(router, channel, conn),
+                           channel=channel, n=0)
+    channel = _DEBUG_CHAT["channel"]
+    _DEBUG_CHAT["n"] += 1
+    uri = f"debug://chat/{os.getpid()}/{_DEBUG_CHAT['n']}"
+    before = len(channel.sent)
+    state: MentionState = {
+        "mention_uri"          : uri,
+        "mention_cid"          : uri,
+        "mention_text"         : text,
+        "author_handle"        : (author or ADMIN_HANDLE).lstrip("@").lower(),
+        "thread_context"       : "",
+        "thread_root_uri"      : uri,
+        "thread_root_cid"      : uri,
+        "mode"                 : "open",
+        "is_admin"             : is_admin_handle((author or ADMIN_HANDLE).lstrip("@").lower()),
+        "classification"       : None,
+        "reply_text"           : None,
+        "should_update_profile": False,
+        "image_path"           : None,
+        "posted_reply_uri"     : None,
+        "error"                : None,
+    }
+    _DEBUG_CHAT["graph"].invoke(state)
+    replies = channel.sent[before:]
+    return "\n---\n".join(replies) if replies else "(el bot decidió no responder)"
+
+
 # ---------------------------------------------------------------------------
 # LLM: el cliente vive en router.py (ModelRouter + RoleLLM). Cada nodo recibe un
 # RoleLLM ligado a su rol; el router resuelve endpoint/modelo y hace fallback.
