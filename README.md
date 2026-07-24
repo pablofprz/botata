@@ -42,11 +42,15 @@ docs/                    ← ARQUITECTURA.md · CLAUDE.md / ROADMAP.md en la ra�
 ```bash
 python -m venv .venv && .venv/Scripts/activate      # (Linux: source .venv/bin/activate)
 pip install -e "core[dev]"                           # instala el motor en editable + dev tools
-python core/src/init_instance.py bots/mi-bot         # crea una instancia desde la plantilla
-#   → completá bots/mi-bot/.env y editá SOUL.md + settings.json
-python core/src/config_ui.py --instance bots/mi-bot  # panel web local (127.0.0.1)
+python -m botata --init mi-bot                       # crea bots/mi-bot + abre la UI de config
+#   → en la UI: 1) canal y credenciales · 2) admin y grupos · 3) el resto
+#   → después editá bots/mi-bot/context/SOUL.md (la personalidad)
 python -m botata --instance bots/mi-bot --mode open  # arranca el bot (open | admin_only)
 ```
+
+(`--init` acepta un nombre — va a `bots/<nombre>` — o un path. Para re-configurar una
+instancia existente: `python -m botata --init mi-bot` de nuevo, o
+`python core/src/config_ui.py --instance bots/mi-bot`.)
 
 La primera corrida descarga el modelo de embeddings (bge-m3, ~2 GB, cacheado por HuggingFace).
 

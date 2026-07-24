@@ -37,6 +37,14 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import AliasChoices, BaseModel, Field
 from typing_extensions import TypedDict
 
+# `--init <nombre>`: pipeline de alta de instancia (crea bots/<nombre> + abre la UI).
+# Va ANTES de importar los módulos que resuelven la instancia en import-time
+# (db, botata mismo): una instancia recién nacida no tiene .env ni identidad.
+if "--init" in sys.argv:
+    from init_instance import run_init
+    run_init(sys.argv)
+    raise SystemExit(0)
+
 import instance  # resolución del directorio de instancia (T28c)
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
 import budget as budgetmod  # guard de presupuesto diario de tokens
@@ -4922,7 +4930,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--instance",
         help="Directorio de la instancia (identidad+datos del agente). "
-             "Default: raíz del repo. También via env BOTATA_INSTANCE.",
+             "También via env BOTATA_INSTANCE.",
+    )
+    parser.add_argument(
+        "--init",
+        metavar="NOMBRE",
+        help="Crea la instancia bots/<NOMBRE> desde la plantilla y abre la UI de "
+             "configuración. (Se procesa antes de arrancar el bot.)",
     )
     parser.add_argument(
         "--mode",

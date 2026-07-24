@@ -52,13 +52,13 @@
 <body>
 <nav>
   <h1>🤖 botata</h1>
-  <a href="#identidad">Identidad</a>
-  <a href="#presupuesto">Presupuesto</a>
-  <a href="#credenciales">Credenciales</a>
+  <a href="#canal">1 · Canal</a>
+  <a href="#credenciales">2 · Credenciales</a>
+  <a href="#admin">3 · Admin</a>
+  <a href="#grupos">4 · Grupos</a>
   <a href="#modelos">Modelos</a>
   <a href="#feeds">Feeds</a>
   <a href="#tools">Tools</a>
-  <a href="#grupos">Grupos</a>
   <a href="#tareas">Tareas</a>
   <a href="#moods">Moods</a>
   <a href="#prefs">Gustos</a>
@@ -67,26 +67,40 @@
   <a href="#mcp">MCP</a>
   <a href="#noticias">Noticias</a>
   <a href="#skills">Skills</a>
+  <a href="#presupuesto">Presupuesto</a>
 </nav>
 <main>
   <p class="hint">⚠️ Los cambios en settings, credenciales y noticias requieren <b>reiniciar el bot</b>.
      Las skills se recargan solas.</p>
 
-  <section id="identidad"><h2>Identidad</h2><div class="card" id="c-identidad"></div>
+  <section id="canal"><h2>1 · Canal e identidad del bot</h2>
+    <p class="hint">Empezá por acá: en qué red vive el bot y con qué cuenta habla.</p>
+    <div class="card" id="c-identidad"></div>
     <button onclick="saveSettings()">Guardar</button></section>
 
-  <section id="presupuesto"><h2>Presupuesto diario</h2>
-    <p class="hint">Guard económico: mide el gasto del día contra el endpoint de créditos de
-      OpenRouter; superado el límite, el bot <b>duerme hasta el día siguiente</b> (no corre
-      ninguna tarea, menciones incluidas). "Anunciar" postea la siesta/despertar
-      (<code>prompts/burned.json</code> / <code>hello.json</code>).</p>
-    <div class="card" id="c-budget"></div>
-    <button onclick="saveSettings()">Guardar</button></section>
-
-  <section id="credenciales"><h2>Credenciales (.env)</h2>
-    <p class="hint">Write-only: los valores actuales nunca se muestran. Campo vacío = no tocar.</p>
+  <section id="credenciales"><h2>2 · Credenciales (.env)</h2>
+    <p class="hint">La contraseña de la cuenta del bot y las API keys. Write-only: los valores
+      actuales nunca se muestran. Campo vacío = no tocar. Mínimo para arrancar:
+      <code>BSKY_PASSWORD</code> + <code>OPENROUTER_API_KEY</code>.</p>
     <div class="card" id="c-env"></div>
     <button onclick="saveEnv()">Guardar credenciales</button></section>
+
+  <section id="admin"><h2>3 · Admin (obligatorio)</h2>
+    <p class="hint">El admin controla el bot por menciones y bypassea todos los checks de grupos.
+      Sin <b>handle del admin</b> el settings no valida. Los co-admins tienen el mismo acceso
+      total.</p>
+    <div class="card" id="c-admin"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
+
+  <section id="grupos"><h2>4 · Grupos de usuarios</h2>
+    <p class="hint">Listas de handles con nombre libre (ej. <code>music_users</code>). Se
+      referencian desde la columna "grupos" de las Tools. El admin no necesita estar en
+      ningún grupo: bypassea todos los checks. Además de handles, una entrada puede ser
+      <code>feed:nombre</code> (ej. <code>feed:polcifeed</code>) = todos los miembros de ese
+      feed (solo type list/following), resueltos en vivo con cache de 15 min.</p>
+    <div id="c-groups"></div>
+    <button class="ghost" onclick="addGroup()">+ grupo</button>
+    <button onclick="saveSettings()">Guardar</button></section>
 
   <section id="modelos"><h2>Modelos (router)</h2>
     <p class="hint">Endpoints → aliases (cadenas de fallback en orden) → roles.</p>
@@ -102,16 +116,6 @@
       La columna <b>grupos</b> restringe la tool a los miembros de esos grupos (vacía = todos;
       el admin siempre puede).</p>
     <div class="card" id="c-tools"></div>
-    <button onclick="saveSettings()">Guardar</button></section>
-
-  <section id="grupos"><h2>Grupos de usuarios</h2>
-    <p class="hint">Listas de handles con nombre libre (ej. <code>music_users</code>). Se
-      referencian desde la columna "grupos" de las Tools. El admin no necesita estar en
-      ningún grupo: bypassea todos los checks. Además de handles, una entrada puede ser
-      <code>feed:nombre</code> (ej. <code>feed:polcifeed</code>) = todos los miembros de ese
-      feed (solo type list/following), resueltos en vivo con cache de 15 min.</p>
-    <div id="c-groups"></div>
-    <button class="ghost" onclick="addGroup()">+ grupo</button>
     <button onclick="saveSettings()">Guardar</button></section>
 
   <section id="tareas"><h2>Tareas periódicas</h2><div class="card" id="c-tasks"></div>
@@ -161,6 +165,14 @@
   <section id="skills"><h2>Skills</h2>
     <p class="hint">Toggle instantáneo (hot-reload). El contenido se edita en <code>skills/*.md</code>.</p>
     <div class="card" id="c-skills"></div></section>
+
+  <section id="presupuesto"><h2>Presupuesto diario</h2>
+    <p class="hint">Guard económico: mide el gasto del día contra el endpoint de créditos de
+      OpenRouter; superado el límite, el bot <b>duerme hasta el día siguiente</b> (no corre
+      ninguna tarea, menciones incluidas). "Anunciar" postea la siesta/despertar
+      (<code>prompts/burned.json</code> / <code>hello.json</code>).</p>
+    <div class="card" id="c-budget"></div>
+    <button onclick="saveSettings()">Guardar</button></section>
 </main>
 <div id="toast"></div>
 
@@ -214,9 +226,23 @@ function selectInput(obj, key, label, options, dflt) {
 
 function render() {
   $("c-identidad").innerHTML = `<div class="row">
-    <div>${textInput(S, "BOT_HANDLE", "Handle del bot")}</div>
-    <div>${textInput(S, "ADMIN_HANDLE", "Handle del admin")}</div>
-    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll (segundos)", "number")}</div></div>`;
+    <div><label>Canal<select disabled title="Mastodon y Discord llegan con T28">
+      <option selected>bluesky</option>
+      <option disabled>mastodon (próximamente)</option>
+      <option disabled>discord (próximamente)</option>
+    </select></label></div>
+    <div>${textInput(S, "BOT_HANDLE", "Handle del bot (la cuenta con la que habla)")}</div>
+    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll de menciones (segundos)", "number")}</div></div>`;
+
+  const adminsCsv = (S.ADMIN_HANDLES || []).join(", ");
+  $("c-admin").innerHTML = `<div class="row">
+    <div>${textInput(S, "ADMIN_HANDLE", "Handle del admin (obligatorio)")}</div>
+    <div><label>Co-admins (separados por coma, opcional)
+      <input id="i-admin-handles" value="${esc(adminsCsv)}" placeholder="otro.handle, tercero.handle"></label></div></div>`;
+  $("i-admin-handles").addEventListener("input", e => {
+    S.ADMIN_HANDLES = e.target.value.split(",").map(h => h.trim().replace(/^@/, ""))
+      .filter(Boolean);
+  });
 
   renderBudget();
 

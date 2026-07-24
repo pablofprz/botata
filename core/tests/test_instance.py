@@ -75,3 +75,21 @@ def test_init_instance_no_pisa_existente(tmp_path):
     init_instance(target)
     with pytest.raises(SystemExit):
         init_instance(target)
+
+
+def test_resolve_init_target():
+    from init_instance import REPO_DIR, resolve_init_target
+
+    # nombre pelado → bots/<nombre> en el workspace (padre del motor)
+    assert resolve_init_target("mi-bot") == (REPO_DIR.parent / "bots" / "mi-bot").resolve()
+    # un path (con separador o absoluto) se respeta tal cual
+    assert resolve_init_target(str(REPO_DIR / "x")) == (REPO_DIR / "x").resolve()
+
+
+def test_run_init_sin_nombre_corta():
+    from init_instance import run_init
+
+    with pytest.raises(SystemExit, match="--init"):
+        run_init(["botata", "--init"])
+    with pytest.raises(SystemExit, match="nombre"):
+        run_init(["botata", "--init", "--no-browser"])

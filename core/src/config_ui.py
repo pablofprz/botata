@@ -61,6 +61,10 @@ def validate_settings(s: dict) -> list[str]:
     for key in ("BOT_HANDLE", "ADMIN_HANDLE"):
         if not (isinstance(s.get(key), str) and s[key].strip()):
             errs.append(f"{key} es obligatorio")
+    admins = s.get("ADMIN_HANDLES", [])
+    if not (isinstance(admins, list)
+            and all(isinstance(h, str) and h.strip() for h in admins)):
+        errs.append("ADMIN_HANDLES debe ser una lista de handles no vacíos")
     if not isinstance(s.get("POLL_INTERVAL_SECONDS", 60), (int, float)):
         errs.append("POLL_INTERVAL_SECONDS debe ser numérico")
 
