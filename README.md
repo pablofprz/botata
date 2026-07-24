@@ -5,21 +5,21 @@
 <h1 align="center">Botata</h1>
 
 <p align="center">
-  <b>Un bot comunitario con alma de agente, para Bluesky y Mastodon.</b><br>
-  No responde con plantillas: un LLM decide qué contestar, cuándo postear,
-  qué herramienta usar y qué recordar de cada persona.
+  <b>Un bot comunitario con alma de agente, para Bluesky y próximamente Mastodon, Discord y Telegram.</b><br>
+  Integración de memoria general y de usuarios, tools, skills, calendario, herramientas de personalidad (moods, likes, dislikes)   
+  Conectá una Key compatible con API Open AI, crea una cuenta y comenzá a setearlo para tu comunidad definiendo admin y grupos de usuarios con permisos personalizados. 
+
+    
 </p>
 
 ---
 
 ## ¿Qué es Botata?
 
-Botata es un bot para comunidades en redes sociales. Vive en una cuenta de **Bluesky** o
-**Mastodon**, responde cuando lo mencionan, lee el feed de su comunidad, aprende de la gente
-con la que habla y decide por sí mismo cuándo tiene algo que decir.
+Botata es un bot para comunidades en redes sociales. Vive en una cuenta de **Bluesky** (próximamente nuevas redes), responde cuando lo mencionan, lee el feed de su comunidad, aprende de la gente con la que habla y decide por sí mismo cuándo tiene algo que decir.
 
 Es **genérico y multi-comunidad**: la personalidad, el idioma, las fuentes y las herramientas
-son configuración, no código. El mismo motor puede correr un bot de shitposting argentino, uno
+son configuración, no código. El mismo motor puede correr un bot de memes, uno
 de observación de aves o el asistente de un club de software libre — cada uno es una
 **instancia** con su propia identidad y su propia memoria.
 
@@ -28,7 +28,7 @@ de observación de aves o el asistente de un club de software libre — cada uno
 - 🧠 **Memoria real por usuario** — hechos autorrevelados, historial de conversaciones y
   lecciones de comportamiento, con búsqueda híbrida (embeddings locales + keywords) en SQLite.
   Sin servicios externos: los embeddings (`bge-m3`) corren en tu CPU.
-- 🕊️ **Multi-canal** — Bluesky y Mastodon con el mismo motor (Discord en el roadmap).
+- 🕊️ **Multi-canal** —  con el mismo motor (Mastodon, Discord y Telegram en el roadmap).
 - 🛠️ **Herramientas** — búsqueda web, música (Spotify), videos (YouTube), calendario,
   noticias RSS, imágenes, y cualquier server **MCP** externo como tool extra.
 - 🎭 **Personalidad en archivos** — `SOUL.md` (quién es), `skills/` (cómo responder sobre
@@ -45,7 +45,7 @@ de observación de aves o el asistente de un club de software libre — cada uno
 ## Requisitos
 
 - **Python 3.12+**
-- Una cuenta para el bot en **Bluesky** o en una instancia de **Mastodon**
+- Una cuenta para el bot en **Bluesky** 
 - Una API key de **[OpenRouter](https://openrouter.ai/)** (o cualquier endpoint compatible
   con la API de OpenAI, incluido un Ollama local)
 - ~2 GB de disco para el modelo de embeddings (se descarga solo la primera vez)
@@ -73,12 +73,13 @@ pip install -e core
 
 **Bluesky:** creá la cuenta del bot y generá una **app password** en
 *Settings → Privacy and Security → App Passwords* (nunca uses la contraseña principal).
+También funciona con credenciales de cuenta normal, pero no es recomendado. 
 
-**Mastodon:** creá la cuenta del bot en tu instancia y generá un token en
+**Mastodon (soon):** creá la cuenta del bot en tu instancia y generá un token en
 *Preferencias → Desarrollo → Nueva aplicación*, con permisos `read` y `write`.
 Marcá la cuenta como bot en el perfil (buena ciudadanía fediversal).
 
-Y tu API key de OpenRouter, de [openrouter.ai/keys](https://openrouter.ai/settings/keys).
+Y tu API key compatible con OpenAI API, recomiendo usar OpenRouter u otro enrutador para probar distintos modelos, [openrouter.ai/keys](https://openrouter.ai/settings/keys).
 
 ### 3. Creá tu instancia
 
@@ -92,7 +93,7 @@ de configuración en el navegador. Completá en orden:
 1. **Canal** — `bluesky` o `mastodon` (+ URL de tu instancia si es Mastodon) y el handle
    del bot.
 2. **Credenciales** — `BSKY_PASSWORD` (la app password) o `MASTODON_ACCESS_TOKEN` (el
-   token), y `OPENROUTER_API_KEY`. Se guardan en el `.env` de tu instancia, nunca se
+   token), y `LLM_API_KEY`. Se guardan en el `.env` de tu instancia, nunca se
    muestran de vuelta.
 3. **Admin** — TU handle. El admin controla el bot por menciones y es la única cuenta que
    puede usar los comandos de administración. En Mastodon: si tu cuenta está en la misma
