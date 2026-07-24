@@ -585,8 +585,12 @@ function renderModels() {
     html += `<table><tr><th colspan="3"><code>${esc(alias)}</code>
       <button class="danger" style="float:right" onclick="delAlias('${esc(alias)}')">×</button></th></tr>`;
     chain.forEach((hop, i) => {
+      // Si el hop referencia un endpoint que no existe (typo, endpoint borrado),
+      // se muestra igual en el select para que se vea y se pueda corregir.
+      const opts = Object.keys(m.endpoints);
+      if (hop.endpoint && !opts.includes(hop.endpoint)) opts.unshift(hop.endpoint);
       html += `<tr><td style="width:200px">${selectInput(hop, "endpoint", i === 0 ? "endpoint" : "",
-               Object.keys(m.endpoints), hop.endpoint)}</td>
+               opts, hop.endpoint)}</td>
                <td>${textInput(hop, "model", i === 0 ? "model" : "")}</td>
                <td style="width:40px"><button class="danger" onclick="delHop('${esc(alias)}',${i})">×</button></td></tr>`;
     });
@@ -602,17 +606,26 @@ function renderModels() {
   $("c-modelos").innerHTML = html;
 }
 function addEndpoint() {
-  const name = prompt("Nombre del endpoint (ej. openrouter, local):");
+  let name = prompt("Nombre CORTO del endpoint (ej: openrouter, openai, local).\n" +
+                    "La URL va después, en el campo base_url.");
   if (!name || !name.trim()) return;
+  name = name.trim();
+  let base_url = "";
+  if (name.includes("://")) {  // pegaron la URL acá — la acomodamos sola
+    base_url = name;
+    name = new URL(name).hostname.replace(/^www\./, "").split(".")[0] || "endpoint";
+  }
   (S.MODELS ??= {endpoints: {}, aliases: {}, roles: {}});
-  S.MODELS.endpoints[name.trim()] = {base_url: "", api_key_env: ""};
+  S.MODELS.endpoints[name] = {base_url, api_key_env: ""};
   markDirty(); render();
 }
 function delEndpoint(name) { delete S.MODELS.endpoints[name]; markDirty(); render(); }
 function addAlias() {
+  if (!Object.keys(S.MODELS?.endpoints ?? {}).length)
+    return toast("primero agregá un endpoint — el alias necesita apuntar a uno", false);
   const name = prompt("Nombre del alias (ej. reasoning, lite, vision):");
   if (!name || !name.trim()) return;
-  S.MODELS.aliases[name.trim()] = [{endpoint: Object.keys(S.MODELS.endpoints)[0] ?? "", model: ""}];
+  S.MODELS.aliases[name.trim()] = [{endpoint: Object.keys(S.MODELS.endpoints)[0], model: ""}];
   markDirty(); render();
 }
 function delAlias(name) { delete S.MODELS.aliases[name]; markDirty(); render(); }
@@ -832,7 +845,19 @@ function addFeed() { (S.FEEDS ??= []).push({name: "", type: "list", uri: "", int
 function addNews() { NEWS.push({url: "", title: "", description: "", category: "",
   mode: "comment", enabled: false, interval_hours: 6}); markDirty(); render(); }
 
+function pruneForSave() {
+  // Tarjetas a medio llenar no bloquean el guardado global: se descartan.
+  if (S.FEEDS) S.FEEDS = S.FEEDS.filter(f => (f.name || "").trim() || (f.uri || "").trim());
+  NEWS = NEWS.filter(n => (n.url || "").trim() || (n.title || "").trim());
+  // La UI crea S.MODELS vacío al renderizar; guardarlo vacío rompería el
+  // router (sección presente pero sin endpoints). Sin contenido → fuera.
+  const m = S.MODELS;
+  if (m && !Object.keys(m.endpoints ?? {}).length && !Object.keys(m.aliases ?? {}).length)
+    delete S.MODELS;
+}
+
 async function saveAll() {
+  pruneForSave();
   try {
     await api("/api/settings", S);
     await api("/api/news", NEWS);
@@ -842,6 +867,7 @@ async function saveAll() {
     }
     dirty = false;
     $("savebar").classList.remove("dirty");
+    render();  // refleja lo podado (tarjetas vacías descartadas)
     navStatus();
     if (BOT.running) {
       toast("guardado ✓ — el bot corre con la config VIEJA: relanzalo para aplicar");
