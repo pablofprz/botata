@@ -161,7 +161,11 @@ def current_datetime_line() -> str:
 settings = load_json(SETTINGS_PATH)
 
 BSKY_HANDLE        : str  = settings["BOT_HANDLE"]
-BSKY_PASSWORD      : str  = os.environ["BSKY_PASSWORD"]
+# T28: canal de la instancia. Cada credencial se exige recién al construir SU canal
+# (una instancia Mastodon no necesita BSKY_PASSWORD y viceversa).
+CHANNEL            : str  = settings.get("CHANNEL", "bluesky")
+MASTODON_BASE_URL  : str  = settings.get("MASTODON_BASE_URL", "")
+BSKY_PASSWORD      : str  = os.environ.get("BSKY_PASSWORD", "")
 OPENROUTER_API_KEY : str  = os.environ["OPENROUTER_API_KEY"]
 BRAVE_API_KEY      : str | None = os.environ.get("BRAVE_API_KEY")  # opcional (tool web_search, T8)
 ADMIN_HANDLE       : str  = settings["ADMIN_HANDLE"]   # owner (primario, para mensajes)
@@ -1228,6 +1232,29 @@ class BskyClient:
         return ""
 
 
+def build_channel():
+    """T28: construye el canal de la instancia según settings.CHANNEL.
+
+    El grafo le habla al canal por duck typing (contrato en channels.py);
+    BskyClient es la implementación de referencia. Las credenciales se exigen
+    acá, por canal — no en import-time."""
+    if CHANNEL == "mastodon":
+        from channels import MastodonChannel
+        token = os.environ.get("MASTODON_ACCESS_TOKEN", "")
+        if not MASTODON_BASE_URL:
+            raise SystemExit("CHANNEL=mastodon requiere MASTODON_BASE_URL en settings.json "
+                             "(ej. https://mastodon.social)")
+        if not token:
+            raise SystemExit("CHANNEL=mastodon requiere MASTODON_ACCESS_TOKEN en el .env "
+                             "de la instancia (token de la app, scopes read+write)")
+        return MastodonChannel(MASTODON_BASE_URL, token)
+    if CHANNEL != "bluesky":
+        raise SystemExit(f"CHANNEL desconocido: '{CHANNEL}' (soportados: bluesky, mastodon)")
+    if not BSKY_PASSWORD:
+        raise SystemExit("falta BSKY_PASSWORD en el .env de la instancia")
+    return BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+
+
 # ---------------------------------------------------------------------------
 # LLM: el cliente vive en router.py (ModelRouter + RoleLLM). Cada nodo recibe un
 # RoleLLM ligado a su rol; el router resuelve endpoint/modelo y hace fallback.
@@ -1838,7 +1865,7 @@ def _run_feed_pass(graph, *, force_post: bool = False, full_backfill: bool = Fal
 def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None:
     """Loop proactivo (T5/T6) como pase único desde CLI (`--proactive`). Ignora intervalo."""
     db       = init_db()
-    bsky     = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    bsky     = build_channel()
     router   = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
     graph    = build_feed_graph(router, bsky, db, registry)
@@ -1965,7 +1992,8 @@ _RUNTIME_TASKS: list[PeriodicTask] = []
 # Defensa en profundidad: aunque un handler futuro lo intente, el guard rechaza.
 _PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "ADMIN_HANDLES", "MODELS",
                        "OPENAI_ENDPOINT", "REASONING_MODEL", "LITE_MODEL", "IMAGE_MODEL",
-                       "SPOTIFY_REDIRECT_URI", "USER_GROUPS")
+                       "SPOTIFY_REDIRECT_URI", "USER_GROUPS",
+                       "CHANNEL", "MASTODON_BASE_URL")  # T28: cambiar de red = solo UI
 
 # Las tools de config no se tocan a sí mismas (anti auto-lockout / escalación).
 _CONFIG_TOOL_NAMES = frozenset({
@@ -2045,7 +2073,7 @@ def _as_bool(value) -> bool | None:
 def run_news_loop() -> None:
     """Pase único del pipeline de noticias desde CLI (`--news`). Ignora el intervalo."""
     db     = init_db()
-    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    bsky   = build_channel()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     run_news_pass(bsky, router, db, force=True, respect_interval=False)
     log.info("News pass completo.")
@@ -2194,7 +2222,7 @@ def run_heartbeat_pass(bsky: "BskyClient", router: ModelRouter,
 def run_heartbeat_loop() -> None:
     """Pase único de heartbeat desde CLI (`--heartbeat`). Ignora intervalo y toggle."""
     db     = init_db()
-    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    bsky   = build_channel()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
     run_heartbeat_pass(bsky, router, db, registry)
@@ -2537,7 +2565,7 @@ def run_public_reflection_pass(bsky: "BskyClient", router: ModelRouter,
 def run_public_reflection_loop() -> None:
     """Pase único desde CLI (`--reflect-public`). Ignora intervalo y toggle."""
     db     = init_db()
-    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    bsky   = build_channel()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     run_public_reflection_pass(bsky, router, db)
     log.info("Public reflection pass completo.")
@@ -2610,7 +2638,7 @@ def run_playlist_share_pass(bsky: "BskyClient", router: ModelRouter,
 def run_playlist_share_loop() -> None:
     """Pase único desde CLI (`--share-playlist`). Ignora intervalo y toggle."""
     db     = init_db()
-    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    bsky   = build_channel()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     run_playlist_share_pass(bsky, router, db)
     log.info("Playlist share pass completo.")
@@ -4781,7 +4809,7 @@ def run(mode: str) -> None:
     log.info("Starting botata — mode: %s", mode.upper())
 
     db     = init_db()
-    bsky   = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+    bsky   = build_channel()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     log.info("Router de modelos: %s", router.describe())
 
@@ -5029,7 +5057,7 @@ if __name__ == "__main__":
 
     elif args.fetch_feeds:
         db        = init_db()
-        bsky      = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+        bsky      = build_channel()
         router    = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
         processor = FeedProcessor(bsky, router, db)
         for feed in FEEDS_CONFIG:
@@ -5043,7 +5071,7 @@ if __name__ == "__main__":
 
     elif args.post_summary:
         db        = init_db()
-        bsky      = BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)
+        bsky      = build_channel()
         router    = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
         processor = FeedProcessor(bsky, router, db)
         processor.post_opinion(feed_name=args.post_summary)

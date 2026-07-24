@@ -39,12 +39,13 @@ BASE_DIR = instance_dir()      # T28c: la instancia a editar (default = raíz de
 UI_HTML = REPO_DIR / "ui" / "config.html"  # asset del motor, no de la instancia
 
 ENV_KEYS = [
-    "BSKY_PASSWORD", "OPENROUTER_API_KEY", "BRAVE_API_KEY",
+    "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "OPENROUTER_API_KEY", "BRAVE_API_KEY",
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY",
     "IG_USERNAME", "IG_PASSWORD", "GOOGLE_OAUTH_ID", "GOOGLE_OAUTH_SECRET",
 ]
 
-_FEED_TYPES = {"list", "feed", "following"}
+_CHANNELS = {"bluesky", "mastodon"}
+_FEED_TYPES = {"list", "feed", "following", "local"}  # `local` = timeline local (Mastodon)
 _POLICIES = {"conservative", "balanced", "active"}
 _NEWS_MODES = {"comment", "post"}
 _MCP_TRANSPORTS = {"stdio", "http"}
@@ -65,6 +66,13 @@ def validate_settings(s: dict) -> list[str]:
     if not (isinstance(admins, list)
             and all(isinstance(h, str) and h.strip() for h in admins)):
         errs.append("ADMIN_HANDLES debe ser una lista de handles no vacíos")
+    channel = s.get("CHANNEL", "bluesky")
+    if channel not in _CHANNELS:
+        errs.append(f"CHANNEL inválido '{channel}' (usar {sorted(_CHANNELS)})")
+    if channel == "mastodon" and not str(
+            s.get("MASTODON_BASE_URL", "")).startswith(("http://", "https://")):
+        errs.append("CHANNEL=mastodon requiere MASTODON_BASE_URL "
+                    "(ej. https://mastodon.social)")
     if not isinstance(s.get("POLL_INTERVAL_SECONDS", 60), (int, float)):
         errs.append("POLL_INTERVAL_SECONDS debe ser numérico")
 
@@ -74,8 +82,8 @@ def validate_settings(s: dict) -> list[str]:
             errs.append(f"{tag}: falta name")
         if feed.get("type", "list") not in _FEED_TYPES:
             errs.append(f"{tag}: type inválido '{feed.get('type')}' (usar {sorted(_FEED_TYPES)})")
-        if feed.get("type", "list") != "following" and not feed.get("uri"):
-            errs.append(f"{tag}: falta uri (obligatoria salvo type=following)")
+        if feed.get("type", "list") not in ("following", "local") and not feed.get("uri"):
+            errs.append(f"{tag}: falta uri (obligatoria salvo type=following/local)")
         if feed.get("posting_policy", "balanced") not in _POLICIES:
             errs.append(f"{tag}: posting_policy inválida '{feed.get('posting_policy')}'")
 

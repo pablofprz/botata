@@ -12,6 +12,8 @@ dependencies = [
     "openai>=1.30",
     # Cliente Bluesky (AT Protocol)
     "atproto>=0.0.5",
+    # Cliente Mastodon (canal T28)
+    "Mastodon.py>=1.8",
     # Config / env
     "python-dotenv>=1.0",
     # Zona horaria IANA (America/Argentina/Buenos_Aires) — Windows no trae tzdata del SO
@@ -39,7 +41,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["botata", "db", "router", "tools", "skills", "moods", "scheduler", "mcp_tools", "mem_admin", "budget", "clearsky", "config_ui", "catalog", "parse_memory", "spotify_auth", "instance", "init_instance"]
+py-modules = ["botata", "db", "router", "tools", "skills", "moods", "scheduler", "mcp_tools", "mem_admin", "budget", "clearsky", "config_ui", "catalog", "parse_memory", "spotify_auth", "instance", "init_instance", "channels"]
 
 # --- ruff: tipado estricto, sin opinionated noise ---------------------------
 [tool.ruff]

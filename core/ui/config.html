@@ -225,14 +225,19 @@ function selectInput(obj, key, label, options, dflt) {
 }
 
 function render() {
+  const isMasto = (S.CHANNEL || "bluesky") === "mastodon";
   $("c-identidad").innerHTML = `<div class="row">
-    <div><label>Canal<select disabled title="Mastodon y Discord llegan con T28">
-      <option selected>bluesky</option>
-      <option disabled>mastodon (próximamente)</option>
-      <option disabled>discord (próximamente)</option>
-    </select></label></div>
+    <div>${selectInput(S, "CHANNEL", "Canal", ["bluesky", "mastodon"], "bluesky")}</div>
     <div>${textInput(S, "BOT_HANDLE", "Handle del bot (la cuenta con la que habla)")}</div>
-    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll de menciones (segundos)", "number")}</div></div>`;
+    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll de menciones (segundos)", "number")}</div></div>
+    <div class="row" id="masto-row" style="${isMasto ? "" : "display:none"}">
+    <div>${textInput(S, "MASTODON_BASE_URL", "URL de la instancia Mastodon (ej. https://mastodon.social)")}</div>
+    <div><span class="hint">El token va en Credenciales → <code>MASTODON_ACCESS_TOKEN</code>
+      (app con scopes read + write en Preferencias → Desarrollo de tu instancia).</span></div></div>`;
+  setTimeout(() => document.querySelectorAll("#c-identidad select").forEach(sel =>
+    sel.addEventListener("change", () => {
+      $("masto-row").style.display = (S.CHANNEL === "mastodon") ? "" : "none";
+    })));
 
   const adminsCsv = (S.ADMIN_HANDLES || []).join(", ");
   $("c-admin").innerHTML = `<div class="row">

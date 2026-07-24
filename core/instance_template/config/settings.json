@@ -1,4 +1,6 @@
 {
+	"CHANNEL": "bluesky",
+	"MASTODON_BASE_URL": "",
 	"BOT_HANDLE": "",
 	"ADMIN_HANDLE": "",
 	"ADMIN_HANDLES": [],
