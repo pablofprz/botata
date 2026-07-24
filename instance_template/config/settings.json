@@ -1,0 +1,61 @@
+{
+	"BOT_HANDLE": "",
+	"ADMIN_HANDLE": "",
+	"ADMIN_HANDLES": [],
+	"OPENAI_ENDPOINT": "https://openrouter.ai/api/v1",
+	"REASONING_MODEL": "deepseek/deepseek-v4-pro",
+	"LITE_MODEL": "deepseek/deepseek-v4-flash",
+	"IMAGE_MODEL": "google/gemini-2.5-flash",
+	"POLL_INTERVAL_SECONDS": 60,
+	"NEWS_ENABLED": false,
+	"FEEDS": [],
+	"TOOLS": {},
+	"USER_GROUPS": {},
+	"BOT_ACTIONS_FROM": "admin",
+	"BUDGET": {
+		"enabled": false,
+		"daily_usd": 1.0,
+		"announce": true
+	},
+	"MOODS": {
+		"enabled": false,
+		"mode": "manual",
+		"default": "",
+		"susceptibility": 0.5,
+		"hysteresis_hours": 2,
+		"manual": {
+			"fixed": "",
+			"schedule": {}
+		}
+	},
+	"PREFS": {
+		"mode": "manual"
+	},
+	"TASKS": {
+		"feed": {
+			"enabled": true
+		},
+		"news": {
+			"enabled": false
+		},
+		"mentions": {
+			"enabled": true
+		},
+		"heartbeat": {
+			"enabled": false,
+			"interval_hours": 12.0
+		},
+		"reflection": {
+			"enabled": true,
+			"interval_hours": 24.0
+		},
+		"public_reflection": {
+			"enabled": false,
+			"interval_hours": 24.0
+		},
+		"playlist_share": {
+			"enabled": false,
+			"interval_hours": 24.0
+		}
+	}
+}

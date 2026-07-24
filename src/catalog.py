@@ -31,8 +31,9 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 import db as dbmod
+from instance import instance_dir
 
-BASE_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
+BASE_DIR = instance_dir()  # T28c: directorio de instancia (default = raíz del repo)
 load_dotenv(BASE_DIR / ".env")
 
 logging.basicConfig(
@@ -257,6 +258,7 @@ def cmd_stats() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Catálogo de imágenes de botata")
+    parser.add_argument("--instance", help="Directorio de la instancia (default: raíz del repo)")
     parser.add_argument(
         "cmd", choices=["sync", "stats"],
         help="sync: procesa archivos nuevos sin catalogar | stats: resumen del catálogo",

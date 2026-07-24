@@ -25,7 +25,11 @@ import sqlite_vec
 log = logging.getLogger("botata.db")
 
 # ─── Constantes ────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
+# T28c: la DB vive en el directorio de INSTANCIA (--instance / BOTATA_INSTANCE;
+# default = raíz del repo, back-compat).
+from instance import instance_dir  # noqa: E402
+
+BASE_DIR = instance_dir()
 DB_PATH = BASE_DIR / "posted" / "botata.db"
 
 # bge-m3 (dense) → 1024 dimensiones. Verificado contra config.json del modelo.

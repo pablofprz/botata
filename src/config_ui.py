@@ -32,8 +32,11 @@ from tools import ALL_SCOPES
 from skills import load_skills, _parse_frontmatter
 from moods import mood_index
 
-BASE_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
-UI_HTML = BASE_DIR / "ui" / "config.html"
+from instance import instance_dir
+
+REPO_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
+BASE_DIR = instance_dir()      # T28c: la instancia a editar (default = raíz del repo)
+UI_HTML = REPO_DIR / "ui" / "config.html"  # asset del motor, no de la instancia
 
 ENV_KEYS = [
     "BSKY_PASSWORD", "OPENROUTER_API_KEY", "BRAVE_API_KEY",
@@ -507,10 +510,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Panel de configuración de botata (localhost)")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--instance", help="Directorio de la instancia a editar (default: raíz del repo)")
     args = parser.parse_args()
     httpd = serve(BASE_DIR, args.port)
     url = f"http://127.0.0.1:{args.port}/"
-    print(f"botata config UI → {url}  (Ctrl+C para salir)")
+    print(f"botata config UI → {url}  (Ctrl+C para salir)  [instancia: {BASE_DIR}]")
     print("Los cambios en settings/.env/noticias requieren reiniciar el bot.")
     if not args.no_browser:
         webbrowser.open(url)

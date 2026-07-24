@@ -37,6 +37,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import AliasChoices, BaseModel, Field
 from typing_extensions import TypedDict
 
+import instance  # resolución del directorio de instancia (T28c)
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
 import budget as budgetmod  # guard de presupuesto diario de tokens
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
@@ -77,7 +78,9 @@ def log_llm_context(label: str, system: str, user: str) -> None:
 # Paths
 # ---------------------------------------------------------------------------
 
-BASE_DIR    = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
+# T28c: BASE_DIR es el directorio de INSTANCIA (identidad+datos del agente),
+# no la raíz del repo — coinciden solo en el layout back-compat sin --instance.
+BASE_DIR    = instance.instance_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONTEXT_DIR = BASE_DIR / "context"
 PROMPTS_DIR = BASE_DIR / "prompts"
@@ -4914,6 +4917,11 @@ def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="botata")
+    parser.add_argument(
+        "--instance",
+        help="Directorio de la instancia (identidad+datos del agente). "
+             "Default: raíz del repo. También via env BOTATA_INSTANCE.",
+    )
     parser.add_argument(
         "--mode",
         choices=["admin_only", "open"],

@@ -137,6 +137,7 @@ def dump_relationships(conn: sqlite3.Connection, out: Path) -> int:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Vuelca la memoria del bot a archivos legibles.")
+    p.add_argument("--instance", help="Directorio de la instancia (default: raíz del repo)")
     p.add_argument("--db", default=str(db.DB_PATH), help="Ruta a botata.db.")
     p.add_argument("--out", default="parsed_memory", help="Carpeta de salida.")
     args = p.parse_args()

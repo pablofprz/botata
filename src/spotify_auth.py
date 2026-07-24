@@ -27,7 +27,9 @@ from pathlib import Path
 
 log = logging.getLogger("botata.spotify_auth")
 
-BASE_DIR   = Path(__file__).resolve().parent.parent
+from instance import instance_dir
+
+BASE_DIR   = instance_dir()  # T28c: directorio de instancia (default = raíz del repo)
 CACHE_PATH = BASE_DIR / "context" / ".spotify_cache"
 
 _AUTH_URL  = "https://accounts.spotify.com/authorize"
@@ -183,5 +185,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OAuth de usuario de Spotify para Botata")
     parser.add_argument("--test", action="store_true",
                         help="verificar token + lectura de la playlist configurada")
+    parser.add_argument("--instance", help="Directorio de la instancia (default: raíz del repo)")
     args = parser.parse_args()
     test_playlist() if args.test else authorize_interactive()

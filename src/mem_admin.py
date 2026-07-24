@@ -186,6 +186,7 @@ def _lookup_handle(conn: sqlite3.Connection, fact_id: int) -> str:
 # ─── argparse ────────────────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Administración de memoria de botata.")
+    p.add_argument("--instance", help="Directorio de la instancia (default: raíz del repo)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pl = sub.add_parser("list", help="Listar facts de un usuario, lecciones, o resumen.")
