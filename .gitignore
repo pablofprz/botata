@@ -10,9 +10,10 @@ graphify-out/
 # Cuarentena de la reorg 2026-07-24 — borrar tras revisar
 _reorg-leftovers/
 
-# Claude Code — settings locales y worktrees; los comandos SÍ se versionan
-.claude/settings.local.json
-.claude/worktrees/
+# Interno (repo público desde 2026-07-24): instrucciones de desarrollo y
+# tooling de Claude Code quedan locales, no se versionan
+/CLAUDE.md
+.claude/
 
 # ─── Environment / credenciales ─────────────────────────────────────
 .env
