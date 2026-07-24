@@ -360,7 +360,10 @@ def embed(text: str) -> bytes:
     implícitamente, así que no se normaliza acá.
     """
     model = get_embedder()
-    vec = model.encode(text, convert_to_numpy=True)
+    # show_progress_bar=False: sin esto, sentence-transformers imprime una barra
+    # "Batches: 100%|..." POR LLAMADA cuando el logging está en INFO — spam puro
+    # para encodes de un solo texto.
+    vec = model.encode(text, convert_to_numpy=True, show_progress_bar=False)
     return np.asarray(vec, dtype="float32").tobytes()
 
 
