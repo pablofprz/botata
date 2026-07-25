@@ -792,6 +792,33 @@ def mark_image_used(conn: sqlite3.Connection, image_id: int) -> None:
     conn.commit()
 
 
+MEDIA_REUSE_COOLDOWN_H = 24 * 14  # dos semanas sin repetir un medio, si hay alternativa
+
+
+def prefer_fresh_media(
+    results: list[dict],
+    *,
+    cooldown_hours: int = MEDIA_REUSE_COOLDOWN_H,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Reordena candidatos del catálogo para no repetir el mismo medio.
+
+    Los nunca usados (o usados antes del cooldown) van primero, en su orden de
+    relevancia; los usados dentro del cooldown van al fondo, del más viejo al
+    más nuevo. Con catálogo chico degrada con dignidad: si TODO está en
+    cooldown, gana el menos recientemente usado (nunca el de recién).
+    `used_at` se guarda con datetime('now') (UTC) — se compara como string.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=cooldown_hours)).strftime("%Y-%m-%d %H:%M:%S")
+    fresh = [r for r in results if not r.get("used_at") or r["used_at"] < cutoff]
+    stale = sorted(
+        (r for r in results if r.get("used_at") and r["used_at"] >= cutoff),
+        key=lambda r: r["used_at"],
+    )
+    return fresh + stale
+
+
 # ─── Events / calendario (T4) ──────────────────────────────────────────────
 # event_at se guarda en hora de Argentina (ISO 8601). Las queries usan por
 # default "ahora"/"hoy" en AR (UTC-3, sin DST); pasá `now`/`day` explícito para

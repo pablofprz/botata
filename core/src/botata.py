@@ -1817,7 +1817,8 @@ def resolve_catalog_image(conn: sqlite3.Connection, query: str | None,
     """
     if not query or not query.strip():
         return None
-    results = dbmod.hybrid_search_image_catalog(conn, query.strip(), limit=8)
+    results = dbmod.prefer_fresh_media(
+        dbmod.hybrid_search_image_catalog(conn, query.strip(), limit=8))
     for img in results:
         desc = (img.get("description") or "").strip()
         cat  = (img.get("category") or "").strip().lower()
@@ -2899,8 +2900,10 @@ def _tool_use_skill(args: dict, ctx: ToolContext) -> ToolResult:
 def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     query    = args.get("query", "")
     category = args.get("category")
-    results  = dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category, limit=8)
-    # Primer candidato con path posteable (frame → video padre; ver _postable_media_path).
+    results  = dbmod.prefer_fresh_media(
+        dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category, limit=8))
+    # Primer candidato con path posteable (frame → video padre; ver _postable_media_path)
+    # — prefer_fresh_media ya mandó al fondo los usados hace poco (anti-repetición).
     best, best_path = None, None
     for r in results:
         p = _postable_media_path(r.get("file_path") or "")

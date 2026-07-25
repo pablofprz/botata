@@ -181,3 +181,40 @@ def test_postfeed_no_image_query_no_image(tmp_path, monkeypatch):
     bsky = FakeBsky()
     b.PostFeedNode(bsky, conn).run(_post_state(autonomous_images=True, image_query=""))
     assert bsky.calls[0][1] is None
+
+
+# ─── anti-repetición: prefer_fresh_media (cooldown de reuso) ─────────────────
+def _ts(hours_ago: float) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_fresh_media_keeps_relevance_order_when_unused():
+    rows = [_row(id=1), _row(id=2), _row(id=3)]
+    assert [r["id"] for r in d.prefer_fresh_media(rows)] == [1, 2, 3]
+
+
+def test_fresh_media_sends_recently_used_to_the_back():
+    rows = [_row(id=1, used_at=_ts(2)), _row(id=2), _row(id=3)]
+    assert [r["id"] for r in d.prefer_fresh_media(rows)] == [2, 3, 1]
+
+
+def test_fresh_media_old_usage_counts_as_fresh():
+    # Usada hace un mes (fuera del cooldown de 2 semanas) → mantiene su relevancia.
+    rows = [_row(id=1, used_at=_ts(24 * 30)), _row(id=2)]
+    assert [r["id"] for r in d.prefer_fresh_media(rows)] == [1, 2]
+
+
+def test_fresh_media_all_in_cooldown_degrades_to_lru():
+    # Catálogo chico, todo usado hace poco → gana el MENOS recientemente usado.
+    rows = [_row(id=1, used_at=_ts(1)), _row(id=2, used_at=_ts(48)), _row(id=3, used_at=_ts(10))]
+    assert [r["id"] for r in d.prefer_fresh_media(rows)] == [2, 3, 1]
+
+
+def test_resolve_skips_recently_used_candidate(monkeypatch, used):
+    # El top de relevancia fue posteado hace 2 horas → resolve elige el segundo.
+    rows = [_row(id=1, used_at=_ts(2)),
+            _row(id=2, file_path="scrape/pictures/manual/y.jpg")]
+    _mock_search(monkeypatch, rows)
+    assert b.resolve_catalog_image(None, "gato") == str(b.BASE_DIR / "scrape/pictures/manual/y.jpg")
+    assert used == [2]
