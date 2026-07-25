@@ -109,3 +109,109 @@ def test_apply_config_overrides():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ─── diagnóstico de errores + cursor tras un blip de red ────────────────────
+class _NetErr(Exception):
+    """Excepción sin mensaje, como las de atproto (str(e) == '')."""
+
+
+def test_network_error_loguea_el_tipo_aunque_no_haya_mensaje(caplog):
+    def boom():
+        raise _NetErr()
+
+    run_due([PeriodicTask("net", boom)], get_last=lambda n: None,
+            save_last=lambda n: None, network_errors=(_NetErr,))
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "_NetErr" in msg          # el tipo va SIEMPRE: antes decía solo "()"
+    assert "error de red ()" not in msg
+
+
+def test_describe_error_custom_se_usa(caplog):
+    def boom():
+        raise _NetErr()
+
+    run_due([PeriodicTask("net", boom)], get_last=lambda n: None,
+            save_last=lambda n: None, network_errors=(_NetErr,),
+            describe_error=lambda e: "HTTP 429 · RateLimitExceeded")
+    assert any("HTTP 429" in r.getMessage() for r in caplog.records)
+
+
+def test_error_de_red_no_consume_el_intervalo():
+    # Una tarea horaria que falla por red debe reintentar el próximo ciclo,
+    # no saltearse la hora entera.
+    cursors = Cursors()
+
+    def boom():
+        raise _NetErr()
+
+    run_due([PeriodicTask("heartbeat", boom, interval_hours=1.0)],
+            get_last=cursors.get, save_last=cursors.save, network_errors=(_NetErr,))
+    assert cursors.data == {}
+
+
+def test_error_inesperado_si_consume_el_intervalo():
+    # Un bug real no debe reintentarse en loop caliente cada iteración.
+    cursors = Cursors()
+
+    def boom():
+        raise RuntimeError("bug de verdad")
+
+    run_due([PeriodicTask("heartbeat", boom, interval_hours=1.0)],
+            get_last=cursors.get, save_last=cursors.save, network_errors=(_NetErr,))
+    assert "task:heartbeat" in cursors.data
+
+
+def test_exito_guarda_el_cursor():
+    cursors = Cursors()
+    run_due([PeriodicTask("heartbeat", lambda: None, interval_hours=1.0)],
+            get_last=cursors.get, save_last=cursors.save, network_errors=(_NetErr,))
+    assert "task:heartbeat" in cursors.data
+
+
+# ─── describe_bsky_error: las excepciones de atproto traen str(e) == '' ─────
+def _bsky_mods():
+    import os
+    os.environ.setdefault("BSKY_PASSWORD", "dummy")
+    import botata as b
+    from atproto_client.exceptions import InvokeTimeoutError, NetworkError, RequestException
+    from atproto_client.models.common import XrpcError
+    from atproto_client.request import Response
+    return b, InvokeTimeoutError, NetworkError, RequestException, XrpcError, Response
+
+
+def test_describe_bsky_timeout_muestra_la_causa():
+    import httpx
+    b, InvokeTimeoutError, *_ = _bsky_mods()
+    try:
+        try:
+            raise httpx.ConnectTimeout("timed out")
+        except httpx.TimeoutException as e:
+            raise InvokeTimeoutError from e
+    except Exception as e:
+        out = b.describe_bsky_error(e)
+    # Sin .response el detalle vive en la causa httpx — sin esto el log iba vacío.
+    assert "InvokeTimeoutError" in out and "ConnectTimeout" in out
+
+
+def test_describe_bsky_rate_limit_muestra_status_y_reset():
+    b, _, _, RequestException, XrpcError, Response = _bsky_mods()
+    resp = Response(success=False, status_code=429,
+                    content=XrpcError(error="RateLimitExceeded", message="Rate Limit Exceeded"),
+                    headers={"ratelimit-reset": "1769368800"})
+    out = b.describe_bsky_error(RequestException(resp))
+    assert "429" in out and "RateLimitExceeded" in out and "se libera" in out
+
+
+def test_describe_bsky_error_http_generico():
+    b, _, _, RequestException, XrpcError, Response = _bsky_mods()
+    resp = Response(success=False, status_code=503,
+                    content=XrpcError(error="UpstreamFailure", message="Upstream Failure"),
+                    headers={})
+    assert "503" in b.describe_bsky_error(RequestException(resp))
+
+
+def test_describe_bsky_cuerpo_no_json_no_rompe():
+    b, _, NetworkError, _, _, Response = _bsky_mods()
+    resp = Response(success=False, status_code=502, content=b"<html>bad gateway</html>", headers={})
+    assert b.describe_bsky_error(NetworkError(resp)) == "NetworkError HTTP 502"

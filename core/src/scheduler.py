@@ -68,22 +68,40 @@ def _is_due(task: PeriodicTask, get_last: Callable[[str], str | None]) -> bool:
     return elapsed_h >= task.interval_hours
 
 
+def _default_describe(e: Exception) -> str:
+    """Detalle de un error para el log. Muchas excepciones de cliente traen
+    `str(e)` vacío, así que el TIPO siempre va: sin él el log no dice nada."""
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+
+
 def run_due(tasks: list[PeriodicTask], *,
             get_last: Callable[[str], str | None],
             save_last: Callable[[str], None],
-            network_errors: tuple[type[Exception], ...] = ()) -> None:
-    """Corre las tareas habilitadas que estén al día. Nunca lanza (salvo BaseException)."""
+            network_errors: tuple[type[Exception], ...] = (),
+            describe_error: Callable[[Exception], str] | None = None) -> None:
+    """Corre las tareas habilitadas que estén al día. Nunca lanza (salvo BaseException).
+
+    `describe_error` traduce una excepción a texto para el log (el default
+    alcanza; el canal inyecta uno que sabe leer sus errores de red)."""
+    describe = describe_error or _default_describe
     for task in tasks:
         if not task.enabled or not _is_due(task, get_last):
             continue
+        transient = False
         try:
             task.fn()
         except network_errors as e:
+            transient = True
             log.warning("tarea '%s': error de red (%s) — reintenta el próximo ciclo",
-                        task.name, e)
+                        task.name, describe(e))
         except Exception:
             log.error("tarea '%s' falló", task.name, exc_info=True)
-        if task.interval_hours > 0:
+        # Tras un error de RED el cursor no se toca: si no, una tarea con
+        # interval_hours > 0 (heartbeat, reflection...) se saltea el intervalo
+        # ENTERO por un blip — lo contrario de lo que promete el mensaje de
+        # arriba. Un fallo inesperado sí lo consume, para no quedar en un loop
+        # caliente reintentando algo roto de verdad cada iteración.
+        if task.interval_hours > 0 and not transient:
             try:
                 save_last(f"task:{task.name}")
             except Exception:

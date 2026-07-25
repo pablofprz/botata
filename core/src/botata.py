@@ -782,6 +782,41 @@ def make_media_describer(vision_llm):
 # Bluesky client
 # ---------------------------------------------------------------------------
 
+def describe_bsky_error(e: Exception) -> str:
+    """Detalle legible de un error de atproto, para el log del scheduler.
+
+    Necesario porque `RequestErrorBase` guarda todo en `.response` y NUNCA pasa
+    el mensaje a `Exception`: `str(e)` es SIEMPRE '' y el log terminaba diciendo
+    "error de red ()", que no distingue un timeout de un 429 ni de un 503.
+    - Con `.response` (HTTP no-2xx): status + el XrpcError del cuerpo, y para un
+      429 los headers de rate limit (cuándo se libera).
+    - Sin `.response` (timeout / DNS / conexión): el tipo y la causa httpx, que
+      es donde vive el detalle real.
+    """
+    name = type(e).__name__
+    resp = getattr(e, "response", None)
+    if resp is None:
+        cause = e.__cause__
+        return f"{name} ← {type(cause).__name__}: {cause}" if cause else name
+    status = getattr(resp, "status_code", "?")
+    parts = [f"{name} HTTP {status}"]
+    content = getattr(resp, "content", None)
+    for attr in ("error", "message"):
+        val = getattr(content, attr, None)
+        if val:
+            parts.append(str(val))
+    if status == 429:
+        headers = getattr(resp, "headers", None) or {}
+        reset = headers.get("ratelimit-reset")
+        if reset:
+            try:  # epoch unix → hora local, que es lo que uno quiere leer en el log
+                when = datetime.fromtimestamp(int(reset)).strftime("%H:%M:%S")
+            except (TypeError, ValueError):
+                when = str(reset)
+            parts.append(f"se libera {when}")
+    return " · ".join(parts)
+
+
 class BskyClient:
 
     # El default de httpx (5s connect) es muy justo para la red de prod;
@@ -4958,6 +4993,7 @@ def run(mode: str) -> None:
                 get_last=lambda name: get_feed_last_run(db, name),
                 save_last=lambda name: save_feed_last_run(db, name),
                 network_errors=(BskyNetworkError, BskyRequestException),
+                describe_error=describe_bsky_error,
             )
         except KeyboardInterrupt:
             log.info("Shutting down.")
