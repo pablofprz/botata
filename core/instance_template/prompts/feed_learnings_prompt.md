@@ -1,26 +1,28 @@
-Te paso posts recientes de un feed de Bluesky, cada uno con el handle de su autor.
-Tu tarea es extraer **aprendizajes durables** para la memoria del bot. Devolvés JSON.
+You get recent posts from a community feed, each with its author's handle.
+Your task is to extract **durable learnings** for the bot's memory. Return JSON.
 
-Extraé dos cosas:
+Extract two things:
 
-1. **Hechos de usuarios** (`facts`): algo que un usuario **reveló de sí mismo** y que vale
-   la pena recordar a futuro (dónde vive, a qué se dedica, gustos fuertes, un proyecto,
-   una mascota, etc.). El `handle` es el del autor del post. El `fact` es una frase corta
-   en tercera persona (ej. "Vive en Rosario", "Tiene un gato llamado Mishi").
+1. **User facts** (`facts`): something a user **revealed about themselves** that is
+   worth remembering later (where they live, what they do, strong tastes, a project,
+   a pet, etc.). `handle` is the post author's handle. `fact` is a short third-person
+   sentence, written in the language the community writes in (e.g. "Lives in Rosario",
+   "Has a cat named Mishi").
 
-2. **Eventos** (`events`): algo con **fecha** concreta (cumpleaños, un evento, una juntada,
-   un estreno). `event_at` en ISO 8601 (`YYYY-MM-DD` o `YYYY-MM-DDTHH:MM`). Resolvé fechas
-   relativas ("hoy", "mañana", "el viernes") usando la fecha actual del contexto.
-   `handle` = el usuario dueño del evento si aplica (ej. su cumple), o null si es de la
-   comunidad. `kind`: `birthday` | `reminder` | `community` | `other`.
+2. **Events** (`events`): something with a concrete **date** (a birthday, an event,
+   a meetup, a premiere). `event_at` in ISO 8601 (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`).
+   Resolve relative dates ("today", "tomorrow", "on Friday") using the current date
+   from the context. `handle` = the user who owns the event if applicable (e.g. their
+   birthday), or null if it belongs to the community. `kind`: `birthday` | `reminder`
+   | `community` | `other`.
 
-# REGLAS
-- Solo hechos **autorrevelados** por el autor del post, no inferencias ni chismes de terceros.
-- Nada de temas sensibles (salud grave, política delicada, cosas íntimas o pesadas): salteá.
-- Nada efímero ("tengo sueño", "qué calor") — solo lo que sirva recordar.
-- Si no hay nada que valga la pena, devolvé listas vacías: `{"facts": [], "events": []}`.
-- No inventes. Ante la duda, no lo agregues.
+# RULES
+- Only facts **self-revealed** by the post's author — no inferences, no third-party gossip.
+- No sensitive topics (serious health issues, charged politics, intimate or heavy stuff): skip them.
+- Nothing ephemeral ("I'm sleepy", "so hot today") — only what is worth remembering.
+- If nothing qualifies, return empty lists: `{"facts": [], "events": []}`.
+- Do not invent. When in doubt, leave it out.
 
-Formato de salida (JSON):
+Output format (JSON):
 {"facts": [{"handle": "...", "fact": "..."}],
  "events": [{"title": "...", "event_at": "YYYY-MM-DD", "handle": null, "kind": "other", "description": null}]}

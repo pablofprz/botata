@@ -1378,7 +1378,7 @@ class FeedProcessor:
                 max_tokens=400,
             )
             result = (content or "").strip()
-            return None if result.upper() == "NADA" else result
+            return None if result.upper() in ("NADA", "NOTHING") else result
         except Exception as e:
             log.error("FeedProcessor: summarize failed for %s: %s", feed_name, e)
             return None
@@ -1448,8 +1448,8 @@ class FeedProcessor:
         # Reinforce the character limit explicitly — models tend to ignore it otherwise
         system = (
             f"{soul}\n\n---\n{current_datetime_line()}\n\n---\n{prompt}\n\n"
-            "IMPORTANTE: tu respuesta tiene que tener MENOS DE 250 CARACTERES en total. "
-            "Contá los caracteres antes de responder. Si te pasás, cortá."
+            "IMPORTANT: your reply must be UNDER 250 CHARACTERS in total. "
+            "Count the characters before answering. If you go over, cut it."
         )
 
         try:
@@ -1614,7 +1614,7 @@ class SummarizeFeedNode:
             log.error("SummarizeFeedNode: %s", e)
             return {"summary": None}
         summary = (content or "").strip()
-        if not summary or summary.upper() == "NADA":
+        if not summary or summary.upper() in ("NADA", "NOTHING"):
             return {"summary": None}
         append_feed_summary(state["feed_name"], summary)
         return {"summary": summary}
@@ -3441,7 +3441,7 @@ def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | 
             log.error("summarize_feed: LLM falló: %s", e)
             return ToolResult(text="no pude resumir el feed ahora")
         summary = (content or "").strip()
-        if not summary or summary.upper() == "NADA":
+        if not summary or summary.upper() in ("NADA", "NOTHING"):
             return ToolResult(text="el feed está tranquilo, no hay mucho movimiento ahora mismo")
         return ToolResult(text=summary)
     return _summarize_feed
@@ -4256,7 +4256,7 @@ class LoadContextNode:
                      old["handle"], handle, moved["facts"], moved["events"])
         bio = profile.description or ""
         interp = self._extract_from_bio(handle, bio) if bio else ""
-        bio_interp = None if (not interp or interp.upper() == "NADA") else interp
+        bio_interp = None if (not interp or interp.upper() in ("NADA", "NOTHING")) else interp
         self.conn.execute(
             "UPDATE users SET did = ?, display_name = ?, bio_raw = ?, bio_interp = ?, "
             "updated_at = datetime('now') WHERE handle = ?",
@@ -4371,8 +4371,9 @@ class GenerateReplyNode:
                 )
             parts.append("\n---\nCatálogo de imágenes disponibles:\n" + "\n".join(cat_lines))
             parts.append(
-                "Si el usuario te pide una imagen, meme o foto, seteá el campo "
-                "'image_search_query' con palabras clave de búsqueda en español."
+                "If the user asks for an image, meme or photo, set the "
+                "'image_search_query' field with search keywords in the language "
+                "of the image catalog."
             )
         else:
             parts.append("\n---\nNo hay imágenes disponibles en el catálogo.")

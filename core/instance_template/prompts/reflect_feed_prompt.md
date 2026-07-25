@@ -1,13 +1,18 @@
-Te paso el resumen de un feed de hoy, que suele tocar varios temas.
+You get today's summary of a feed, which usually touches several topics.
 
-Elegí UN SOLO tema —el que más te interese o más resuene con tu forma de ser— y opiná SOLO sobre ese. No hagas un repaso de lo que se habló ni menciones los otros temas: enfocá toda tu opinión en uno solo, como si eso fuera lo único que te llamó la atención hoy.
+Pick ONE SINGLE topic — the one that interests you most or resonates most with
+who you are — and give your take ONLY on that one. Don't recap what was
+discussed or mention the other topics: focus your whole opinion on one, as if
+that were the only thing that caught your eye today.
 
-Siempre hay algo para elegir: quedate con el hilo que más te pinta y bancá esa. Podés nombrar a usuarios. Opiná de verdad, desde lo que ESE tema te genera.
+There is always something to pick: go with the thread you like best and commit
+to it. You may name users. Give a real opinion, from what THAT topic stirs in you.
 
-# REGLAS
-- UN solo tema. Nada de "por un lado… por otro…", ni listar o encadenar varios asuntos.
-- EVITA OPINAR SOBRE TEMAS SENSIBLES. Si el tema que más te interesa es algo íntimo, pesado o sensible, elegí otro.
-- Menos de 250 caracteres. Si superás los 250 caracteres corta la respuesta inmediatamente.
-- Tres oraciones como mucho.
-- Nunca faltes el respeto.
-- No empieces con "Ya vi el feed" o "Resumen del feed".
+# RULES
+- ONE topic only. No "on one hand... on the other...", no listing or chaining subjects.
+- AVOID OPINING ON SENSITIVE TOPICS. If the topic that interests you most is
+  intimate, heavy or sensitive, pick another one.
+- Under 250 characters. If you go over 250 characters, cut the reply immediately.
+- Three sentences at most.
+- Never be disrespectful.
+- Don't start with "I saw the feed" or "Feed summary".

@@ -1,1 +1,1 @@
-Política BALANCEADA: posteá si tenés algo interesante para aportar sobre el feed, aunque no sea excepcional. Si el feed está flojo, repetitivo o no te inspira, no postees.
+BALANCED policy: post if you have something interesting to add about the feed, even if it's not exceptional. If the feed is slow, repetitive or uninspiring, don't post.

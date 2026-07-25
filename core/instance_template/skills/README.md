@@ -1,44 +1,45 @@
-# Skills — workspace de comportamiento (T26)
+# Skills — behavior workspace (T26)
 
-Cada `.md` de esta carpeta (salvo este README) define una **skill**: instrucciones
-temáticas que el bot carga cuando el tema aplica. Editables en caliente — el bot
-relee la carpeta en cada pase, sin reiniciar ni redeploy.
+Each `.md` in this folder (except this README) defines a **skill**: topical
+instructions the bot loads when the topic applies. Hot-editable — the bot
+re-reads the folder on every pass, no restart or redeploy needed.
 
-## Formato
+## Format
 
 ```markdown
 ---
-name: reglas-comunidad
-description: Cómo responder preguntas sobre las reglas de la comunidad
-scopes: reply, admin        # opcional; default: reply, feed_reflection, admin
-enabled: true               # opcional; default true
-inline: false               # opcional; default false
+name: community-rules
+description: How to answer questions about the community rules
+scopes: reply, admin        # optional; default: reply, feed_reflection, admin
+enabled: true               # optional; default true
+inline: false               # optional; default false
 ---
-Acá van las instrucciones que ve el LLM cuando carga la skill.
-Markdown libre: listas, ejemplos de tono, qué hacer y qué no.
+Here go the instructions the LLM sees when it loads the skill.
+Free-form markdown: lists, tone examples, dos and don'ts.
 ```
 
-- **name** (obligatorio): identificador corto, sin espacios. Es lo que el agente
-  pasa a la tool `use_skill(name)`.
-- **description** (obligatorio): UNA línea que dice *cuándo aplica*. Es lo único
-  que el agente ve en el índice — de esta línea depende que la skill se use.
-- **scopes**: en qué contextos se ofrece — `reply` (respondiendo mentions),
-  `feed_reflection` (loop proactivo), `admin` (comandos del admin).
-- **inline: true**: el cuerpo va SIEMPRE al system prompt (no espera que el
-  agente lo pida). Para guías que el agente no sabría pedir. Usar con moderación:
-  quema contexto en cada llamada. Nota: en scope `admin` todo va inline siempre.
-- **enabled: false**: la skill queda apagada sin borrar el archivo.
+- **name** (required): short identifier, no spaces. It is what the agent passes
+  to the `use_skill(name)` tool.
+- **description** (required): ONE line saying *when it applies*. It is all the
+  agent sees in the index — whether the skill gets used depends on this line.
+- **scopes**: in which contexts it is offered — `reply` (answering mentions),
+  `feed_reflection` (proactive loop), `admin` (admin commands).
+- **inline: true**: the body ALWAYS goes into the system prompt (doesn't wait
+  for the agent to request it). For guidance the agent wouldn't know to ask
+  for. Use sparingly: it burns context on every call. Note: in `admin` scope
+  everything is always inline.
+- **enabled: false**: the skill stays off without deleting the file.
 
-## Cómo funciona la selección
+## How selection works
 
-El system prompt lleva un índice liviano (`name: description` por skill). Si el
-tema de la conversación coincide, el agente llama la tool `use_skill(name)` y el
-cuerpo entra al contexto antes de generar la respuesta. Comportamiento
-*permanente* (personalidad, tono general) va en `context/SOUL.md`, no acá.
+The system prompt carries a light index (`name: description` per skill). If the
+conversation topic matches, the agent calls the `use_skill(name)` tool and the
+body enters the context before generating the reply. *Permanent* behavior
+(personality, general tone) belongs in `context/SOUL.md`, not here.
 
-## ⚠️ Seguridad
+## ⚠️ Security
 
-El cuerpo de una skill entra directo al system prompt del bot: **una skill es
-tan confiable como quien la escribió**. Solo el admin escribe en esta carpeta.
-No pegar acá contenido de terceros sin leerlo (instrucciones maliciosas en una
-skill scope `reply` = el bot público las obedece).
+A skill's body goes straight into the bot's system prompt: **a skill is only as
+trustworthy as whoever wrote it**. Only the admin writes in this folder. Don't
+paste third-party content here without reading it (malicious instructions in a
+`reply`-scoped skill = the public bot obeys them).

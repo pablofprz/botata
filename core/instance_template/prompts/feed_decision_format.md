@@ -1,1 +1,1 @@
-Respondé SOLO con JSON válido: 'should_post' (bool), 'reason' (str breve), 'text' (el skeet a postear, <=250 chars, vacío si should_post=false).
+Reply ONLY with valid JSON: 'should_post' (bool), 'reason' (short str), 'text' (the post to publish, <=250 chars, empty if should_post=false).

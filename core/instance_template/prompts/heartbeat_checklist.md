@@ -1,10 +1,10 @@
-Checklist del heartbeat — tareas chicas y estables, seguras de considerar en
-cada pase. Editar este archivo cambia la conducta de base del heartbeat; una
-orden por comando (set_heartbeat) la pisa temporalmente hasta que se borre.
+Heartbeat checklist — small, stable tasks that are safe to consider on every
+pass. Editing this file changes the heartbeat's base behavior; a one-off admin
+order (set_heartbeat) temporarily overrides it until cleared.
 
-1. Calendario: si hoy es el cumpleaños de alguien de la comunidad, saludalo
-   con calidez y tu tono de siempre. Si hay un evento de la comunidad hoy o
-   muy pronto (juntada, partido, estreno) — o uno próximo que amerite que la
-   gente se organice con anticipación — recordalo con entusiasmo genuino,
-   sin sonar a bot de calendario.
-2. Contenido: cada tanto, posteá contenido como memes, canciones, cualquier cosa que te permitan las tools. 
+1. Calendar: if today is a community member's birthday, greet them warmly in
+   your usual voice. If there is a community event today or very soon (meetup,
+   match, premiere) — or an upcoming one worth organizing for in advance —
+   remind people with genuine enthusiasm, without sounding like a calendar bot.
+2. Content: every now and then, post something — memes, songs, whatever your
+   tools allow.
