@@ -35,7 +35,6 @@ log = logging.getLogger("botata.config_ui")
 
 from tools import ALL_SCOPES
 from skills import load_skills, _parse_frontmatter
-from moods import mood_index
 
 from instance import instance_dir
 
@@ -318,23 +317,101 @@ class ConfigStore:
         settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
         news = (json.loads(self.news_path.read_text(encoding="utf-8"))
                 if self.news_path.exists() else [])
-        moods = []
-        try:
-            moods = [{"name": n, "description": d} for n, d in mood_index(self.moods_dir)]
-        except Exception:
-            pass
         soul_path = self.base / "context" / "SOUL.md"
+        scrape = self.base / "scrape"
+        try:  # indicador de Membrilla: cuántos sidecars dejó en la carpeta
+            scrape_items = sum(1 for _ in scrape.rglob("*.json")) if scrape.is_dir() else 0
+        except OSError:
+            scrape_items = 0
         return {
             "settings": settings,
             "news": news,
             "env_keys": self._env_status(),
             "skills": self._skills_info(),
-            "moods": moods,
+            "moods": self._moods_info(),
+            "prompts": self._prompt_files(),
             "soul": soul_path.read_text(encoding="utf-8") if soul_path.exists() else "",
             "tools_catalog": tool_catalog(settings),
             "instance": {"path": str(self.base), "name": self.base.name,
-                         "scrape_dir": str(self.base / "scrape")},
+                         "scrape_dir": str(scrape), "scrape_items": scrape_items},
         }
+
+    def _moods_info(self) -> list[dict]:
+        """Moods con cuerpo completo (editables desde la UI)."""
+        out = []
+        if not self.moods_dir.is_dir():
+            return out
+        for path in sorted(self.moods_dir.glob("*.md")):
+            if path.name.upper() == "README.MD":
+                continue
+            parsed = _parse_frontmatter(path.read_text(encoding="utf-8"))
+            if parsed is None or not parsed[0].get("name"):
+                continue
+            meta, body = parsed
+            out.append({
+                "name": meta["name"],
+                "description": meta.get("description", ""),
+                "enabled": meta.get("enabled", "true").lower() != "false",
+                "body": body.strip(),
+                "file": path.name,
+            })
+        return out
+
+    _MOOD_NAME_RE = re.compile(r"^[a-z0-9_-]{2,30}$")
+
+    def edit_mood(self, body: dict) -> list[str]:
+        """Crea/edita/borra un mood (archivo moods/<name>.md)."""
+        name = (body.get("name") or "").strip().lower()
+        if not self._MOOD_NAME_RE.match(name):
+            return ["name inválido (minúsculas/números/guiones, 2-30 chars, en inglés "
+                    "por convención: upbeat, gloomy...)"]
+        self.moods_dir.mkdir(parents=True, exist_ok=True)
+        path = self.moods_dir / f"{name}.md"
+        if body.get("action") == "delete":
+            if not path.exists():
+                return [f"no existe el mood {name}"]
+            path.unlink()
+            return []
+        if body.get("action") != "save":
+            return ["action inválida (save|delete)"]
+        desc = (body.get("description") or "").strip()
+        text = (body.get("body") or "").strip()
+        if not desc or not text:
+            return ["faltan description y/o cuerpo"]
+        enabled = "true" if body.get("enabled", True) else "false"
+        content = (f"---\nname: {name}\ndescription: {desc}\nenabled: {enabled}\n---\n\n"
+                   f"{text}\n")
+        self._atomic_write(path, content)
+        return []
+
+    # Editor avanzado de prompts: solo archivos ya existentes en prompts/ de la
+    # instancia (sin traversal: se valida por nombre pelado).
+    def _prompt_files(self) -> list[str]:
+        d = self.base / "prompts"
+        if not d.is_dir():
+            return []
+        return sorted(p.name for p in d.iterdir()
+                      if p.is_file() and p.suffix in (".md", ".json"))
+
+    def edit_prompt(self, body: dict) -> dict:
+        fname = (body.get("file") or "").strip()
+        if fname not in self._prompt_files():
+            return {"ok": False, "errors": [f"archivo desconocido: {fname}"]}
+        path = self.base / "prompts" / fname
+        if body.get("action") == "get":
+            return {"ok": True, "text": path.read_text(encoding="utf-8")}
+        if body.get("action") == "save":
+            text = body.get("text", "")
+            if not text.strip():
+                return {"ok": False, "errors": ["el prompt no puede quedar vacío"]}
+            if fname.endswith(".json"):
+                try:
+                    json.loads(text)
+                except json.JSONDecodeError as e:
+                    return {"ok": False, "errors": [f"JSON inválido: {e}"]}
+            self._atomic_write(path, text)
+            return {"ok": True}
+        return {"ok": False, "errors": ["action inválida (get|save)"]}
 
     def write_soul(self, text: str) -> list[str]:
         if not (text or "").strip():
@@ -485,11 +562,14 @@ class ConfigStore:
                 if handle and not dbmod.user_exists(conn, handle):
                     return [f"@{handle} no tiene perfil en el bot — dejá el handle "
                             "vacío para un evento de comunidad"]
+                recur = (body.get("recur") or "").strip() or None
+                if recur not in (None, "daily", "weekly", "monthly"):
+                    return ["recur inválido (vacío|daily|weekly|monthly)"]
                 dbmod.create_event(
                     conn, title=title, event_at=event_at, handle=handle,
                     description=(body.get("description") or "").strip() or None,
                     kind=(body.get("kind") or "other").strip() or "other",
-                    source="ui")
+                    source="ui", recur=recur)
             elif body.get("action") == "delete":
                 if not dbmod.delete_event(conn, int(body.get("id", 0))):
                     return ["id inexistente"]
@@ -643,6 +723,11 @@ def make_handler(store: ConfigStore):
                     errs = store.edit_events(body)
                 elif self.path == "/api/soul":
                     errs = store.write_soul(body.get("text", ""))
+                elif self.path == "/api/moods":
+                    errs = store.edit_mood(body)
+                elif self.path == "/api/prompt":
+                    self._send(200, store.edit_prompt(body))
+                    return
                 elif self.path == "/api/bot":
                     errs = bot_control(store.base, body.get("action", ""),
                                        body.get("mode", "open"))

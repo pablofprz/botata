@@ -78,3 +78,56 @@ def test_fk_cascade_on_user_delete(conn):
     conn.commit()
     remaining = [r["title"] for r in conn.execute("SELECT title FROM events").fetchall()]
     assert remaining == ["comunidad"]  # el del user cascadeó, el de comunidad quedó
+
+
+# ─── Recurrencia (2026-07-24) ────────────────────────────────────────────────
+def test_recur_daily_aparece_todos_los_dias(conn):
+    d.create_event(conn, title="buenos dias", event_at="2026-01-01T09:00",
+                   recur="daily", source="test")
+    assert any(e["title"] == "buenos dias"
+               for e in d.events_today(conn, day="2026-07-20"))
+    assert any(e["title"] == "buenos dias"
+               for e in d.events_today(conn, day="2027-03-02"))
+    # antes de la primera ocurrencia, no existe
+    assert not any(e["title"] == "buenos dias"
+                   for e in d.events_today(conn, day="2025-12-31"))
+
+
+def test_recur_weekly_solo_ese_dia_de_semana(conn):
+    # 2026-07-20 fue lunes
+    d.create_event(conn, title="lunes de trivia", event_at="2026-07-20T21:00",
+                   recur="weekly", source="test")
+    assert any(e["title"] == "lunes de trivia"
+               for e in d.events_today(conn, day="2026-07-27"))  # lunes
+    assert not any(e["title"] == "lunes de trivia"
+                   for e in d.events_today(conn, day="2026-07-28"))  # martes
+
+
+def test_recur_monthly_mismo_dia_del_mes(conn):
+    d.create_event(conn, title="cobro", event_at="2026-01-05T10:00",
+                   recur="monthly", source="test")
+    assert any(e["title"] == "cobro" for e in d.events_today(conn, day="2026-08-05"))
+    assert not any(e["title"] == "cobro" for e in d.events_today(conn, day="2026-08-06"))
+
+
+def test_upcoming_calcula_la_proxima_ocurrencia(conn):
+    d.create_event(conn, title="lunes de trivia", event_at="2026-07-20T21:00",
+                   recur="weekly", source="test")
+    evs = d.upcoming_events(conn, now="2026-07-22T12:00")  # miercoles
+    trivia = next(e for e in evs if e["title"] == "lunes de trivia")
+    assert trivia["event_at"].startswith("2026-07-27T21:00")  # el lunes siguiente
+    assert trivia["recur"] == "weekly"
+
+
+def test_upcoming_daily_hoy_o_manana_segun_hora(conn):
+    d.create_event(conn, title="buen dia", event_at="2026-01-01T09:00",
+                   recur="daily", source="test")
+    evs = d.upcoming_events(conn, now="2026-07-22T08:00")
+    assert next(e for e in evs if e["title"] == "buen dia")["event_at"].startswith("2026-07-22T09:00")
+    evs = d.upcoming_events(conn, now="2026-07-22T10:00")  # ya paso la hora
+    assert next(e for e in evs if e["title"] == "buen dia")["event_at"].startswith("2026-07-23T09:00")
+
+
+def test_recur_invalido_corta(conn):
+    with pytest.raises(ValueError):
+        d.create_event(conn, title="x", event_at="2026-01-01", recur="fortnightly")

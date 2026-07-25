@@ -221,7 +221,11 @@ def build_router(
             api_key = cfg.get("api_key")
             if not api_key and cfg.get("api_key_env"):
                 api_key = env.get(cfg["api_key_env"], "")
-            endpoints[name] = {"base_url": cfg["base_url"], "api_key": api_key or "x"}
+            # Endpoint sin key declarada → la genérica del .env (LLM_API_KEY /
+            # OPENROUTER_API_KEY). Permite que la UI prellene endpoints sin
+            # obligar a decidir el nombre de la env var.
+            endpoints[name] = {"base_url": cfg["base_url"],
+                               "api_key": api_key or llm_api_key(env) or "x"}
             if "timeout_s" in cfg:
                 endpoints[name]["timeout_s"] = cfg["timeout_s"]
         aliases = models_config["aliases"]

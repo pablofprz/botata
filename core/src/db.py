@@ -331,11 +331,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     - events.done (2026-07-19): marca de cumplimiento para eventos-acción
       (kind='bot_action') — el heartbeat los ejecuta una sola vez.
+    - events.recur (2026-07-24): recurrencia ('daily'|'weekly'|'monthly'|NULL).
+      event_at define la PRIMERA ocurrencia (y con ella la hora, el día de
+      semana o el día del mes según el patrón).
     """
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
     if "done" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN done INTEGER NOT NULL DEFAULT 0")
         log.info("migración: events.done agregada")
+    if "recur" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN recur TEXT")
+        log.info("migración: events.recur agregada")
 
 
 # ─── Embeddings (bge-m3, lazy) ─────────────────────────────────────────────
@@ -790,7 +796,7 @@ def mark_image_used(conn: sqlite3.Connection, image_id: int) -> None:
 # event_at se guarda en hora de Argentina (ISO 8601). Las queries usan por
 # default "ahora"/"hoy" en AR (UTC-3, sin DST); pasá `now`/`day` explícito para
 # testear o para otra zona.
-_EVENT_FIELDS = ("handle", "title", "description", "event_at", "kind", "source")
+_EVENT_FIELDS = ("handle", "title", "description", "event_at", "kind", "source", "recur")
 
 
 def create_event(
@@ -802,12 +808,21 @@ def create_event(
     description: str | None = None,
     kind: str = "other",
     source: str | None = None,
+    recur: str | None = None,
 ) -> int:
-    """Crea un evento. Devuelve su id. handle=None → evento de comunidad."""
+    """Crea un evento. Devuelve su id. handle=None → evento de comunidad.
+
+    `recur`: None (una vez) | 'daily' | 'weekly' | 'monthly'. En los recurrentes,
+    event_at es la PRIMERA ocurrencia: fija la hora y — según el patrón — el día
+    de semana o del mes. (bot_action recurrente no está soportado: el done es
+    único por evento.)
+    """
+    if recur not in (None, "daily", "weekly", "monthly"):
+        raise ValueError(f"recur inválido: {recur!r}")
     cur = conn.execute(
-        "INSERT INTO events (handle, title, description, event_at, kind, source) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (handle, title, description, event_at, kind, source),
+        "INSERT INTO events (handle, title, description, event_at, kind, source, recur) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (handle, title, description, event_at, kind, source, recur),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -862,6 +877,39 @@ def delete_event(conn: sqlite3.Connection, event_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def _next_occurrence(event_at: str, recur: str, now_dt: datetime) -> datetime | None:
+    """Próxima ocurrencia (>= now) de un evento recurrente cuya primera vez fue
+    `event_at`. daily = todos los días; weekly = mismo día de semana; monthly =
+    mismo día del mes (los meses sin ese día se saltean)."""
+    try:
+        first = datetime.fromisoformat(event_at)
+    except ValueError:
+        return None
+    if first >= now_dt:
+        return first
+    t = first.time()
+    if recur == "daily":
+        cand = datetime.combine(now_dt.date(), t)
+        return cand if cand >= now_dt else cand + timedelta(days=1)
+    if recur == "weekly":
+        ahead = (first.weekday() - now_dt.weekday()) % 7
+        cand = datetime.combine(now_dt.date() + timedelta(days=ahead), t)
+        return cand if cand >= now_dt else cand + timedelta(days=7)
+    if recur == "monthly":
+        y, m = now_dt.year, now_dt.month
+        for _ in range(13):
+            try:
+                cand = datetime(y, m, first.day, t.hour, t.minute, t.second)
+            except ValueError:  # ese mes no tiene el día (ej. 31)
+                cand = None
+            if cand is not None and cand >= now_dt:
+                return cand
+            m += 1
+            if m > 12:
+                m, y = 1, y + 1
+    return None
+
+
 def upcoming_events(
     conn: sqlite3.Connection,
     *,
@@ -869,7 +917,9 @@ def upcoming_events(
     limit: int = 10,
     handle: str | None = None,
 ) -> list[dict]:
-    """Próximos `limit` eventos con event_at >= ahora, ascendente.
+    """Próximos `limit` eventos, ascendente: los puntuales con event_at >= ahora
+    + los recurrentes con su PRÓXIMA ocurrencia calculada (el dict devuelto trae
+    `event_at` ya movido a esa ocurrencia; el campo `recur` distingue).
 
     Si `handle` se pasa → eventos de ese usuario + los de comunidad (handle IS NULL).
     Si es None → todos. `now` default = ahora en AR (UTC-3).
@@ -879,15 +929,29 @@ def upcoming_events(
     params: list[Any] = [now] if now is not None else []
     # replace(): event_at ISO usa 'T', datetime() de SQLite usa espacio — sin
     # normalizar, la comparación de strings miente (ver due_bot_actions).
-    where = [f"datetime(replace(event_at,'T',' ')) >= {now_expr}"]
+    where = [f"(datetime(replace(event_at,'T',' ')) >= {now_expr} OR recur IS NOT NULL)"]
     if handle is not None:
         where.append("(handle = ? OR handle IS NULL)")
         params.append(handle)
     rows = conn.execute(
-        f"SELECT * FROM events WHERE {' AND '.join(where)} ORDER BY event_at ASC LIMIT ?",
-        (*params, limit),
+        f"SELECT * FROM events WHERE {' AND '.join(where)} ORDER BY event_at ASC",
+        tuple(params),
     ).fetchall()
-    return [dict(r) for r in rows]
+    if now is not None:
+        now_dt = datetime.fromisoformat(now)
+    else:
+        now_dt = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=3)
+    out: list[dict] = []
+    for r in rows:
+        ev = dict(r)
+        if ev.get("recur"):
+            nxt = _next_occurrence(ev["event_at"], ev["recur"], now_dt)
+            if nxt is None:
+                continue
+            ev["event_at"] = nxt.isoformat(timespec="minutes" if nxt.second == 0 else "seconds")
+        out.append(ev)
+    out.sort(key=lambda e: e["event_at"])
+    return out[:limit]
 
 
 def events_today(
@@ -896,10 +960,18 @@ def events_today(
     day: str | None = None,
     handle: str | None = None,
 ) -> list[dict]:
-    """Eventos cuyo event_at cae en `day` (YYYY-MM-DD). Default = hoy en AR."""
+    """Eventos cuyo event_at cae en `day` (YYYY-MM-DD) + los recurrentes cuya
+    pauta matchea ese día (daily siempre; weekly mismo día de semana; monthly
+    mismo día del mes — siempre desde su primera ocurrencia en adelante).
+    Default = hoy en AR."""
     day_expr = "?" if day is not None else "date('now','-3 hours')"
     params: list[Any] = [day] if day is not None else []
-    where = [f"date(event_at) = {day_expr}"]
+    hits = (f"(date(event_at) = {day_expr} OR (date(event_at) <= {day_expr} AND ("
+            "(recur = 'daily') OR "
+            f"(recur = 'weekly' AND strftime('%w', event_at) = strftime('%w', {day_expr})) OR "
+            f"(recur = 'monthly' AND strftime('%d', event_at) = strftime('%d', {day_expr})))))")
+    params = params * (4 if day is not None else 0)  # una copia por placeholder usado
+    where = [hits]
     if handle is not None:
         where.append("(handle = ? OR handle IS NULL)")
         params.append(handle)

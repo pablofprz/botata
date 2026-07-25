@@ -6,9 +6,10 @@
 <style>
   :root {
     --bg: #371538;        /* fondo oscuro */
-    --panel: #871143;     /* fondo aclarado (cards) */
-    --panel2: #5c1240;    /* intermedio (inputs, tablas) */
-    --line: #a8447377;
+    --panel: #46193f;     /* cards (sobrio; el magenta queda para acentos) */
+    --panel2: #3c1536;    /* intermedio (cards anidadas) */
+    --hot: #871143;       /* magenta — solo acentos chicos */
+    --line: #6e2c5e88;
     --text: #f5e9f2;
     --muted: #d8b3cb;
     --accent: #f1c65d;    /* amarillo */
@@ -25,7 +26,7 @@
           color: var(--muted); text-decoration: none; padding: 4px 8px; border-radius: 6px;
           font-size: 13px; }
   nav a:hover { color: var(--text); background: #431644; }
-  nav a.active { color: var(--accent); background: #431644; font-weight: 600; }
+  nav a.active { color: var(--accent); background: var(--hot); font-weight: 600; }
   nav a .st { font-size: 11px; }
   nav a .st.ok { color: var(--ok); } nav a .st.todo { color: var(--accent); }
   nav .navsep { margin: 8px 6px 2px; font-size: 10px; text-transform: uppercase;
@@ -88,7 +89,7 @@
 <nav id="navbar">
   <h1>🤖 <span id="nav-botname">botata</span></h1>
   <div class="navsep">Puesta en marcha</div>
-  <a href="#nombre" data-check="nombre">1 · Nombre e idioma <span class="st"></span></a>
+  <a href="#nombre" data-check="nombre">1 · Nombre <span class="st"></span></a>
   <a href="#canal" data-check="canal">2 · Canal <span class="st"></span></a>
   <a href="#credenciales" data-check="creds">3 · Credenciales <span class="st"></span></a>
   <a href="#admin" data-check="admin">4 · Admin <span class="st"></span></a>
@@ -101,18 +102,21 @@
   <a href="#prefs">Gustos</a>
   <div class="navsep">Proactividad</div>
   <a href="#feeds">Feeds proactivos</a>
-  <a href="#tareas">Tareas</a>
-  <a href="#noticias">Noticias</a>
+  <a href="#heartbeat">Heartbeat</a>
   <a href="#calendario">Calendario</a>
+  <a href="#noticias">Noticias</a>
+  <a href="#tareas">Tareas</a>
   <div class="navsep">Datos y motor</div>
   <a href="#memoria">Memoria</a>
   <a href="#modelos">Modelos</a>
   <a href="#presupuesto">Presupuesto</a>
+  <a href="#integraciones">Integraciones</a>
   <a href="#mcp">MCP</a>
   <a href="#membrilla">Membrilla</a>
   <div class="navsep">Operación</div>
   <a href="#debug">🐛 Debug (chat)</a>
   <a href="#mantenimiento">Mantenimiento</a>
+  <a href="#avanzado">Avanzado (prompts)</a>
   <a href="#danger" style="color:var(--err)">Zona peligrosa</a>
 </nav>
 
@@ -126,13 +130,17 @@
     <button onclick="saveAll()">💾 Guardar cambios</button>
     <button class="ghost" id="relaunch-btn" onclick="botRelaunch()" style="display:none">↻ Relanzar bot</button>
   </div>
+  <select id="ui-lang" title="Idioma del panel" style="width:auto;margin:0;padding:3px 6px;font-size:12px">
+    <option value="es">🇦🇷</option>
+    <option value="en" disabled>🇺🇸</option>
+  </select>
 </div>
 
 <main>
 
-  <section id="nombre"><h2>1 · Nombre e idioma</h2>
-    <p class="hint">Cómo se llama tu bot (para vos y para la UI) y en qué idioma está el panel.
-      El idioma en que <b>habla</b> el bot lo define su personalidad (sección 5).</p>
+  <section id="nombre"><h2>1 · Nombre</h2>
+    <p class="hint">Cómo se llama tu bot. El idioma en que <b>habla</b> lo define su
+      personalidad (sección 5).</p>
     <div class="card" id="c-nombre"></div></section>
 
   <section id="canal"><h2>2 · Canal e identidad</h2>
@@ -226,16 +234,30 @@
     <div id="c-feeds"></div>
     <button class="ghost" onclick="addFeed()">+ feed</button></section>
 
-  <section id="tareas"><h2>Tareas periódicas</h2>
-    <p class="hint">Los pases automáticos del loop del bot. <code>mentions</code> es el
-      corazón (responder menciones — no se apaga) · <code>feed</code>/<code>news</code>
-      corren los feeds y noticias de arriba · <code>heartbeat</code> = pase con TUS
-      instrucciones ("compartí un tema de jazz cada tanto") + calendario ·
-      <code>reflection</code> = aprende lecciones de sus conversaciones (no postea) ·
-      <code>public_reflection</code> = postea una reflexión en primera persona ·
-      <code>playlist_share</code> = comparte un tema de la playlist comunitaria ·
-      <code>mood</code> = elige el humor del día. Intervalo 0 = cada ciclo (la tarea se
-      auto-regula).</p>
+  <section id="heartbeat"><h2>Heartbeat (instrucciones periódicas)</h2>
+    <p class="hint">El pase donde el bot ejecuta <b>tus instrucciones</b> cada tantas horas
+      — "compartí un tema de jazz de vez en cuando", "los viernes recordá la juntada" — y
+      anuncia lo que corresponda del calendario. Es texto libre, como la personalidad:
+      escribí la checklist acá abajo. El bot decide con criterio (puede callar si no hay
+      nada nuevo — la instrucción no es licencia para spamear). También podés dictarle
+      instrucciones temporales por mención («@bot cada 2 horas hacé X»), que pisan esta
+      checklist hasta que las borres.</p>
+    <div class="card">
+      <div class="row">
+        <div style="max-width:120px;padding-bottom:6px" id="c-hb-toggle"></div>
+        <div style="max-width:200px" id="c-hb-interval"></div>
+      </div>
+      <label>checklist del heartbeat (prompts/heartbeat_checklist.md)</label>
+      <textarea id="hb-text" style="min-height:180px" spellcheck="false"></textarea>
+    </div></section>
+
+  <section id="tareas"><h2>Tareas periódicas (motor interno)</h2>
+    <p class="hint">La maquinaria de pases automáticos del loop — sección técnica: en
+      general no hace falta tocarla, porque cada pieza se maneja desde su propia sección
+      (feeds, noticias, heartbeat, moods) y esto es solo el interruptor maestro + la
+      frecuencia de cada una. Intervalo <code>0</code> = corre en cada ciclo del loop y la
+      tarea decide sola si hay algo que hacer (menciones, feeds y noticias se auto-regulan
+      con sus propios intervalos por fuente).</p>
     <div class="card" id="c-tasks"></div></section>
 
   <section id="noticias"><h2>Noticias RSS</h2>
@@ -279,6 +301,25 @@
       con OpenRouter — con otro proveedor dejalo apagado.</p>
     <div class="card" id="c-budget"></div></section>
 
+  <section id="integraciones"><h2>Integraciones</h2>
+    <p class="hint">Servicios externos que las tools usan. Las API keys van en Credenciales
+      (Spotify, YouTube, Brave); acá va la config extra.</p>
+    <div class="card">
+      <b>🎵 Playlist comunitaria de Spotify</b>
+      <p class="hint">Los usuarios (del grupo que definas en Tools →
+        <code>add_music_recommendation</code>) pueden recomendar temas y el bot los agrega a
+        esta playlist; la tarea <code>playlist_share</code> postea uno cada tanto. Requiere
+        una autorización única del admin en el navegador: correr
+        <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code> una vez.</p>
+      <div style="max-width:340px" id="c-spotify-playlist"></div>
+    </div>
+    <div class="card">
+      <b>📺 YouTube</b>
+      <p class="hint">La tool <code>share_video</code> busca y comparte videos — solo
+        necesita <code>YOUTUBE_API_KEY</code> en Credenciales (API key de Google Cloud,
+        YouTube Data API v3). No hay playlist: busca libre o trae lo popular de tu región.</p>
+    </div></section>
+
   <section id="mcp"><h2>Servers MCP</h2>
     <p class="hint">Conectores externos que suman tools al bot (ej. Reddit por RSS, un
       navegador). Cada server es un proceso aparte declarado acá. Por seguridad sus tools
@@ -293,6 +334,10 @@
       QUÉ scrapear vive en Membrilla (repo aparte); acá está el lado botata: <b>indexar</b>
       lo que llegó — cada imagen nueva se describe con el modelo de visión (gasta LLM) y
       entra al catálogo, para que el bot pueda buscarla y postearla cuando venga al caso.</p>
+    <div class="card">
+      <b>Estado</b> <span id="membrilla-badge" class="badge off">sin detectar</span>
+      <p class="hint" id="membrilla-hint"></p>
+    </div>
     <div class="card">
       <button onclick="runAction('catalog_sync', this)">🖼️ Indexar contenido nuevo</button>
       <pre class="out" id="out-catalog_sync" style="display:none"></pre>
@@ -328,6 +373,20 @@
       <pre class="out" id="bot-log" style="display:none"></pre>
     </div></section>
 
+  <section id="avanzado"><h2>Avanzado — editor de prompts</h2>
+    <p class="hint">Los prompts internos del bot (cómo clasifica, cómo resume el feed, el
+      formato de las replies...) viven en <code>prompts/</code> de la instancia y se pueden
+      afinar acá. ⚠️ Para usuarios avanzados: un prompt roto degrada el comportamiento del
+      bot — el <code>.bak</code> que queda al lado permite volver atrás.</p>
+    <div class="card">
+      <div class="row">
+        <div><label>archivo<select id="prompt-file"></select></label></div>
+        <div style="max-width:130px"><button class="ghost" onclick="loadPrompt()">abrir</button></div>
+        <div style="max-width:150px"><button onclick="savePrompt()">guardar prompt</button></div>
+      </div>
+      <textarea id="prompt-text" style="min-height:260px;display:none" spellcheck="false"></textarea>
+    </div></section>
+
   <section id="danger"><h2 style="color:var(--err)">Zona peligrosa</h2>
     <p class="hint">Acciones <b>irreversibles</b>. Para confirmar, escribí el nombre de la
       instancia (<code id="danger-name"></code>) en el campo. Pará el bot antes.</p>
@@ -350,7 +409,8 @@
 <script>
 const SCOPES = ["reply", "feed_reflection", "admin"];
 let S = null, NEWS = [], ENV_KEYS = {}, SKILLS = [], MOODS = [], CATALOG = [], INSTANCE = {};
-let SOUL = "", soulDirty = false, dirty = false;
+let PROMPTS = [];
+let SOUL = "", soulDirty = false, dirty = false, hbDirty = false;
 let DATA = {memory: [], preferences: [], events: [], mood_state: null};
 let BOT = {running: false};
 
@@ -407,12 +467,19 @@ function render() {
   $("scrape-dir").textContent = INSTANCE.scrape_dir ?? "scrape/";
 
   $("c-nombre").innerHTML = `<div class="row">
-    <div>${textInput(S, "BOT_NAME", "Nombre del bot")}</div>
-    <div><label>Idioma del panel<select id="i-lang">
-      <option value="es" ${ (S.LANGUAGE ?? "es") === "es" ? "selected" : ""}>🇦🇷 español</option>
-      <option value="en" disabled>🇺🇸 english (próximamente)</option>
-    </select></label></div></div>`;
-  $("i-lang").addEventListener("change", e => { S.LANGUAGE = e.target.value; markDirty(); });
+    <div style="max-width:380px">${textInput(S, "BOT_NAME", "Nombre del bot")}</div></div>`;
+  $("ui-lang").value = S.LANGUAGE ?? "es";
+
+  $("c-spotify-playlist").innerHTML =
+    textInput(S, "SPOTIFY_PLAYLIST_ID", "ID de la playlist (solo el id, no la URL)");
+
+  const items = INSTANCE.scrape_items ?? 0;
+  const hasScrape = items > 0;
+  $("membrilla-badge").textContent = hasScrape ? `detectado · ${items} items` : "sin contenido todavía";
+  $("membrilla-badge").className = "badge " + (hasScrape ? "on" : "off");
+  $("membrilla-hint").textContent = hasScrape
+    ? "Membrilla dejó contenido en la carpeta scrape/ — indexalo abajo para que el bot lo pueda usar."
+    : "Cuando Membrilla corra y deje contenido en scrape/, acá lo vas a ver. Si no usás Membrilla, ignorá esta sección.";
 
   const isMasto = (S.CHANNEL || "bluesky") === "mastodon";
   $("c-identidad").innerHTML = `<div class="row">
@@ -449,38 +516,77 @@ function render() {
   if (!soulDirty) $("soul-text").value = SOUL;
 
   renderBudget(); renderModels(); renderFeeds(); renderTools(); renderGroups();
-  renderTasks(); renderMcp(); renderNews(); renderSkills(); renderMoods();
+  renderTasks(); renderHeartbeat(); renderMcp(); renderNews(); renderSkills(); renderMoods();
   renderPrefsMode(); renderData();
+  $("prompt-file").innerHTML = PROMPTS.map(f => `<option>${esc(f)}</option>`).join("");
   navStatus();
 }
 
-const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-const DAY_ES = {mon:"lunes", tue:"martes", wed:"miércoles", thu:"jueves", fri:"viernes", sat:"sábado", sun:"domingo"};
-
 function renderMoods() {
-  const m = S.MOODS ?? (S.MOODS = {enabled: false, mode: "manual", manual: {fixed: "", schedule: {}}});
-  m.manual ??= {fixed: "", schedule: {}};
-  m.manual.schedule ??= {};
+  const m = S.MOODS ?? (S.MOODS = {enabled: false, mode: "auto", manual: {fixed: ""}});
+  m.manual ??= {fixed: ""};
   const names = ["", ...MOODS.map(x => x.name)];
   const st = DATA.mood_state;
   const today = st && st.mood ? `hoy: <b>${esc(st.mood)}</b>${st.reason ? ` — «${esc(st.reason)}»` : ""} <span class="hint">(${esc(st.mode ?? "")})</span>` : "hoy: sin definir";
   let html = `<div class="row">
     <div style="max-width:120px;padding-bottom:6px">${check(m, "enabled", "activo", false)}</div>
-    <div style="max-width:140px">${selectInput(m, "mode", "modo", ["manual", "auto"], "manual")}</div>
+    <div style="max-width:140px">${selectInput(m, "mode", "modo", ["manual", "auto"], "auto")}</div>
     <div style="max-width:170px">${textInput(m, "susceptibility", "susceptibilidad (0–1)", "number")}</div>
     <div style="max-width:170px">${textInput(m, "hysteresis_hours", "histéresis (horas)", "number")}</div>
     <div style="max-width:170px">${selectInput(m, "default", "mood por default", names, "")}</div>
+    <div style="max-width:190px">${selectInput(m.manual, "fixed", "manual: mood fijo", names, "")}</div>
   </div>
-  <p class="hint">${m.enabled ? today : "moods apagados — tono normal"}</p>
-  <div class="row">
-    <div style="max-width:220px">${selectInput(m.manual, "fixed", "manual: mood fijo (pisa el schedule)", names, "")}</div>
-  </div>
-  <label>manual: schedule por día</label><table><tr>${WEEKDAYS.map(d => `<th>${DAY_ES[d]}</th>`).join("")}</tr><tr>`;
-  for (const d of WEEKDAYS)
-    html += `<td>${selectInput(m.manual.schedule, d, "", names, "")}</td>`;
-  html += `</tr></table>
-    <p class="hint">moods disponibles (se editan en <code>moods/*.md</code>): ${MOODS.map(x => `<code>${esc(x.name)}</code>`).join(" ") || "(no hay .md en moods/)"}</p>`;
+  <p class="hint">${m.enabled ? today : "moods apagados — tono normal"}</p>`;
+  // Editor de moods: cada uno es un .md editable; también se pueden crear.
+  html += MOODS.map((mo, i) => `<details class="card"><summary><code>${esc(mo.name)}</code>
+      — <span class="hint">${esc(mo.description)}</span></summary>
+    <label>descripción (el bot la ve al elegir humor)
+      <input data-mood-desc="${i}" value="${esc(mo.description)}"></label>
+    <label>cuerpo (cómo tiñe el tono — entra al system prompt)
+      <textarea data-mood-body="${i}" style="min-height:120px">${esc(mo.body)}</textarea></label>
+    <button onclick="saveMood(${i})">guardar mood</button>
+    <button class="danger" style="margin-left:8px" onclick="deleteMood('${esc(mo.name)}')">borrar</button>
+  </details>`).join("");
+  html += `<button class="ghost" onclick="addMood()">+ mood nuevo</button>
+    <p class="hint">Los nombres van en inglés por convención del motor (upbeat, gloomy...);
+    el contenido, en el idioma que quieras. Los cambios de moods son en vivo (no requieren
+    reiniciar); el toggle/modo de arriba sí.</p>`;
   $("c-moods").innerHTML = html;
+}
+async function saveMood(i) {
+  const mo = MOODS[i];
+  try {
+    await api("/api/moods", {action: "save", name: mo.name, enabled: mo.enabled ?? true,
+      description: document.querySelector(`[data-mood-desc="${i}"]`).value.trim(),
+      body: document.querySelector(`[data-mood-body="${i}"]`).value.trim()});
+    toast(`mood ${mo.name} guardado ✓ (en vivo)`);
+    await reloadConfig();
+  } catch (e) { toast(e.message, false); }
+}
+async function deleteMood(name) {
+  if (!confirm(`¿Borrar el mood "${name}"? (borra moods/${name}.md)`)) return;
+  try { await api("/api/moods", {action: "delete", name}); toast("mood borrado"); await reloadConfig(); }
+  catch (e) { toast(e.message, false); }
+}
+async function addMood() {
+  const name = prompt("Nombre del mood (en inglés, corto: p.ej. sleepy, romantic):");
+  if (!name || !name.trim()) return;
+  const description = prompt("Descripción corta (el bot la ve al elegir):") || "";
+  if (!description.trim()) return toast("falta la descripción", false);
+  try {
+    await api("/api/moods", {action: "save", name: name.trim().toLowerCase(),
+      description: description.trim(), enabled: true,
+      body: "Escribí acá cómo se comporta el bot en este humor."});
+    toast("mood creado — editalo en su tarjeta");
+    await reloadConfig();
+  } catch (e) { toast(e.message, false); }
+}
+async function reloadConfig() {
+  const data = await api("/api/config");
+  ENV_KEYS = data.env_keys; SKILLS = data.skills; MOODS = data.moods ?? [];
+  CATALOG = data.tools_catalog ?? []; INSTANCE = data.instance ?? {};
+  PROMPTS = data.prompts ?? [];
+  render();
 }
 
 function renderPrefsMode() {
@@ -514,19 +620,27 @@ function renderData() {
       <div style="max-width:110px"><button onclick="addMem()">+ agregar</button></div></div>`;
 
   const evs = DATA.events ?? [];
-  $("c-events").innerHTML = `<table><tr><th>fecha</th><th>título</th><th>tipo</th><th>de quién</th><th></th></tr>
+  const RECUR_ES = {daily: "todos los días", weekly: "semanal", monthly: "mensual"};
+  $("c-events").innerHTML = `<table><tr><th>fecha</th><th>título</th><th>tipo</th><th>repite</th><th>de quién</th><th></th></tr>
     ${evs.map(e => `<tr><td style="white-space:nowrap">${esc(e.event_at)}</td>
       <td>${esc(e.title)}${e.description ? ` <span class="hint">— ${esc(e.description)}</span>` : ""}</td>
       <td>${esc(e.kind)}${e.kind === "bot_action" && e.done ? ' <span class="badge on">hecha</span>' : ""}</td>
+      <td class="hint">${esc(RECUR_ES[e.recur] ?? "una vez")}</td>
       <td>${e.handle ? "@" + esc(e.handle) : "<span class='hint'>comunidad</span>"}</td>
       <td><button class="danger" onclick="delData('/api/events',${e.id})">borrar</button></td></tr>`).join("")
       || "<tr><td class='hint'>sin eventos próximos</td></tr>"}</table>
     <div class="row" style="margin-top:10px">
       <div><label>título<input id="ev-title" type="text"></label></div>
-      <div style="max-width:190px"><label>fecha (YYYY-MM-DD[THH:MM])<input id="ev-at" type="text" placeholder="2026-08-01T21:00"></label></div>
+      <div style="max-width:190px"><label>primera fecha (YYYY-MM-DD[THH:MM])<input id="ev-at" type="text" placeholder="2026-08-01T21:00"></label></div>
+      <div style="max-width:160px"><label>repetición<select id="ev-recur">
+        <option value="">una sola vez</option><option value="daily">todos los días</option>
+        <option value="weekly">todas las semanas</option><option value="monthly">todos los meses</option>
+      </select></label></div>
       <div style="max-width:140px"><label>tipo<select id="ev-kind">${["other", "birthday", "meetup", "reminder", "bot_action"].map(k => `<option>${k}</option>`).join("")}</select></label></div>
       <div style="max-width:200px"><label>de quién (handle; vacío = comunidad)<input id="ev-handle" type="text"></label></div>
     </div>
+    <p class="hint">Repetición: la primera fecha fija la hora y — según el patrón — el día
+      de semana o del mes ("todas las semanas" desde un lunes = todos los lunes).</p>
     <div class="row"><div><label>descripción<input id="ev-desc" type="text"></label></div>
       <div style="max-width:110px"><button onclick="addEvent()">+ agendar</button></div></div>`;
 }
@@ -555,6 +669,7 @@ function addMem() {
 function addEvent() {
   dataAction("/api/events", {action: "add", title: $("ev-title").value.trim(),
     event_at: $("ev-at").value.trim(), kind: $("ev-kind").value,
+    recur: $("ev-recur").value,
     handle: $("ev-handle").value.trim(), description: $("ev-desc").value.trim()});
 }
 
@@ -567,12 +682,73 @@ function renderBudget() {
     ${b.enabled ? "" : `<p class="warn">⚠️ sin budget activo el bot corre SIN límite de gasto</p>`}`;
 }
 
-function renderModels() {
-  const m = S.MODELS ?? (S.MODELS = {endpoints: {}, aliases: {}, roles: {}});
+const DEFAULT_ROLES = {classify: "lite", reply: "reasoning", admin: "reasoning",
+  update_profile: "reasoning", feed_summary: "lite", feed_opinion: "lite",
+  bio_interp: "lite", image_describe: "vision"};
+
+function normalizeModels() {
+  // 1) Sin sección MODELS → prellenar los defaults (endpoint + reasoning/lite/
+  //    vision + roles) para que el usuario EDITE en vez de crear de cero.
+  const empty = !S.MODELS || (!Object.keys(S.MODELS.endpoints ?? {}).length &&
+                              !Object.keys(S.MODELS.aliases ?? {}).length);
+  if (empty) {
+    const base = S.OPENAI_ENDPOINT || "https://openrouter.ai/api/v1";
+    let epName = "openrouter";
+    try { epName = new URL(base).hostname.replace(/^www\./, "").split(".")[0] || "default"; } catch {}
+    S.MODELS = {
+      endpoints: {[epName]: {base_url: base}},
+      aliases: {
+        reasoning: [{endpoint: epName, model: S.REASONING_MODEL || "deepseek/deepseek-v4-pro"}],
+        lite:      [{endpoint: epName, model: S.LITE_MODEL || "deepseek/deepseek-v4-flash"}],
+        vision:    [{endpoint: epName, model: S.IMAGE_MODEL || "google/gemini-2.5-flash"}],
+      },
+      roles: {...DEFAULT_ROLES},
+    };
+    return;
+  }
+  const m = S.MODELS;
   m.endpoints ??= {}; m.aliases ??= {}; m.roles ??= {};
+  // 2) Auto-curación: hops que referencian un endpoint inexistente. Si el valor
+  //    roto ES una URL, se matchea (o crea) el endpoint con esa base_url.
+  for (const chain of Object.values(m.aliases)) {
+    for (const hop of chain) {
+      if (!hop.endpoint || m.endpoints[hop.endpoint]) continue;
+      const byUrl = Object.entries(m.endpoints).find(([, ep]) => ep.base_url === hop.endpoint);
+      if (byUrl) { hop.endpoint = byUrl[0]; continue; }
+      if (hop.endpoint.includes("://")) {
+        let name = "endpoint";
+        try { name = new URL(hop.endpoint).hostname.replace(/^www\./, "").split(".")[0]; } catch {}
+        m.endpoints[name] ??= {base_url: hop.endpoint};
+        hop.endpoint = name;
+      } else if (Object.keys(m.endpoints).length) {
+        hop.endpoint = Object.keys(m.endpoints)[0];
+      }
+    }
+  }
+  // 3) Los aliases estándar (reasoning/lite/vision) existen siempre por default
+  //    — el usuario los edita o borra, pero arranca con la estructura armada.
+  const ep0 = Object.keys(m.endpoints)[0];
+  if (ep0) {
+    const DEFAULT_MODELS = {
+      reasoning: S.REASONING_MODEL || "deepseek/deepseek-v4-pro",
+      lite:      S.LITE_MODEL || "deepseek/deepseek-v4-flash",
+      vision:    S.IMAGE_MODEL || "google/gemini-2.5-flash",
+    };
+    for (const [alias, model] of Object.entries(DEFAULT_MODELS))
+      if (!m.aliases[alias]) m.aliases[alias] = [{endpoint: ep0, model}];
+  }
+  if (!Object.keys(m.roles).length)
+    m.roles = Object.fromEntries(
+      Object.entries(DEFAULT_ROLES).filter(([, a]) => m.aliases[a]));
+}
+
+function renderModels() {
+  normalizeModels();
+  const m = S.MODELS;
   let html = `<div class="card"><b>Endpoints</b>
-    <span class="hint">— proveedores de LLM (base_url + api key)</span>
-    <table><tr><th>nombre</th><th>base_url</th><th>api key (valor o nombre de env var)</th><th></th></tr>`;
+    <span class="hint">— proveedores de LLM. Columna key VACÍA = usa la del .env
+    (LLM_API_KEY / OPENROUTER_API_KEY); si no, un valor fijo o el nombre de otra env var.</span>
+    <table><tr><th>nombre</th><th>base_url</th><th>api key</th><th></th></tr>`;
   for (const [name, ep] of Object.entries(m.endpoints))
     html += `<tr><td><code>${esc(name)}</code></td><td>${textInput(ep, "base_url", "")}</td>
              <td>${textInput(ep, ep.api_key_env !== undefined ? "api_key_env" : "api_key", "")}</td>
@@ -743,11 +919,19 @@ const TASK_DESC = {
 function renderTasks() {
   const tasks = S.TASKS ?? (S.TASKS = {});
   let html = `<table><tr><th>tarea</th><th>qué hace</th><th>on</th><th>intervalo (h; 0 = cada ciclo)</th></tr>`;
-  for (const [name, cfg] of Object.entries(tasks))
+  for (const [name, cfg] of Object.entries(tasks)) {
+    cfg.interval_hours ??= 0;  // editable siempre (antes decía "auto-regulada" sin más)
     html += `<tr><td><code>${esc(name)}</code></td><td class="hint">${esc(TASK_DESC[name] ?? "")}</td>
              <td>${check(cfg, "enabled", "", true)}</td>
-             <td>${"interval_hours" in cfg ? textInput(cfg, "interval_hours", "", "number") : "<span class='hint'>auto-regulada</span>"}</td></tr>`;
+             <td style="max-width:140px">${textInput(cfg, "interval_hours", "", "number")}</td></tr>`;
+  }
   $("c-tasks").innerHTML = html + "</table>";
+}
+
+function renderHeartbeat() {
+  const hb = (S.TASKS ??= {}).heartbeat ?? (S.TASKS.heartbeat = {enabled: false, interval_hours: 12});
+  $("c-hb-toggle").innerHTML = check(hb, "enabled", "activo", false);
+  $("c-hb-interval").innerHTML = textInput(hb, "interval_hours", "cada cuántas horas", "number");
 }
 
 function renderMcp() {
@@ -865,6 +1049,12 @@ async function saveAll() {
       await api("/api/soul", {text: $("soul-text").value});
       SOUL = $("soul-text").value; soulDirty = false;
     }
+    if (hbDirty) {
+      const r = await api("/api/prompt", {action: "save",
+        file: "heartbeat_checklist.md", text: $("hb-text").value});
+      if (!r.ok) throw new Error((r.errors || []).join("\n"));
+      hbDirty = false;
+    }
     dirty = false;
     $("savebar").classList.remove("dirty");
     render();  // refleja lo podado (tarjetas vacías descartadas)
@@ -969,6 +1159,29 @@ async function sendChat() {
   }
 }
 
+// ─── Editor avanzado de prompts ──────────────────────────────────────────
+async function loadPrompt() {
+  const file = $("prompt-file").value;
+  if (!file) return;
+  try {
+    const r = await api("/api/prompt", {action: "get", file});
+    if (!r.ok) throw new Error((r.errors || []).join("\n"));
+    const ta = $("prompt-text");
+    ta.style.display = "";
+    ta.value = r.text;
+  } catch (e) { toast(e.message, false); }
+}
+async function savePrompt() {
+  const file = $("prompt-file").value;
+  const ta = $("prompt-text");
+  if (!file || ta.style.display === "none") return toast("abrí un prompt primero", false);
+  try {
+    const r = await api("/api/prompt", {action: "save", file, text: ta.value});
+    if (!r.ok) throw new Error((r.errors || []).join("\n"));
+    toast(`${file} guardado ✓ — reiniciá/relanzá el bot para aplicar`);
+  } catch (e) { toast(e.message, false); }
+}
+
 // ─── Danger ──────────────────────────────────────────────────────────────
 async function dangerAction(action) {
   const confirmTxt = $("danger-confirm").value.trim();
@@ -988,6 +1201,7 @@ async function load() {
   const data = await api("/api/config");
   S = data.settings; NEWS = data.news; ENV_KEYS = data.env_keys; SKILLS = data.skills;
   MOODS = data.moods ?? []; CATALOG = data.tools_catalog ?? []; INSTANCE = data.instance ?? {};
+  PROMPTS = data.prompts ?? [];
   SOUL = data.soul ?? ""; soulDirty = false;
   await loadData();
   render();
@@ -995,6 +1209,14 @@ async function load() {
   refreshBot();
   setInterval(refreshBot, 15000);
   $("soul-text").addEventListener("input", () => { soulDirty = true; markDirty(); });
+  $("hb-text").addEventListener("input", () => { hbDirty = true; markDirty(); });
+  $("ui-lang").addEventListener("change", e => { S.LANGUAGE = e.target.value; markDirty(); });
+  if (PROMPTS.includes("heartbeat_checklist.md")) {
+    try {
+      const r = await api("/api/prompt", {action: "get", file: "heartbeat_checklist.md"});
+      if (r.ok) $("hb-text").value = r.text;
+    } catch {}
+  }
 }
 load().catch(e => toast("no pude cargar la config: " + e.message, false));
 </script>
