@@ -18,10 +18,14 @@ from tools import Scope, ToolContext  # noqa: E402
 
 _CTX = ToolContext(state={"author_handle": "u"}, conn=None)
 
+# Registro unificado (T38b): RSS es un tipo de fuente más.
 _SOURCES = [
-    {"url": "http://lpo", "host": "lpo", "title": "La Política Online", "category": "política", "enabled": True},
-    {"url": "http://p12", "host": "p12", "title": "Página/12", "category": "noticias", "enabled": True},
-    {"url": "http://off", "host": "off", "title": "Apagada", "category": "deportes", "enabled": False},
+    {"type": "rss", "name": "La Política Online", "category": "política",
+     "sources": ["http://lpo"], "enabled": True},
+    {"type": "rss", "name": "Página/12", "category": "noticias",
+     "sources": ["http://p12"], "enabled": True},
+    {"type": "rss", "name": "Apagada", "category": "deportes",
+     "sources": ["http://off"], "enabled": False},
 ]
 
 
@@ -31,7 +35,7 @@ def _fake_rss(url, max_items=3):
 
 @pytest.fixture(autouse=True)
 def _cfg(monkeypatch):
-    monkeypatch.setattr(b, "NEWS_SOURCES", _SOURCES)
+    monkeypatch.setattr(b, "SOURCES", _SOURCES)
     monkeypatch.setattr(b, "fetch_rss", _fake_rss)
 
 
@@ -83,7 +87,7 @@ def test_unknown_category_is_graceful():
 
 
 def test_no_sources_configured(monkeypatch):
-    monkeypatch.setattr(b, "NEWS_SOURCES", [])
+    monkeypatch.setattr(b, "SOURCES", [])
     assert "no tengo fuentes" in b._tool_get_news({}, _CTX).text
 
 

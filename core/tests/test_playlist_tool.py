@@ -31,7 +31,8 @@ def conn(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _base(monkeypatch):
-    monkeypatch.setattr(b, "SPOTIFY_PLAYLIST_ID", "PL1")
+    monkeypatch.setattr(b, "SOURCES", [{"type": "spotify", "name": "comunitaria",
+                                    "category": "", "sources": ["PL1"], "enabled": True}])
     monkeypatch.setattr(sa, "user_token", lambda: "user-tok")
     monkeypatch.setattr(b, "playlist_tracks", lambda pid, tok: list(_TRACKS))
 
@@ -72,9 +73,9 @@ def test_sin_token_mensaje_claro(conn, monkeypatch):
 
 
 def test_sin_playlist_configurada(conn, monkeypatch):
-    monkeypatch.setattr(b, "SPOTIFY_PLAYLIST_ID", "")
+    monkeypatch.setattr(b, "SOURCES", [])
     out = _call(conn)
-    assert "SPOTIFY_PLAYLIST_ID" in out.text
+    assert "no hay playlist configurada" in out.text
 
 
 def test_playlist_vacia(conn, monkeypatch):
@@ -103,3 +104,52 @@ def test_registrada_con_scope_feed_reflection():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ─── T38b: varias playlists, elegidas por tema ───────────────────────────────
+_POR_PLAYLIST = {
+    "PL_ROCK":   [{"id": "r1", "title": "Rock del país", "artist": "Banda",
+                   "url": "https://open.spotify.com/track/r1"}],
+    "PL_CUMBIA": [{"id": "c1", "title": "Cumbia del sol", "artist": "Grupo",
+                   "url": "https://open.spotify.com/track/c1"}],
+}
+
+
+@pytest.fixture()
+def varias(monkeypatch):
+    monkeypatch.setattr(b, "SOURCES", [
+        {"type": "spotify", "name": "rockola", "category": "rock",
+         "sources": ["PL_ROCK"], "enabled": True},
+        {"type": "spotify", "name": "bailanta", "category": "cumbia",
+         "sources": ["PL_CUMBIA"], "enabled": True},
+    ])
+    monkeypatch.setattr(b, "playlist_tracks", lambda pid, tok: list(_POR_PLAYLIST[pid]))
+
+
+def test_topic_elige_la_playlist(conn, varias):
+    out = b._tool_get_playlist_track({"topic": "rock"}, ToolContext(state={}, conn=conn))
+    assert "Rock del país" in out.text and "Cumbia" not in out.text
+
+
+def test_sin_topic_junta_todas(conn, varias):
+    vistos = set()
+    for _ in range(12):
+        vistos.add(b._tool_get_playlist_track(
+            {}, ToolContext(state={}, conn=conn)).text.split("\n")[0])
+    assert len(vistos) == 2          # elige entre los temas de ambas playlists
+
+
+def test_topic_sin_playlist_avisa_y_sugiere(conn, varias):
+    out = b._tool_get_playlist_track({"topic": "jazz"}, ToolContext(state={}, conn=conn))
+    assert "no tengo playlist para 'jazz'" in out.text
+    assert "rock" in out.text and "cumbia" in out.text
+
+
+def test_una_playlist_rota_no_tumba_al_resto(conn, monkeypatch, varias):
+    def _falla(pid, tok):
+        if pid == "PL_ROCK":
+            raise RuntimeError("403")
+        return list(_POR_PLAYLIST[pid])
+    monkeypatch.setattr(b, "playlist_tracks", _falla)
+    out = b._tool_get_playlist_track({}, ToolContext(state={}, conn=conn))
+    assert "Cumbia del sol" in out.text

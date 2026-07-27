@@ -82,10 +82,22 @@ def test_user_groups_validos_pasan():
     assert cu.validate_settings(s) == []
 
 
-def test_news_valida():
-    assert cu.validate_news([{"url": "https://x/rss", "title": "X"}]) == []
-    errs = cu.validate_news([{"url": "ftp://no", "title": ""}])
-    assert len(errs) == 2
+def test_sources_valida():
+    assert cu.validate_sources(
+        [{"type": "rss", "name": "X", "sources": ["https://x/rss"]}]) == []
+    assert cu.validate_sources(
+        [{"type": "scrape", "category": "futbol", "sources": ["cuenta"]}]) == []
+
+
+def test_sources_invalidas():
+    # tipo desconocido, sin fuentes, y una URL de RSS que no es URL
+    assert any("type inválido" in e for e in cu.validate_sources([{"type": "yolo"}]))
+    assert any("sin fuentes" in e for e in
+               cu.validate_sources([{"type": "rss", "name": "X", "sources": []}]))
+    assert any("no es una URL" in e for e in cu.validate_sources(
+        [{"type": "rss", "name": "X", "sources": ["ftp://no"]}]))
+    assert any("tema" in e for e in cu.validate_sources(
+        [{"type": "scrape", "sources": ["x"]}]))
 
 
 # ─── Store ───────────────────────────────────────────────────────────────────
@@ -106,22 +118,30 @@ def test_write_settings_invalido_no_toca_el_archivo(store):
     assert store.settings_path.read_text(encoding="utf-8") == antes
 
 
-def test_content_sources_valida():
-    assert cu.validate_content_sources([{"source": "cuenta", "category": "futbol"}]) == []
-    errs = cu.validate_content_sources([{"source": "", "category": ""}])
-    assert len(errs) == 2
+def test_sources_roundtrip(store):
+    assert store.write_sources(
+        [{"type": "scrape", "category": "futbol", "sources": ["a", "b"], "enabled": True}]) == []
+    guardado = store.read_all()["sources"][0]
+    assert guardado["sources"] == ["a", "b"] and guardado["type"] == "scrape"
 
 
-def test_content_sources_roundtrip(store):
-    assert store.write_content_sources(
-        [{"source": "futbol_memes", "category": "futbol", "enabled": True}]) == []
-    assert store.read_all()["content_sources"][0]["source"] == "futbol_memes"
+def test_sources_invalido_no_escribe(store):
+    store.write_sources([{"type": "scrape", "category": "ok", "sources": ["a"]}])
+    assert store.write_sources([{"type": "scrape", "category": "x", "sources": []}])
+    assert store.read_all()["sources"][0]["category"] == "ok"     # intacto
 
 
-def test_content_sources_invalido_no_escribe(store):
-    store.write_content_sources([{"source": "ok", "category": "futbol"}])
-    assert store.write_content_sources([{"source": "sin_tema"}])          # error
-    assert store.read_all()["content_sources"][0]["source"] == "ok"       # intacto
+def test_sources_migra_los_registros_viejos(store):
+    """Una instancia sin sources.json ve igual sus feeds RSS de siempre."""
+    (store.base / "config" / "news_sites.json").write_text(
+        json.dumps([{"url": "https://x/rss", "title": "X", "category": "noticias"}]),
+        encoding="utf-8")
+    migrado = store.read_all()["sources"]
+    assert migrado[0]["type"] == "rss" and migrado[0]["sources"] == ["https://x/rss"]
+    # y al guardar, el archivo viejo se retira para que no queden dos verdades
+    assert store.write_sources(migrado) == []
+    assert not (store.base / "config" / "news_sites.json").exists()
+    assert (store.base / "config" / "sources.json").exists()
 
 
 # ─── Membrilla: lanzador del scraper (settings.MEMBRILLA) ────────────────────

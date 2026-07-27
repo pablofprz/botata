@@ -22,7 +22,8 @@ _TRACK = {"id": "t1", "title": "Flaca", "artist": "Andrés Calamaro",
 
 @pytest.fixture(autouse=True)
 def _base(monkeypatch):
-    monkeypatch.setattr(b, "SPOTIFY_PLAYLIST_ID", "PL1")
+    monkeypatch.setattr(b, "SOURCES", [{"type": "spotify", "name": "comunitaria",
+                                    "category": "", "sources": ["PL1"], "enabled": True}])
 
 
 @pytest.fixture
@@ -102,7 +103,7 @@ def test_sin_token_es_unavailable(monkeypatch):
 
 
 def test_sin_playlist_config(monkeypatch, _con_token):
-    monkeypatch.setattr(b, "SPOTIFY_PLAYLIST_ID", "")
+    monkeypatch.setattr(b, "SOURCES", [])
     assert b.add_track_to_playlist("flaca")["status"] == "unavailable"
 
 

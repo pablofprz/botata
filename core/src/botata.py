@@ -195,63 +195,120 @@ TASKS_CONFIG       : dict = settings.get("TASKS", {})
 MODELS_CONFIG      : dict | None = settings.get("MODELS")
 
 
-def _load_news_sources() -> list[dict]:
-    """Carga config/news_sites.json. Acepta strings (back-compat, mode=post) u objetos
-    {url, title, description, mode, enabled, interval_hours}. Tagea cada fuente con `host`."""
+# ---------------------------------------------------------------------------
+# Registro único de FUENTES de contenido (T38b, 2026-07-27)
+#
+# Un solo archivo describe de dónde saca contenido el bot, sea cual sea el
+# conector: RSS es un tipo de fuente más, no una sección aparte. Cada entrada es
+# **un tema con las fuentes que le correspondan**, más su descripción — así el
+# bot puede tener varias playlists de Spotify (rock / cumbia), varios grupos de
+# cuentas scrapeadas por tema, y varios diarios por sección.
+#
+#   config/sources.json = [{type, name, category, sources: [...], description, enabled}]
+#     type "rss"     → sources = URLs de feeds        (tool get_news)
+#     type "scrape"  → sources = source_name de Membrilla (tool search_images)
+#     type "spotify" → sources = ids de playlist      (tool get_playlist_track)
+# ---------------------------------------------------------------------------
+SOURCE_TYPES = ("rss", "scrape", "spotify")
+
+
+def _normalize_source_entry(e: dict) -> dict | None:
+    """Normaliza una entrada del registro. None si no tiene fuentes utilizables.
+
+    Tolera las formas viejas: `source` (una sola) y `sources` como string con
+    comas (por si alguien edita el JSON a mano)."""
+    if not isinstance(e, dict):
+        return None
+    srcs = e.get("sources")
+    if srcs is None:
+        srcs = [e["source"]] if (e.get("source") or "").strip() else []
+    elif isinstance(srcs, str):
+        srcs = srcs.split(",")
+    srcs = [str(s).strip() for s in srcs if str(s).strip()]
+    if not srcs:
+        return None
+    return {**e, "type": (e.get("type") or "scrape").strip().lower(), "sources": srcs}
+
+
+def _load_sources() -> list[dict]:
+    """Carga config/sources.json. Si no existe, MIGRA en memoria los registros
+    viejos (news_sites.json → rss, content_sources.json → scrape) para que una
+    instancia sin actualizar siga funcionando sin tocar nada."""
     try:
-        raw = load_json(CONFIG_DIR / "news_sites.json")
+        raw = load_json(CONFIG_DIR / "sources.json")
     except Exception:
-        return []
-    out: list[dict] = []
-    for e in raw:
-        if isinstance(e, str):
-            e = {"url": e, "mode": "post"}
-        if not e.get("url"):
-            continue
-        host = urllib.parse.urlparse(e["url"]).netloc.replace("www.", "") or e["url"]
-        out.append({**e, "host": host})
+        raw = None
+    if raw is None:
+        raw = []
+        try:  # RSS viejo: {url, title, description, category, enabled}
+            for e in load_json(CONFIG_DIR / "news_sites.json"):
+                if isinstance(e, str):
+                    e = {"url": e}
+                if (e.get("url") or "").strip():
+                    raw.append({"type": "rss", "name": e.get("title", ""),
+                                "category": e.get("category", ""),
+                                "sources": [e["url"]],
+                                "description": e.get("description", ""),
+                                "enabled": e.get("enabled", True)})
+        except Exception:
+            pass
+        try:  # contenido scrapeado viejo
+            for e in load_json(CONFIG_DIR / "content_sources.json"):
+                if isinstance(e, dict):
+                    raw.append({**e, "type": "scrape"})
+        except Exception:
+            pass
+    out = [n for n in (_normalize_source_entry(e) for e in raw) if n]
+    # La playlist comunitaria vivía suelta en settings: entra al registro como
+    # una fuente más (y el admin puede sumar otras desde la UI).
+    legacy_pl = str(settings.get("SPOTIFY_PLAYLIST_ID", "")).strip()
+    if legacy_pl and not any(legacy_pl in e["sources"] for e in out):
+        out.append({"type": "spotify", "name": "playlist comunitaria",
+                    "category": "", "sources": [legacy_pl],
+                    "description": "", "enabled": True})
     return out
 
 
-NEWS_SOURCES : list = _load_news_sources()
+SOURCES : list = _load_sources()
 
 
-def _load_content_sources() -> list[dict]:
-    """T38: carga config/content_sources.json — el registro de QUÉ FUENTE es de QUÉ TEMA
-    para el contenido scrapeado (gemelo de news_sites.json, que hace lo mismo con RSS).
+def sources_of_type(kind: str, topic: str = "") -> list[str]:
+    """Fuentes habilitadas de un tipo, opcionalmente acotadas a un tema.
 
-    Forma: [{platform, source, category, description, enabled}]. `source` es el
-    `source_name` con el que Membrilla dejó el contenido (la cuenta/board de origen).
-    El tema NO viene de Membrilla a propósito: 'Membrilla adquiere, el consumidor
-    interpreta' — la relevancia de cada fuente es config del admin de esta comunidad.
+    Sin `topic` devuelve todas las del tipo. Con `topic`, el matcheo es tolerante
+    (lo escribe un LLM): case-insensitive y por substring contra `category`,
+    `name`, `description` y los nombres de las fuentes.
     """
-    try:
-        raw = load_json(CONFIG_DIR / "content_sources.json")
-    except Exception:
-        return []
-    return [e for e in raw if isinstance(e, dict) and (e.get("source") or "").strip()]
+    t = (topic or "").strip().lower()
+    out: list[str] = []
+    for entry in SOURCES:
+        if entry["type"] != kind or not entry.get("enabled", True):
+            continue
+        if t:
+            haystack = " ".join([
+                str(entry.get("category", "")), str(entry.get("name", "")),
+                str(entry.get("description", "")), *entry["sources"],
+            ]).lower()
+            if t not in haystack:
+                continue
+        out.extend(s for s in entry["sources"] if s not in out)
+    return out
 
 
-CONTENT_SOURCES : list = _load_content_sources()
+def source_entries(kind: str) -> list[dict]:
+    """Entradas habilitadas de un tipo (para cuando hace falta el nombre/tema)."""
+    return [e for e in SOURCES if e["type"] == kind and e.get("enabled", True)]
+
+
+def topics_available() -> list[str]:
+    """Temas declarados en el registro (para sugerirlos cuando uno no matchea)."""
+    return sorted({(e.get("category") or "").strip() for e in SOURCES
+                   if e.get("enabled", True)} - {""})
 
 
 def sources_for_topic(topic: str) -> list[str]:
-    """Nombres de fuente (`source_name`) declarados para un tema. [] si no matchea nada.
-
-    Matcheo tolerante (el tema lo escribe un LLM): case-insensitive y por
-    substring contra `category`, `source` y `description`, igual que get_news.
-    """
-    t = (topic or "").strip().lower()
-    if not t:
-        return []
-    out = []
-    for s in CONTENT_SOURCES:
-        if not s.get("enabled", True):
-            continue
-        haystack = " ".join(str(s.get(k, "")) for k in ("category", "source", "description")).lower()
-        if t in haystack:
-            out.append(s["source"])
-    return out
+    """Fuentes de contenido scrapeado para un tema (usada por search_images)."""
+    return sources_of_type("scrape", topic) if (topic or "").strip() else []
 
 # Leer la media (imágenes/video/GIF) de los posts del hilo: corre el modelo
 # vision (rol image_describe) sobre el frame/thumbnail y suma la descripción al
@@ -314,7 +371,6 @@ USER_GROUPS : dict = settings.get("USER_GROUPS", {})
 # Playlist comunitaria de recomendaciones (tool add_music_recommendation).
 # Solo el ID (no la URL completa). Escribir requiere el token de USUARIO de
 # spotify_auth.py (autorización única del admin) — Client Credentials no puede.
-SPOTIFY_PLAYLIST_ID : str = str(settings.get("SPOTIFY_PLAYLIST_ID", "")).strip()
 
 # Presupuesto diario de tokens (guard económico, portado de maripobot).
 # {enabled, daily_usd, announce} — editable desde la UI (python config_ui.py).
@@ -3012,17 +3068,16 @@ def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     category = args.get("category")
     topic    = (args.get("topic") or "").strip()
     # T38: el tema acota la búsqueda a las fuentes que el admin declaró para él
-    # (content_sources.json). Se resuelve en query, así editar el registro aplica
+    # (registro sources.json, type=scrape). Se resuelve en query, así editar aplica
     # en caliente. Tema desconocido → avisamos en vez de devolver cualquier cosa.
     sources = None
     if topic:
         sources = sources_for_topic(topic)
         if not sources:
-            conocidos = sorted({(s.get("category") or "").strip()
-                                for s in CONTENT_SOURCES if s.get("enabled", True)} - {""})
             return ToolResult(text=(
                 f"no tengo fuentes declaradas para '{topic}'. Temas disponibles: "
-                + (", ".join(conocidos) or "ninguno — el admin no cargó fuentes de contenido")))
+                + (", ".join(topics_available())
+                   or "ninguno — el admin no cargó fuentes de contenido")))
     results  = dbmod.prefer_fresh_media(
         dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category,
                                           sources=sources, limit=8))
@@ -3121,18 +3176,27 @@ def _tool_get_playlist_track(args: dict, ctx: ToolContext) -> ToolResult:
     igual). Da la pata de datos a la rutina de compartir música: la conducta
     ("compartí un tema, comentalo") vive en routines/*.md."""
     import spotify_auth
-    if not SPOTIFY_PLAYLIST_ID:
-        return ToolResult(text="no hay playlist comunitaria configurada (SPOTIFY_PLAYLIST_ID)")
+    topic     = (args.get("topic") or "").strip()
+    playlists = sources_of_type("spotify", topic)
+    if not playlists:
+        if topic:
+            return ToolResult(text=(
+                f"no tengo playlist para '{topic}'. Temas con playlist: "
+                + (", ".join(e.get("category") or e.get("name") or "?"
+                             for e in source_entries("spotify")) or "ninguno")))
+        return ToolResult(text="no hay playlist configurada (agregá una en Fuentes de contenido)")
     token = spotify_auth.user_token()
     if not token:
         return ToolResult(text="playlist no disponible: falta la autorización de Spotify "
                           "(el admin tiene que correr spotify_auth.py)")
-    try:
-        tracks = [t for t in playlist_tracks(SPOTIFY_PLAYLIST_ID, token) if t.get("url")]
-    except Exception as e:
-        return ToolResult(text=f"no pude leer la playlist ahora: {e}")
+    tracks = []
+    for pl in playlists:   # varias playlists por tema: se juntan y se elige de todas
+        try:
+            tracks.extend(t for t in playlist_tracks(pl, token) if t.get("url"))
+        except Exception as e:
+            log.warning("get_playlist_track: no pude leer la playlist %s: %s", pl, e)
     if not tracks:
-        return ToolResult(text="la playlist comunitaria está vacía")
+        return ToolResult(text="no pude leer ninguna playlist ahora (o están vacías)")
     recientes = recent_bot_posts(ctx.conn, limit=30)
     frescos = [t for t in tracks if not any(t["url"] in p for p in recientes)]
     track = random.choice(frescos or tracks)
@@ -3374,8 +3438,11 @@ def add_track_to_playlist(query: str) -> dict:
     las maneja el caller.
     """
     import spotify_auth
-    if not SPOTIFY_PLAYLIST_ID:
-        return {"status": "unavailable", "reason": "sin SPOTIFY_PLAYLIST_ID en settings"}
+    # Escribir exige UN destino inequívoco: la primera playlist habilitada del
+    # registro (tras la migración, la de siempre). Leer sí puede abarcar varias.
+    destino = next(iter(sources_of_type("spotify")), "")
+    if not destino:
+        return {"status": "unavailable", "reason": "sin playlist de Spotify en las fuentes"}
     token = spotify_auth.user_token()
     if not token:
         return {"status": "unavailable",
@@ -3391,11 +3458,11 @@ def add_track_to_playlist(query: str) -> dict:
     # Dedup doble: por ID y por canción (título+artista normalizados) — el mismo
     # tema existe en Spotify con IDs distintos según la edición/remaster.
     key = _norm_track_key(track["title"], track["artist"])
-    existentes = playlist_tracks(SPOTIFY_PLAYLIST_ID, token)
+    existentes = playlist_tracks(destino, token)
     if any(e["id"] == track["id"] or _norm_track_key(e["title"], e["artist"]) == key
            for e in existentes):
         return {"status": "duplicate", "track": track}
-    _spotify_post(f"/playlists/{SPOTIFY_PLAYLIST_ID}/items", token,
+    _spotify_post(f"/playlists/{destino}/items", token,
                   {"uris": [f"spotify:track:{track['id']}"]})
     return {"status": "added", "track": track}
 
@@ -3528,32 +3595,37 @@ def _tool_get_news(args: dict, ctx: ToolContext) -> ToolResult:
     Con `only_new=true` devuelve solo lo que nunca mostró antes y lo marca visto
     (dedup en db.news_items) — es el modo para rutinas: una rutina de noticias
     que corre cada X horas no repite titulares entre pases."""
-    if not NEWS_SOURCES:
+    entries = source_entries("rss")
+    if not entries:
         return ToolResult(text="no tengo fuentes de noticias configuradas")
     cat      = (args.get("category") or "").strip().lower() or None
     only_new = _as_bool(args.get("only_new")) or False
-    sources  = [s for s in NEWS_SOURCES if s.get("enabled", True)]
     if cat:
-        sources = [s for s in sources
-                   if cat in (s.get("category", "") + " " + s.get("title", "")).lower()]
-    if not sources:
+        urls = set(sources_of_type("rss", cat))
+        entries = [e for e in entries if any(u in urls for u in e["sources"])]
+    if not entries:
         return ToolResult(text=f"no tengo fuentes de noticias de '{cat}'" if cat
                           else "no hay fuentes de noticias activas")
     lines: list[str] = []
-    for s in sources:
-        try:
-            items = fetch_rss(s["url"], max_items=6 if only_new else 3)
-        except Exception as e:
-            log.error("get_news %s: %s", s["host"], e)
-            continue
-        if only_new:
-            items = [it for it in items if not dbmod.news_item_posted(ctx.conn, it["id"])]
-        label = s.get("title") or s["host"]
-        for it in items[:3]:
-            link = f" {it['link']}" if it.get("link") else ""
-            lines.append(f"- [{label}] {it['title']}{link}")
+    for entry in entries:
+        for url in entry["sources"]:
+            host = urllib.parse.urlparse(url).netloc.replace("www.", "") or url
+            try:
+                items = fetch_rss(url, max_items=6 if only_new else 3)
+            except Exception as e:
+                log.error("get_news %s: %s", host, e)
+                continue
             if only_new:
-                dbmod.mark_news_item_posted(ctx.conn, it["id"], s["host"], it["title"])
+                items = [it for it in items if not dbmod.news_item_posted(ctx.conn, it["id"])]
+            # El nombre de la entrada etiqueta bien cuando es un diario; con varias
+            # URLs bajo un mismo tema, el host distingue de cuál salió cada titular.
+            label = (entry.get("name") or "").strip() if len(entry["sources"]) == 1 else ""
+            label = label or host
+            for it in items[:3]:
+                link = f" {it['link']}" if it.get("link") else ""
+                lines.append(f"- [{label}] {it['title']}{link}")
+                if only_new:
+                    dbmod.mark_news_item_posted(ctx.conn, it["id"], host, it["title"])
     if not lines:
         return ToolResult(text="no hay titulares nuevos ahora" if only_new
                           else "no pude traer noticias ahora")
@@ -3934,10 +4006,12 @@ def build_tool_registry(config: dict | None = None, *,
     )
     reg.register(
         "get_playlist_track",
-        "Trae UN tema al azar de la playlist comunitaria (con anti-repetición contra tus "
-        "posts recientes). Usala cuando tu rutina o el admin te piden compartir música de "
-        "la playlist; el resultado trae título, artista y el link a incluir en el post.",
-        {"type": "object", "properties": {}},
+        "Trae UN tema al azar de las playlists configuradas (con anti-repetición contra "
+        "tus posts recientes). Usala cuando tu rutina o el admin te piden compartir música; "
+        "el resultado trae título, artista y el link a incluir en el post. Si hay varias "
+        "playlists por tema, 'topic' elige de cuál (ej. 'rock', 'cumbia').",
+        {"type": "object", "properties": {
+            "topic": {"type": "string", "description": "Opcional: tema de la playlist a usar."}}},
         _tool_get_playlist_track,
         {Scope.FEED_REFLECTION, Scope.ADMIN},
     )
@@ -4105,9 +4179,14 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             f"{f['name']}={'on' if f.get('enabled', True) else 'off'} "
             f"({f.get('interval_hours', 6)}h)"
             for f in FEEDS_CONFIG) or "ninguno"))
-        lines.append("fuentes RSS (get_news): " + (", ".join(
-            (s.get("title") or s.get("host", "?")) + ("" if s.get("enabled", True) else " (off)")
-            for s in NEWS_SOURCES) or "ninguna"))
+        for kind, etiqueta in (("rss", "RSS"), ("scrape", "contenido scrapeado"),
+                               ("spotify", "playlists")):
+            ents = [e for e in SOURCES if e["type"] == kind]
+            if ents:
+                lines.append(f"fuentes {etiqueta}: " + ", ".join(
+                    f"{e.get('category') or e.get('name') or '?'}"
+                    f"({len(e['sources'])})" + ("" if e.get("enabled", True) else " off")
+                    for e in ents))
         if MOODS_CONFIG.get("enabled"):
             try:
                 mode = str(MOODS_CONFIG.get("mode", "manual")).lower()

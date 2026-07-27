@@ -81,11 +81,21 @@ cablea. Eso permite testearlos aislados y, a futuro (M7), reutilizarlos con otro
 | `MCP` | servers MCP externos (transport/command/filtros) | `mcp_tools` |
 | `MEMBRILLA` | repo + comandos del scraper hermano (botón "Lanzar scraper" de la UI) | `config_ui.py` |
 
-Además, dos registros **fuera** de settings.json, ambos en `config/` de la instancia y con la
-misma forma (lista de fuentes con `category`): `news_sites.json` (RSS → tool `get_news`) y
-**`content_sources.json`** (T38: qué cuenta/board scrapeado es de qué tema → parámetro `topic`
-de `search_images`). El tema se resuelve **en query** contra `source_name`, así editarlos
-aplica en caliente sin reindexar.
+Además, **un registro único de fuentes** fuera de settings.json: `config/sources.json`
+(T38/T38b) = `[{type, name, category, sources: [...], description, enabled}]`. Un **tema** con
+las fuentes que le correspondan, y un `type` que dice por dónde entra cada una:
+
+| `type` | `sources` contiene | Consumidor |
+|---|---|---|
+| `rss` | URLs de feeds | tool `get_news` |
+| `scrape` | `source_name` de Membrilla | tool `search_images` (parámetro `topic`) |
+| `spotify` | ids de playlist | tool `get_playlist_track` (parámetro `topic`) |
+
+Todo se resuelve **en query** (el tema se matchea contra category/name/description/fuentes),
+así editar el registro aplica en caliente sin reindexar. Permite varias playlists por tema,
+varios diarios por sección y varios grupos de cuentas por tema. `add_music_recommendation`
+escribe en la primera playlist habilitada (escribir exige destino inequívoco). Los registros
+viejos (`news_sites.json`, `content_sources.json`, `SPOTIFY_PLAYLIST_ID`) se migran solos.
 
 ### run(mode) — el runtime
 

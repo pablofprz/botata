@@ -1,0 +1,22 @@
+[
+  {
+    "type": "rss",
+    "name": "La Política Online",
+    "category": "política",
+    "sources": [
+      "https://www.lapoliticaonline.com/files/rss/ultimasnoticias.xml"
+    ],
+    "description": "últimas noticias de política argentina",
+    "enabled": true
+  },
+  {
+    "type": "rss",
+    "name": "Página/12",
+    "category": "noticias",
+    "sources": [
+      "https://www.pagina12.com.ar/arc/outboundfeeds/rss/edicion-impresa/"
+    ],
+    "description": "edición impresa",
+    "enabled": true
+  }
+]

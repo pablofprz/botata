@@ -252,26 +252,33 @@ def validate_mcp(mcp: dict) -> list[str]:
     return errs
 
 
-def validate_news(news: list) -> list[str]:
-    errs = []
-    for i, src in enumerate(news or []):
-        tag = f"news[{i}]"
-        if not (src.get("url") or "").startswith(("http://", "https://")):
-            errs.append(f"{tag}: url inválida")
-        if not src.get("title"):
-            errs.append(f"{tag}: falta title")
-    return errs
+SOURCE_TYPES = ("rss", "scrape", "spotify")
 
 
-def validate_content_sources(sources: list) -> list[str]:
-    """T38: registro tema→fuente del contenido scrapeado (config/content_sources.json)."""
+def validate_sources(sources: list) -> list[str]:
+    """T38b: registro ÚNICO de fuentes de contenido (config/sources.json).
+
+    [{type, name, category, sources: [...], description, enabled}] — un tema con
+    las fuentes que le correspondan. RSS es un `type` más, no una sección aparte.
+    """
     errs = []
-    for i, src in enumerate(sources or []):
-        tag = f"content_sources[{i}]"
-        if not (src.get("source") or "").strip():
-            errs.append(f"{tag}: falta source (el nombre de la cuenta/board como lo dejó Membrilla)")
-        if not (src.get("category") or "").strip():
-            errs.append(f"{tag}: falta category (el tema: 'futbol', 'politica', ...)")
+    for i, entry in enumerate(sources or []):
+        tag = f"sources[{i}]"
+        kind = (entry.get("type") or "").strip().lower()
+        if kind not in SOURCE_TYPES:
+            errs.append(f"{tag}: type inválido '{entry.get('type')}' (usar {list(SOURCE_TYPES)})")
+        srcs = entry.get("sources")
+        if isinstance(srcs, str):
+            srcs = srcs.split(",")
+        srcs = [str(s).strip() for s in (srcs or []) if str(s).strip()]
+        if not srcs:
+            errs.append(f"{tag}: sin fuentes")
+        if kind == "rss":
+            for u in srcs:
+                if not u.startswith(("http://", "https://")):
+                    errs.append(f"{tag}: '{u}' no es una URL de feed válida")
+        if not (entry.get("category") or "").strip() and not (entry.get("name") or "").strip():
+            errs.append(f"{tag}: poné al menos un tema (category) o un nombre")
     return errs
 
 
@@ -344,8 +351,9 @@ class ConfigStore:
     def __init__(self, base_dir: Path):
         self.base = Path(base_dir)
         self.settings_path = self.base / "config" / "settings.json"
-        self.news_path = self.base / "config" / "news_sites.json"
-        self.content_sources_path = self.base / "config" / "content_sources.json"
+        self.news_path = self.base / "config" / "news_sites.json"          # legado
+        self.content_sources_path = self.base / "config" / "content_sources.json"  # legado
+        self.sources_path = self.base / "config" / "sources.json"
         self.env_path = self.base / ".env"
         self.skills_dir = self.base / "skills"
         self.moods_dir = self.base / "moods"
@@ -376,10 +384,7 @@ class ConfigStore:
     # -- lectura ---------------------------------------------------------------
     def read_all(self) -> dict:
         settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
-        news = (json.loads(self.news_path.read_text(encoding="utf-8"))
-                if self.news_path.exists() else [])
-        content_sources = (json.loads(self.content_sources_path.read_text(encoding="utf-8"))
-                           if self.content_sources_path.exists() else [])
+        sources = self._read_sources(settings)
         soul_path = self.base / "context" / "SOUL.md"
         scrape = self.base / "scrape"
         try:  # indicador de Membrilla: cuántos sidecars dejó en la carpeta
@@ -405,8 +410,7 @@ class ConfigStore:
                 pass
         return {
             "settings": settings,
-            "news": news,
-            "content_sources": content_sources,
+            "sources": sources,
             "catalog_sources": catalog_sources,
             "env_keys": self._env_status(),
             "skills": self._skills_info(),
@@ -419,6 +423,41 @@ class ConfigStore:
                          "scrape_dir": str(scrape), "scrape_items": scrape_items,
                          "catalog_items": catalog_items},
         }
+
+    def _read_sources(self, settings: dict) -> list[dict]:
+        """Registro único. Si todavía no existe, migra en memoria los archivos
+        viejos (news_sites.json → rss, content_sources.json → scrape) + la
+        playlist suelta de settings, para que la UI muestre todo desde el día 1."""
+        if self.sources_path.exists():
+            try:
+                return json.loads(self.sources_path.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+        out: list[dict] = []
+        try:
+            for e in json.loads(self.news_path.read_text(encoding="utf-8")):
+                if isinstance(e, str):
+                    e = {"url": e}
+                if (e.get("url") or "").strip():
+                    out.append({"type": "rss", "name": e.get("title", ""),
+                                "category": e.get("category", ""), "sources": [e["url"]],
+                                "description": e.get("description", ""),
+                                "enabled": e.get("enabled", True)})
+        except Exception:
+            pass
+        try:
+            for e in json.loads(self.content_sources_path.read_text(encoding="utf-8")):
+                if isinstance(e, dict):
+                    srcs = e.get("sources") or ([e["source"]] if e.get("source") else [])
+                    if srcs:
+                        out.append({**e, "type": "scrape", "sources": srcs})
+        except Exception:
+            pass
+        pl = str(settings.get("SPOTIFY_PLAYLIST_ID", "")).strip()
+        if pl:
+            out.append({"type": "spotify", "name": "playlist comunitaria",
+                        "category": "", "sources": [pl], "description": "", "enabled": True})
+        return out
 
     def _routines_info(self) -> list[dict]:
         """Rutinas (conducta proactiva, routines/*.md) con cuerpo — para la UI."""
@@ -1027,20 +1066,22 @@ class ConfigStore:
                            json.dumps(settings, ensure_ascii=False, indent="\t") + "\n")
         return []
 
-    def write_news(self, news: list) -> list[str]:
-        errs = validate_news(news)
+    def write_sources(self, sources: list) -> list[str]:
+        errs = validate_sources(sources)
         if errs:
             return errs
-        self._atomic_write(self.news_path,
-                           json.dumps(news, ensure_ascii=False, indent=2) + "\n")
-        return []
-
-    def write_content_sources(self, sources: list) -> list[str]:
-        errs = validate_content_sources(sources)
-        if errs:
-            return errs
-        self._atomic_write(self.content_sources_path,
-                           json.dumps(sources, ensure_ascii=False, indent=2) + "\n")
+        norm = []
+        for e in sources:
+            srcs = e.get("sources")
+            if isinstance(srcs, str):
+                srcs = srcs.split(",")
+            norm.append({**e, "sources": [str(s).strip() for s in (srcs or []) if str(s).strip()]})
+        self._atomic_write(self.sources_path,
+                           json.dumps(norm, ensure_ascii=False, indent=2) + "\n")
+        # Los registros viejos ya no gobiernan nada: se retiran para no confundir.
+        for legacy in (self.news_path, self.content_sources_path):
+            if legacy.exists():
+                legacy.replace(legacy.with_suffix(legacy.suffix + ".migrado"))
         return []
 
     def update_env(self, updates: dict[str, str]) -> list[str]:
@@ -1295,10 +1336,8 @@ def make_handler(store: ConfigStore):
                 body = self._body()
                 if self.path == "/api/settings":
                     errs = store.write_settings(body)
-                elif self.path == "/api/news":
-                    errs = store.write_news(body if isinstance(body, list) else body.get("news", []))
-                elif self.path == "/api/content-sources":
-                    errs = store.write_content_sources(
+                elif self.path == "/api/sources":
+                    errs = store.write_sources(
                         body if isinstance(body, list) else body.get("sources", []))
                 elif self.path == "/api/env":
                     errs = store.update_env(body)

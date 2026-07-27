@@ -112,9 +112,7 @@
   <a href="#memoria-usuarios">🗂️ Memoria por usuario</a>
   <a href="#modelos">🤖 Modelos</a>
   <a href="#presupuesto">🪙 Presupuesto</a>
-  <a href="#integraciones">🧩 Integraciones</a>
-  <a href="#noticias">📰 Fuentes RSS</a>
-  <a href="#fuentes">🏷️ Fuentes por tema</a>
+  <a href="#fuentes">🏷️ Fuentes de contenido</a>
   <a href="#mcp">🔌 MCP</a>
   <a href="#membrilla">🍐 Membrilla</a>
   <div class="navsep">Operación</div>
@@ -379,47 +377,31 @@
       con OpenRouter — con otro proveedor dejalo apagado.</p>
     <div class="card" id="c-budget"></div></section>
 
-  <section id="integraciones"><h2>Integraciones</h2>
-    <p class="hint">Servicios externos que las tools usan. Las API keys van en Credenciales
-      (Spotify, YouTube, Brave); acá va la config extra.</p>
-    <div class="card">
-      <b>🎵 Playlist comunitaria de Spotify</b>
-      <p class="hint">Los usuarios (del grupo que definas en Tools →
-        <code>add_music_recommendation</code>) pueden recomendar temas y el bot los agrega a
-        esta playlist; la rutina <code>playlist</code> (⏰ Rutinas) postea uno cada tanto
-        vía la tool <code>get_playlist_track</code>. Requiere
-        una autorización única del admin en el navegador: correr
-        <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code> una vez.</p>
-      <div style="max-width:340px" id="c-spotify-playlist"></div>
+  <section id="fuentes"><h2>Fuentes de contenido</h2>
+    <p class="hint">De dónde saca contenido el bot, todo en un solo lugar: <b>un tema con
+      las fuentes que le correspondan</b>. El <b>tipo</b> dice por dónde entra —
+      <code>rss</code> (feeds de noticias → tool <code>get_news</code>),
+      <code>scrape</code> (cuentas/boards que trae 🍐 Membrilla → <code>search_images</code>) o
+      <code>spotify</code> (playlists → <code>get_playlist_track</code>).
+      Podés tener <b>varias playlists</b> (rock, cumbia), varios grupos de cuentas por tema y
+      varios diarios por sección: cuando alguien pide "un meme de fútbol" o la rutina pide
+      música de rock, el bot resuelve el tema contra este registro en vez de adivinar.
+      El <b>tema</b> es texto libre — usá la misma palabra que usarías al pedirlo. Las
+      <b>fuentes</b> van separadas por coma (URLs, nombres de cuenta o ids de playlist según
+      el tipo); para las scrapeadas el desplegable lista lo que ya está en tu catálogo.
+      Se aplica en caliente. Las API keys siguen en Credenciales.</p>
+    <div id="c-sources"></div>
+    <div style="margin-top:8px">
+      <button class="ghost" onclick="addSource('scrape')">+ contenido scrapeado</button>
+      <button class="ghost" onclick="addSource('rss')">+ feed RSS</button>
+      <button class="ghost" onclick="addSource('spotify')">+ playlist</button>
     </div>
-    <div class="card">
-      <b>📺 YouTube</b>
-      <p class="hint">La tool <code>share_video</code> busca y comparte videos — solo
-        necesita <code>YOUTUBE_API_KEY</code> en Credenciales (API key de Google Cloud,
-        YouTube Data API v3). No hay playlist: busca libre o trae lo popular de tu región.</p>
-    </div></section>
-
-  <section id="noticias"><h2>Fuentes RSS</h2>
-    <p class="hint">Fuentes de noticias que alimentan la tool <code>get_news</code>: los
-      usuarios pueden pedirle noticias por mención, y una <b>⏰ Rutina</b> puede postearlas
-      sola (ej.: "cada 8 horas llamá get_news con only_new y si hay un titular jugoso,
-      comentalo" — la plantilla trae la rutina <code>noticias</code> apagada, lista para
-      prender). Con <code>only_new</code> el bot no repite titulares entre pases. Acá no
-      hay ningún posteo automático: sin una rutina que la llame, esto es solo una fuente.</p>
-    <div id="c-news"></div>
-    <button class="ghost" onclick="addNews()">+ fuente</button></section>
-
-  <section id="fuentes"><h2>Fuentes de contenido por tema</h2>
-    <p class="hint">El gemelo de las fuentes RSS, pero para el <b>contenido scrapeado</b>
-      (🍐 Membrilla): acá declarás <b>qué cuenta o board es de qué tema</b>. Cuando alguien
-      pide "un meme de fútbol", el bot busca <b>solo</b> dentro de las fuentes que vos
-      registraste con ese tema — en vez de confiar en que el modelo de visión haya escrito
-      "fútbol" en la descripción. <b>Fuente</b> = el nombre con el que Membrilla dejó el
-      contenido (la cuenta de Instagram, el board de Pinterest, el blog de Tumblr).
-      <b>Tema</b> es texto libre: usá la misma palabra que usarías al pedirlo.
-      Se aplica en caliente — editar acá no requiere reindexar nada.</p>
-    <div id="c-content-sources"></div>
-    <button class="ghost" onclick="addContentSource()">+ fuente</button></section>
+    <p class="hint" style="margin-top:10px">📺 <b>YouTube</b>: <code>share_video</code> no usa
+      registro — busca libre o trae lo popular de tu región; solo necesita
+      <code>YOUTUBE_API_KEY</code> en Credenciales. 🎵 <b>Spotify</b> necesita además una
+      autorización única del admin: <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code>.
+      Las recomendaciones de usuarios (<code>add_music_recommendation</code>) se agregan
+      siempre a la <b>primera playlist habilitada</b> de la lista.</p></section>
 
   <section id="mcp"><h2>Servers MCP</h2>
     <p class="hint">Conectores externos que suman tools al bot (ej. Reddit por RSS, un
@@ -522,7 +504,7 @@
 <div id="toast"></div>
 
 <script>
-let S = null, NEWS = [], CONTENT_SOURCES = [], CATALOG_SOURCES = [], ENV_KEYS = {}, SKILLS = [], MOODS = [], CATALOG = [], INSTANCE = {};
+let S = null, SOURCES = [], CATALOG_SOURCES = [], ENV_KEYS = {}, SKILLS = [], MOODS = [], CATALOG = [], INSTANCE = {};
 let ROUTINES = [];
 let PROMPTS = [];
 let SOUL = "", soulDirty = false, dirty = false;
@@ -589,9 +571,6 @@ function render() {
     <div style="max-width:300px">${textInput(S, "TIMEZONE", "Zona horaria (IANA, ej. America/Argentina/Buenos_Aires)")}</div></div>
     <div class="hint">La zona horaria rige el calendario y el reloj del bot. También acepta offset fijo tipo <code>UTC-3</code>.</div>`;
   $("ui-lang").value = S.LANGUAGE ?? "es";
-
-  $("c-spotify-playlist").innerHTML =
-    textInput(S, "SPOTIFY_PLAYLIST_ID", "ID de la playlist (solo el id, no la URL)");
 
   const items = INSTANCE.scrape_items ?? 0;
   const inCatalog = INSTANCE.catalog_items ?? 0;
@@ -660,7 +639,7 @@ function render() {
   $("rt-discord-hint").style.display = isDiscord ? "" : "none";
 
   renderBudget(); renderModels(); renderFeeds(); renderTools(); renderGroups();
-  renderTasks(); renderMcp(); renderNews(); renderContentSources(); renderSkills(); renderMoods();
+  renderTasks(); renderMcp(); renderSources(); renderSkills(); renderMoods();
   renderPrefsMode(); renderData(); renderUserMem(); renderBio(); renderRoutines(); renderAdvFlags();
   $("prompt-file").innerHTML = PROMPTS.map(f => `<option>${esc(f)}</option>`).join("");
   navStatus();
@@ -1379,42 +1358,71 @@ function renderMcp() {
     }));
 }
 
-function renderNews() {
-  $("c-news").innerHTML = NEWS.map((src, i) => `<div class="card">
-    ${textInput(src, "url", "URL del RSS")}
-    <div class="row">
-      <div>${textInput(src, "title", "título")}</div>
-      <div>${textInput(src, "category", "categoría (para filtrar en get_news)")}</div>
-    </div>
-    ${textInput(src, "description", "descripción (el bot la usa como contexto)")}
-    <div style="margin-top:8px">${check(src, "enabled", "activa", true)}
-      <button class="danger" onclick="NEWS.splice(${i},1);markDirty();render()">borrar</button></div>
-  </div>`).join("") || `<p class="hint">sin fuentes — get_news no tiene de dónde leer</p>`;
-}
+// ─── Fuentes de contenido (T38b: registro único, sources.json) ───────────
+// Un TEMA con sus fuentes, y un TIPO que dice por dónde entran. RSS es un tipo
+// más: antes eran tres secciones distintas (Integraciones / RSS / por tema).
+const SOURCE_TYPE_INFO = {
+  scrape:  {label: "contenido scrapeado (Membrilla)", ph: "cuenta_una, board_dos", tool: "search_images"},
+  rss:     {label: "feed RSS", ph: "https://diario.com/rss.xml", tool: "get_news"},
+  spotify: {label: "playlist de Spotify", ph: "37i9dQZF1DX... (id de la playlist)", tool: "get_playlist_track"},
+};
 
-// ─── Fuentes de contenido por tema (T38: content_sources.json) ───────────
-function renderContentSources() {
-  const known = [...new Set(CATALOG_SOURCES)].sort();
-  $("c-content-sources").innerHTML = CONTENT_SOURCES.map((s, i) => `<div class="card">
-    <div class="row">
-      <div>${textInput(s, "source", "fuente (source_name de Membrilla)")}</div>
-      <div>${textInput(s, "category", "tema (futbol, politica, humor...)")}</div>
-      <div>${textInput(s, "platform", "plataforma (opcional: instagram, pinterest...)")}</div>
-    </div>
-    ${textInput(s, "description", "nota para vos (opcional)")}
-    <div style="margin-top:8px">${check(s, "enabled", "activa", true)}
-      <button class="danger" onclick="CONTENT_SOURCES.splice(${i},1);markDirty();render()">borrar</button></div>
-  </div>`).join("") || `<p class="hint">sin fuentes por tema — los pedidos temáticos ("un meme de fútbol")
-    van a buscar en TODO el catálogo, a ciegas de qué cuenta es de qué.</p>`;
-  if (known.length) {
-    $("c-content-sources").insertAdjacentHTML("beforeend",
-      `<p class="hint">Fuentes que ya hay en tu catálogo indexado (copiá el nombre exacto):
-       ${known.map(n => `<code>${esc(n)}</code>`).join(" · ")}</p>`);
-  }
+function sourceList(entry) {
+  const s = entry.sources;
+  return Array.isArray(s) ? s.join(", ") : (s || entry.source || "");
 }
-function addContentSource() {
-  CONTENT_SOURCES.push({source: "", category: "", platform: "", description: "", enabled: true});
+function setSourceList(i, raw) {
+  SOURCES[i].sources = raw.split(",").map(x => x.trim()).filter(Boolean);
+  delete SOURCES[i].source;
+  markDirty();
+}
+function addFromCatalog(i, name) {
+  if (!name) return;
+  const cur = SOURCES[i].sources ?? [];
+  if (!cur.includes(name)) SOURCES[i].sources = [...cur, name];
   markDirty(); render();
+}
+function addSource(kind) {
+  SOURCES.push({type: kind, name: "", category: "", sources: [], description: "", enabled: true});
+  markDirty(); render();
+}
+function renderSources() {
+  const usadas = new Set(SOURCES.filter(e => e.type === "scrape").flatMap(e => e.sources ?? []));
+  $("c-sources").innerHTML = SOURCES.map((entry, i) => {
+    const kind = entry.type || "scrape";
+    const info = SOURCE_TYPE_INFO[kind] ?? SOURCE_TYPE_INFO.scrape;
+    const libres = kind === "scrape"
+      ? CATALOG_SOURCES.filter(n => !(entry.sources ?? []).includes(n)) : [];
+    return `<div class="card">
+    <div class="row">
+      <div style="max-width:210px">${selectInput(entry, "type", "tipo", Object.keys(SOURCE_TYPE_INFO), "scrape")}</div>
+      <div style="max-width:230px">${textInput(entry, "category", "tema (futbol, rock...)")}</div>
+      <div>${textInput(entry, "name", "nombre (opcional: Página/12)")}</div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div><label>fuentes (separadas por coma)</label>
+        <input type="text" value="${esc(sourceList(entry))}"
+               oninput="setSourceList(${i}, this.value)" placeholder="${esc(info.ph)}"></div>
+      ${kind === "scrape" ? `<div style="max-width:230px"><label>agregar del catálogo</label>
+        <select onchange="addFromCatalog(${i}, this.value); this.value=''">
+          <option value="">${libres.length ? "elegí una…" : "(todas agregadas)"}</option>
+          ${libres.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}
+        </select></div>` : ""}
+    </div>
+    ${textInput(entry, "description", "descripción (el bot la usa como contexto; también sirve para matchear el tema)")}
+    <div style="margin-top:8px">${check(entry, "enabled", "activa", true)}
+      <span class="hint">la usa <code>${esc(info.tool)}</code></span>
+      <button class="danger" onclick="SOURCES.splice(${i},1);markDirty();render()">borrar</button></div>
+  </div>`;
+  }).join("") || `<p class="hint">sin fuentes — los pedidos temáticos van a buscar a ciegas
+    en todo el catálogo, y get_news / get_playlist_track no tienen de dónde leer.</p>`;
+
+  const huerfanas = CATALOG_SOURCES.filter(n => !usadas.has(n));
+  if (huerfanas.length) {
+    $("c-sources").insertAdjacentHTML("beforeend",
+      `<p class="hint">Fuentes de tu catálogo indexado <b>todavía sin tema</b>:
+       ${huerfanas.map(n => `<code>${esc(n)}</code>`).join(" · ")}</p>`);
+  }
 }
 
 function renderSkills() {
@@ -1577,14 +1585,11 @@ function initScrollspy() {
 // ─── Guardado global ─────────────────────────────────────────────────────
 function addFeed() { (S.FEEDS ??= []).push({name: "", type: "list", uri: "", interval_hours: 6,
   enabled: false, learn: true}); markDirty(); render(); }
-function addNews() { NEWS.push({url: "", title: "", description: "", category: "",
-  enabled: false}); markDirty(); render(); }
 
 function pruneForSave() {
   // Tarjetas a medio llenar no bloquean el guardado global: se descartan.
   if (S.FEEDS) S.FEEDS = S.FEEDS.filter(f => (f.name || "").trim() || (f.uri || "").trim());
-  NEWS = NEWS.filter(n => (n.url || "").trim() || (n.title || "").trim());
-  CONTENT_SOURCES = CONTENT_SOURCES.filter(s => (s.source || "").trim() || (s.category || "").trim());
+  SOURCES = SOURCES.filter(e => (e.sources ?? []).length);
   // La UI crea S.MODELS vacío al renderizar; guardarlo vacío rompería el
   // router (sección presente pero sin endpoints). Sin contenido → fuera.
   const m = S.MODELS;
@@ -1596,8 +1601,7 @@ async function saveAll() {
   pruneForSave();
   try {
     await api("/api/settings", S);
-    await api("/api/news", NEWS);
-    await api("/api/content-sources", CONTENT_SOURCES);
+    await api("/api/sources", SOURCES);
     if (soulDirty) {
       await api("/api/soul", {text: $("soul-text").value});
       SOUL = $("soul-text").value; soulDirty = false;
@@ -1751,8 +1755,8 @@ async function dangerAction(action) {
 // ─── Carga inicial ───────────────────────────────────────────────────────
 async function load() {
   const data = await api("/api/config");
-  S = data.settings; NEWS = data.news; ENV_KEYS = data.env_keys; SKILLS = data.skills;
-  CONTENT_SOURCES = data.content_sources ?? []; CATALOG_SOURCES = data.catalog_sources ?? [];
+  S = data.settings; ENV_KEYS = data.env_keys; SKILLS = data.skills;
+  SOURCES = data.sources ?? []; CATALOG_SOURCES = data.catalog_sources ?? [];
   MOODS = data.moods ?? []; CATALOG = data.tools_catalog ?? []; INSTANCE = data.instance ?? {};
   PROMPTS = data.prompts ?? []; ROUTINES = data.routines ?? [];
   SOUL = data.soul ?? ""; soulDirty = false;

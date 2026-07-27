@@ -19,17 +19,48 @@ import botata as b  # noqa: E402
 import db as d  # noqa: E402
 from tools import ToolContext  # noqa: E402
 
+# Un TEMA, muchas fuentes (la forma que guarda la UI).
 _SOURCES = [
-    {"source": "futbol_memes_ok", "category": "futbol", "platform": "instagram", "enabled": True},
-    {"source": "pasion_tribunera", "category": "futbol", "platform": "instagram", "enabled": True},
-    {"source": "politica_shitpost", "category": "politica", "platform": "instagram", "enabled": True},
-    {"source": "vieja_cuenta", "category": "futbol", "platform": "instagram", "enabled": False},
+    {"category": "futbol", "sources": ["futbol_memes_ok", "pasion_tribunera"], "enabled": True},
+    {"category": "politica", "sources": ["politica_shitpost"], "enabled": True},
+    {"category": "humor viejo", "sources": ["vieja_cuenta"], "enabled": False},
 ]
 
 
 @pytest.fixture(autouse=True)
 def _cfg(monkeypatch):
-    monkeypatch.setattr(b, "CONTENT_SOURCES", _SOURCES)
+    monkeypatch.setattr(b, "SOURCES", [{**e, "type": "scrape"} for e in _SOURCES])
+
+
+# ─── loader: normaliza las formas que puede tener el archivo ─────────────────
+def _load(tmp_path, monkeypatch, raw):
+    import json
+    cfg = tmp_path / "config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "content_sources.json").write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setattr(b, "CONFIG_DIR", cfg)
+    return b._load_sources()
+
+
+def test_loader_forma_nueva(tmp_path, monkeypatch):
+    out = _load(tmp_path, monkeypatch,
+                [{"category": "futbol", "sources": ["a", "b"]}])
+    assert out[0]["sources"] == ["a", "b"]
+
+
+def test_loader_acepta_forma_vieja_de_una_fuente(tmp_path, monkeypatch):
+    out = _load(tmp_path, monkeypatch, [{"category": "futbol", "source": "a"}])
+    assert out[0]["sources"] == ["a"]
+
+
+def test_loader_acepta_string_con_comas(tmp_path, monkeypatch):
+    """Por si alguien edita el JSON a mano y escribe las fuentes en una línea."""
+    out = _load(tmp_path, monkeypatch, [{"category": "futbol", "sources": "a, b ,c"}])
+    assert out[0]["sources"] == ["a", "b", "c"]
+
+
+def test_loader_descarta_entradas_sin_fuentes(tmp_path, monkeypatch):
+    assert _load(tmp_path, monkeypatch, [{"category": "futbol", "sources": []}]) == []
 
 
 # ─── sources_for_topic ───────────────────────────────────────────────────────
@@ -37,8 +68,18 @@ def test_resuelve_tema_a_fuentes():
     assert b.sources_for_topic("futbol") == ["futbol_memes_ok", "pasion_tribunera"]
 
 
-def test_ignora_fuentes_desactivadas():
-    assert "vieja_cuenta" not in b.sources_for_topic("futbol")
+def test_una_fuente_puede_estar_en_varios_temas(monkeypatch):
+    monkeypatch.setattr(b, "SOURCES", [
+        {"type": "scrape", "category": "futbol",
+         "sources": ["compartida", "solo_futbol"], "enabled": True},
+        {"type": "scrape", "category": "humor", "sources": ["compartida"], "enabled": True},
+    ])
+    assert b.sources_for_topic("futbol") == ["compartida", "solo_futbol"]
+    assert b.sources_for_topic("humor") == ["compartida"]
+
+
+def test_ignora_temas_desactivados():
+    assert b.sources_for_topic("humor viejo") == []
 
 
 def test_matcheo_tolerante_case_y_substring():
@@ -128,7 +169,7 @@ def test_tool_sin_topic_busca_en_todo(catalogo, monkeypatch):
 
 
 def test_registro_vacio_no_rompe(catalogo, monkeypatch):
-    monkeypatch.setattr(b, "CONTENT_SOURCES", [])
+    monkeypatch.setattr(b, "SOURCES", [])
     ctx = ToolContext(state={}, conn=catalogo)
     out = b._tool_search_images({"query": "gol", "topic": "futbol"}, ctx)
     assert "el admin no cargó fuentes de contenido" in out.text
