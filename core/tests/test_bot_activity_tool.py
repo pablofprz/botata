@@ -63,4 +63,6 @@ def test_scopes_default(conn):
     reg = b.build_tool_registry(b.TOOLS_CONFIG)
     assert "get_my_recent_posts" in [t.name for t in reg.available(Scope.REPLY)]
     assert "get_my_recent_posts" in [t.name for t in reg.available(Scope.ADMIN)]
-    assert "get_my_recent_posts" not in [t.name for t in reg.available(Scope.FEED_REFLECTION)]
+    # 2026-07-26: también feed_reflection — las rutinas reflexivas (ex
+    # public_reflection) revisan la actividad propia con esta tool.
+    assert "get_my_recent_posts" in [t.name for t in reg.available(Scope.FEED_REFLECTION)]

@@ -296,13 +296,15 @@
     <div id="c-feeds"></div>
     <button class="ghost" onclick="addFeed()">+ feed</button></section>
 
-  <section id="tareas"><h2>Tareas periódicas (motor interno)</h2>
-    <p class="hint">La maquinaria de pases automáticos del loop — sección técnica: en
-      general no hace falta tocarla, porque cada pieza se maneja desde su propia sección
-      (feeds, noticias, moods, rutinas) y esto
-      es el interruptor maestro + la frecuencia de cada una. Intervalo <code>0</code> = corre en cada ciclo del loop y la
-      tarea decide sola si hay algo que hacer (menciones, feeds, noticias y rutinas se
-      auto-regulan con sus propios intervalos por fuente/archivo).</p>
+  <section id="tareas"><h2>Motor (deberes fijos del bot)</h2>
+    <p class="hint">Estos son los <b>deberes</b> del motor, no su personalidad: responder
+      menciones, anunciar el calendario, ejecutar órdenes, leer feeds/noticias, aprender
+      lecciones, elegir el humor, regenerar la bio. <b>Lo que el bot hace por iniciativa
+      propia vive en ⏰ Rutinas</b> (ahí es prompteable); acá solo está el interruptor
+      maestro + la frecuencia de cada deber. Intervalo <code>0</code> = corre en cada
+      ciclo del loop y el deber decide solo si hay algo que hacer (menciones, feeds,
+      noticias y rutinas se auto-regulan con sus propios intervalos por fuente/archivo).
+      En general no hace falta tocar nada acá.</p>
     <div class="card" id="c-tasks"></div></section>
 
   <section id="noticias"><h2>Noticias RSS</h2>
@@ -391,7 +393,8 @@
       <b>🎵 Playlist comunitaria de Spotify</b>
       <p class="hint">Los usuarios (del grupo que definas en Tools →
         <code>add_music_recommendation</code>) pueden recomendar temas y el bot los agrega a
-        esta playlist; la tarea <code>playlist_share</code> postea uno cada tanto. Requiere
+        esta playlist; la rutina <code>playlist</code> (⏰ Rutinas) postea uno cada tanto
+        vía la tool <code>get_playlist_track</code>. Requiere
         una autorización única del admin en el navegador: correr
         <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code> una vez.</p>
       <div style="max-width:340px" id="c-spotify-playlist"></div>
@@ -649,6 +652,9 @@ function renderMoods() {
       — <span class="hint">${esc(mo.description)}</span></summary>
     <label>descripción (el bot la ve al elegir humor)
       <input data-mood-desc="${i}" value="${esc(mo.description)}"></label>
+    <label>disparadores (opcional — QUÉ lo pone así; el selector auto los prioriza:
+      "me bardearon mucho", "perdió la selección", "me ignoraron días"...)
+      <input data-mood-trig="${i}" value="${esc(mo.triggers || "")}" placeholder="(sin disparadores: se elige solo por descripción)"></label>
     <label>cuerpo (cómo tiñe el tono — entra al system prompt)
       <textarea data-mood-body="${i}" style="min-height:120px">${esc(mo.body)}</textarea></label>
     <button onclick="saveMood(${i})">guardar mood</button>
@@ -665,6 +671,7 @@ async function saveMood(i) {
   try {
     await api("/api/moods", {action: "save", name: mo.name, enabled: mo.enabled ?? true,
       description: document.querySelector(`[data-mood-desc="${i}"]`).value.trim(),
+      triggers: document.querySelector(`[data-mood-trig="${i}"]`).value.trim(),
       body: document.querySelector(`[data-mood-body="${i}"]`).value.trim()});
     toast(`mood ${mo.name} guardado ✓ (en vivo)`);
     await reloadConfig();
@@ -1237,8 +1244,6 @@ const TASK_DESC = {
   routines: "correr las rutinas (routines/*.md — cadencia propia de cada archivo)",
   feed: "correr los feeds proactivos", news: "correr las fuentes RSS",
   reflection: "aprender lecciones de sus conversaciones (no postea)",
-  public_reflection: "postear una reflexión en primera persona",
-  playlist_share: "compartir un tema de la playlist comunitaria",
   mood: "elegir el humor del día (si moods está en auto)",
   bio: "regenerar la bio del perfil según prompts/bio.md",
 };
@@ -1249,8 +1254,7 @@ const TASK_DEFAULTS = {
   feed: {enabled: true, interval_hours: 0}, news: {enabled: true, interval_hours: 0},
   mentions: {enabled: true, interval_hours: 0}, calendar: {enabled: true, interval_hours: 0},
   actions: {enabled: true, interval_hours: 0}, routines: {enabled: true, interval_hours: 0},
-  reflection: {enabled: true, interval_hours: 24}, public_reflection: {enabled: true, interval_hours: 24},
-  playlist_share: {enabled: true, interval_hours: 24}, mood: {enabled: true, interval_hours: 6},
+  reflection: {enabled: true, interval_hours: 24}, mood: {enabled: true, interval_hours: 6},
   bio: {enabled: false, interval_hours: 6},
 };
 function renderTasks() {
@@ -1258,7 +1262,8 @@ function renderTasks() {
   for (const [name, dflt] of Object.entries(TASK_DEFAULTS)) tasks[name] ??= {...dflt};
   let html = `<table><tr><th>tarea</th><th>qué hace</th><th>on</th><th>intervalo (h; 0 = cada ciclo)</th></tr>`;
   for (const [name, cfg] of Object.entries(tasks)) {
-    if (name === "heartbeat" || name === "rooms") continue;  // tareas viejas absorbidas por routines
+    // tareas viejas absorbidas por rutinas (settings legados pueden traerlas)
+    if (["heartbeat", "rooms", "public_reflection", "playlist_share"].includes(name)) continue;
     cfg.interval_hours ??= 0;  // editable siempre (antes decía "auto-regulada" sin más)
     html += `<tr><td><code>${esc(name)}</code></td><td class="hint">${esc(TASK_DESC[name] ?? "")}</td>
              <td>${check(cfg, "enabled", "", true)}</td>

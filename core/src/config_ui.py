@@ -428,6 +428,7 @@ class ConfigStore:
             out.append({
                 "name": meta["name"],
                 "description": meta.get("description", ""),
+                "triggers": meta.get("triggers", "").strip(),
                 "enabled": meta.get("enabled", "true").lower() != "false",
                 "body": body.strip(),
                 "file": path.name,
@@ -477,9 +478,13 @@ class ConfigStore:
         text = (body.get("body") or "").strip()
         if not desc or not text:
             return ["faltan description y/o cuerpo"]
+        # triggers (opcional): qué pone al bot en este estado — el selector auto
+        # de mood los prioriza contra el clima leído. Vacío = línea ausente.
+        triggers = (body.get("triggers") or "").strip().replace("\n", " ")
         enabled = "true" if body.get("enabled", True) else "false"
-        content = (f"---\nname: {name}\ndescription: {desc}\nenabled: {enabled}\n---\n\n"
-                   f"{text}\n")
+        content = (f"---\nname: {name}\ndescription: {desc}\n"
+                   + (f"triggers: {triggers}\n" if triggers else "")
+                   + f"enabled: {enabled}\n---\n\n{text}\n")
         self._atomic_write(path, content)
         return []
 

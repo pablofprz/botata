@@ -66,14 +66,6 @@
 			"enabled": true,
 			"interval_hours": 24.0
 		},
-		"public_reflection": {
-			"enabled": false,
-			"interval_hours": 24.0
-		},
-		"playlist_share": {
-			"enabled": false,
-			"interval_hours": 24.0
-		},
 		"bio": {
 			"enabled": false,
 			"interval_hours": 6.0

@@ -423,6 +423,18 @@ def test_behavior_file_editor(store):
     assert store._routines_info() == []
 
 
+def test_edit_mood_con_triggers(store):
+    """`triggers` opcional: si viene se escribe la línea, si no se omite."""
+    assert store.edit_mood({"action": "save", "name": "angry", "description": "d",
+                            "triggers": "me bardearon mucho", "body": "cuerpo"}) == []
+    info = next(m for m in store._moods_info() if m["name"] == "angry")
+    assert info["triggers"] == "me bardearon mucho"
+    assert store.edit_mood({"action": "save", "name": "chill", "description": "d",
+                            "body": "cuerpo"}) == []
+    assert next(m for m in store._moods_info() if m["name"] == "chill")["triggers"] == ""
+    assert "triggers" not in (store.moods_dir / "chill.md").read_text(encoding="utf-8")
+
+
 def test_user_memory_alta_manual(store, monkeypatch):
     """Alta desde la UI: usa los upserts reales (dedup incluido) con embed mockeado
     (no cargar bge-m3 en tests)."""

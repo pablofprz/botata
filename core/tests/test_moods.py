@@ -58,6 +58,25 @@ def test_loader_skips_disabled_and_broken(tmp_path):
     assert set(loaded) == {"ok"}
 
 
+def test_triggers_opcionales(tmp_path):
+    """`triggers:` en el frontmatter dice QUÉ dispara el mood; sin la línea, ""."""
+    (tmp_path / "angry.md").write_text(
+        "---\nname: angry\ndescription: d\ntriggers: me bardearon mucho\n---\nx",
+        encoding="utf-8")
+    (tmp_path / "chill.md").write_text(
+        "---\nname: chill\ndescription: d\n---\nx", encoding="utf-8")
+    loaded = mm.load_moods(tmp_path)
+    assert loaded["angry"].triggers == "me bardearon mucho"
+    assert loaded["chill"].triggers == ""
+    index = dict((n, (desc, trig)) for n, desc, trig in mm.mood_index(tmp_path))
+    assert index["angry"][1] == "me bardearon mucho" and index["chill"][1] == ""
+
+
+def test_template_moods_declaran_triggers():
+    """Los moods default del template traen disparadores de ejemplo."""
+    assert any(m.triggers for m in mm.load_moods(b.MOODS_DIR).values())
+
+
 # ─── current_mood: los 4 modos ────────────────────────────────────────────────
 
 def test_disabled_returns_none(conn):
@@ -104,9 +123,11 @@ def test_auto_undecided_returns_none(conn):
 
 # ─── run_mood_pass (auto) ─────────────────────────────────────────────────────
 
-def _fake_rolellm(monkeypatch, mood, reason):
+def _fake_rolellm(monkeypatch, mood, reason, captured=None):
     class Fake:
         def complete(self, system, user, model):
+            if captured is not None:
+                captured["system"] = system
             return model(mood=mood, reason=reason)
     monkeypatch.setattr(b, "RoleLLM", lambda router, role: Fake())
 
@@ -118,6 +139,51 @@ def test_run_mood_pass_persists(conn, monkeypatch):
     st = json.loads(d.kv_get(conn, "mood_state"))
     assert st["mood"] == "prickly" and st["reason"] == "me trataron mal"
     assert b.current_mood(conn).name == "prickly"
+
+
+def test_run_mood_pass_ofrece_triggers(conn, monkeypatch):
+    """El selector auto ve los disparadores declarados por cada mood."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    cap = {}
+    _fake_rolellm(monkeypatch, "angry", "me buscaron", captured=cap)
+    b.run_mood_pass(None, conn, force=True)
+    assert "se dispara cuando:" in cap["system"]  # los triggers del template llegan
+
+
+def test_run_mood_pass_lee_el_feed_si_hay_triggers(conn, monkeypatch):
+    """Con triggers declarados y canal disponible, el selector también ve DE QUÉ
+    habla el feed (disparadores temáticos: "perdió la selección")."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    monkeypatch.setattr(b, "FEEDS_CONFIG",
+                        [{"name": "f", "type": "list", "uri": "at://x", "enabled": True}])
+
+    class FakeBsky:
+        def get_feed_posts(self, source_type, identifier, since=None, limit=50):
+            return [{"handle": "ana", "text": "qué tristeza lo de anoche"}]
+
+    class FakeUser:
+        def __init__(self):
+            self.captured = {}
+
+        def complete(self, system, user, model):
+            self.captured["user"] = user
+            return model(mood="gloomy", reason="clima triste")
+
+    fake = FakeUser()
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: fake)
+    b.run_mood_pass(None, conn, bsky=FakeBsky(), force=True)
+    assert "De qué habla el feed" in fake.captured["user"]
+    assert "qué tristeza lo de anoche" in fake.captured["user"]
+
+
+def test_run_mood_pass_sin_bsky_sigue_andando(conn, monkeypatch):
+    """Sin canal (tests, CLI sin credenciales) el pase decide igual, sin feed."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    cap = {}
+    _fake_rolellm(monkeypatch, "chill", "día normal", captured=cap)
+    b.run_mood_pass(None, conn, force=True)  # bsky=None
+    st = json.loads(d.kv_get(conn, "mood_state"))
+    assert st["mood"] == "chill"
 
 
 def test_run_mood_pass_idempotent_same_day(conn, monkeypatch):

@@ -45,9 +45,12 @@ def _ctx():
     return ToolContext(state={"author_handle": "u", "mention_text": "resumime el feed"}, conn=None)
 
 
-def test_registered_in_reply_scope_only():
+def test_registered_scopes():
     reg = b.build_tool_registry(b.TOOLS_CONFIG, bsky=FakeBsky([]), router=FakeRouter())
     assert "summarize_feed" in [t.name for t in reg.available(Scope.REPLY)]
+    # 2026-07-27: también feed_reflection — las rutinas leen el clima del feed
+    # antes de decidir qué postear ("leé los últimos posts y posteá acorde").
+    assert "summarize_feed" in [t.name for t in reg.available(Scope.FEED_REFLECTION)]
     assert "summarize_feed" not in [t.name for t in reg.available(Scope.ADMIN)]
 
 
@@ -63,6 +66,24 @@ def test_empty_feed_is_graceful():
     reg = b.build_tool_registry(b.TOOLS_CONFIG, bsky=FakeBsky([]), router=FakeRouter())
     res = reg.execute("summarize_feed", {}, _ctx())
     assert "tranquilo" in res.text or "movimiento" in res.text
+
+
+def test_hours_controla_la_ventana():
+    """`hours` dice cuánta conversación leer hacia atrás (clamp 1–48, default 6)."""
+    class SpyBsky(FakeBsky):
+        def get_feed_posts(self, source_type, identifier, since=None, limit=50):
+            self.since = since
+            return self._posts
+
+    from datetime import datetime, timezone
+    posts = [{"handle": "a", "text": "hoy el dólar"}]
+    for hours_arg, esperado in ((24, 24.0), (None, 6.0), (999, 48.0), (0, 1.0), ("banana", 6.0)):
+        spy = SpyBsky(posts)
+        reg = b.build_tool_registry(b.TOOLS_CONFIG, bsky=spy, router=FakeRouter())
+        args = {} if hours_arg is None else {"hours": hours_arg}
+        reg.execute("summarize_feed", args, _ctx())
+        delta_h = (datetime.now(timezone.utc) - spy.since).total_seconds() / 3600
+        assert abs(delta_h - esperado) < 0.1, f"hours={hours_arg}"
 
 
 def test_unknown_feed_name():

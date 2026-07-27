@@ -10,9 +10,15 @@ Formato (`moods/*.md`, frontmatter simple entre líneas `---`, igual que skills)
     ---
     name: bajon
     description: Melancólico, parco, responde corto y sin ganas de joda
+    triggers: me ignoraron varios días, perdió mi equipo, fechas tristes   # opcional
     enabled: true               # default true
     ---
     (instrucciones de tono que ve el LLM cuando este mood está activo)
+
+`triggers` (opcional, prompt libre) dice QUÉ pone al bot en ese estado: el
+selector automático de mood lo lee junto al clima de la comunidad para elegir
+con causa ("me bardearon mucho" → angry). Sin triggers, el mood se elige solo
+por su description.
 
 El frontmatter ES la config del mood (no hay lista de moods en settings.json — ahí
 solo vive el toggle/modo/schedule). Los archivos se releen en cada pase (edición en
@@ -32,6 +38,7 @@ class Mood:
     name: str
     description: str
     body: str
+    triggers: str = ""   # qué lo dispara (prompt libre; "" = sin triggers declarados)
     enabled: bool = True
 
 
@@ -64,6 +71,7 @@ def _parse_mood(path: Path) -> Mood | None:
         return None
     return Mood(
         name=name, description=description, body=body,
+        triggers=meta.get("triggers", "").strip(),
         enabled=meta.get("enabled", "true").lower() != "false",
     )
 
@@ -94,9 +102,10 @@ def get_mood(moods_dir: Path, name: str) -> Mood | None:
     return load_moods(moods_dir).get(name.strip())
 
 
-def mood_index(moods_dir: Path) -> list[tuple[str, str]]:
-    """(name, description) de los moods habilitados — para el prompt de auto-selección."""
-    return [(m.name, m.description) for m in load_moods(moods_dir).values()]
+def mood_index(moods_dir: Path) -> list[tuple[str, str, str]]:
+    """(name, description, triggers) de los moods habilitados — para el prompt
+    de auto-selección ("" en triggers si el mood no los declara)."""
+    return [(m.name, m.description, m.triggers) for m in load_moods(moods_dir).values()]
 
 
 def mood_prompt_block(mood: Mood) -> str:

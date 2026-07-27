@@ -352,6 +352,18 @@ def test_recurrente_de_hoy_ya_vencido_sale(conn, routines_dir, monkeypatch):
     assert "2026-03-10T20:00" not in llm.last_system
 
 
+def test_lecciones_recientes_entran_al_contexto(conn, routines_dir, monkeypatch):
+    """Las lecciones destiladas (tarea reflection) alimentan a las rutinas —
+    material clave de la rutina reflexiva (ex public_reflection)."""
+    conn.execute("INSERT INTO lessons(lesson_text) VALUES ('no repitas chistes viejos')")
+    conn.commit()
+    _routine_md(routines_dir, "reflexion", body="reflexioná sobre lo que viviste")
+    bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=False, reason="x"))
+    _run(conn, bsky, llm, monkeypatch)
+    assert "Lecciones que destilaste" in llm.last_system
+    assert "no repitas chistes viejos" in llm.last_system
+
+
 # ─── registro por canal en replies + destino en DiscordChannel.post ──────────
 def test_routine_block_reply_mantiene_identidad():
     rt = r.Routine(name="politica", body="acá serio", path=Path("x"), channel="222")

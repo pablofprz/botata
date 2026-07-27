@@ -2649,6 +2649,13 @@ def _run_routine_pass(bsky: "BskyClient", router: ModelRouter, conn: sqlite3.Con
     # Eventos del calendario como contexto (con filtro anti-bypass): la rutina
     # puede hablar de lo que se viene, pero anunciar es de la tarea `calendar`.
     parts.extend(_events_context_blocks(conn))
+    # Lecciones conductuales recientes (las destila la tarea `reflection`): dan
+    # material a rutinas reflexivas y matizan a las demás. Bloque chico.
+    lessons = [r["lesson_text"] for r in conn.execute(
+        "SELECT lesson_text FROM lessons ORDER BY id DESC LIMIT 8").fetchall()]
+    if lessons:
+        parts.append("\n---\nLecciones que destilaste últimamente:\n"
+                     + "\n".join(f"- {t}" for t in lessons))
     if routine.channel:
         # Actividad reciente DEL canal como contexto (best-effort): que el pase
         # pueda sumarse a la conversación real y no postear en el vacío.
@@ -2972,11 +2979,17 @@ def calendar_block(conn: sqlite3.Connection, *, limit: int = 8) -> str:
 
 
 def run_mood_pass(router: ModelRouter, conn: sqlite3.Connection, *,
+                  bsky: "BskyClient | None" = None,
                   activity_limit: int = 10, climate_limit: int = 20,
                   force: bool = False) -> None:
     """Modo auto: elige el mood del día leyendo el CLIMA de la comunidad
     (interacciones recientes) + la ACTIVIDAD propia, y lo guarda en kv con el
     porqué. Reactivo: si lo vienen tratando mal, puede caer en bajón/arisco.
+
+    Si algún mood declara `triggers` y hay canal (`bsky`), además lee los posts
+    recientes del feed principal: disparadores como "perdió la selección" o
+    "noticias tristes" necesitan ver DE QUÉ habla la comunidad, no solo cómo lo
+    trataron a él. Best-effort: sin feed o con red caída, decide sin ese bloque.
 
     Idempotente por día (si ya se decidió hoy no repite, salvo force=True). No-op
     si moods está apagado, no está en modo auto, o no hay moods disponibles."""
@@ -2995,17 +3008,38 @@ def run_mood_pass(router: ModelRouter, conn: sqlite3.Connection, *,
     climate  = dbmod.recent_interactions_all(conn, limit=climate_limit)
     activity = recent_bot_activity(conn, limit=activity_limit)
 
-    options   = "\n".join(f"- {name}: {desc}" for name, desc in index)
+    # triggers declarados por mood (frontmatter): el selector elige CON CAUSA
+    # ("me bardearon" → el mood que declara ese disparador), no solo por vibra.
+    options   = "\n".join(
+        f"- {name}: {desc}" + (f" [se dispara cuando: {trig}]" if trig else "")
+        for name, desc, trig in index)
     clima_txt = "\n".join(
         f"- [{c['created_at'][:10]}] @{c['handle']}: {c['summary']}" for c in climate
     ) or "Sin interacciones recientes."
     act_txt   = "\n".join(f"- {a.get('text', '')}" for a in activity) or "Sin actividad reciente."
 
+    # Clima del FEED (solo si algún mood declara triggers): los disparadores
+    # temáticos necesitan ver los posts de la comunidad, no solo las menciones.
+    feed_txt = ""
+    if bsky is not None and any(trig for _, _, trig in index):
+        feed = next((f for f in FEEDS_CONFIG if f.get("enabled", True)), None)
+        if feed:
+            try:
+                since = datetime.now(timezone.utc) - timedelta(hours=6)
+                posts = bsky.get_feed_posts(feed.get("type", "list"), feed.get("uri"),
+                                            since=since, limit=25)
+                if posts:
+                    feed_txt = "\n".join(f"- @{p['handle']}: {p['text'][:200]}"
+                                         for p in posts[:25] if p.get("text"))
+            except Exception as e:
+                log.debug("mood: no pude leer el feed para los triggers (%s)", e)
+
     soul   = soul_text()
     prompt = load_text(PROMPTS_DIR / "mood_decide_prompt.md").format(moods=options)
     system = f"{soul}\n---\n{current_datetime_line()}\n---\n{prompt}"
     user   = (f"Clima de la comunidad (interacciones recientes con vos):\n{clima_txt}\n\n"
-              f"Tu actividad reciente:\n{act_txt}")
+              + (f"De qué habla el feed de la comunidad ahora:\n{feed_txt}\n\n" if feed_txt else "")
+              + f"Tu actividad reciente:\n{act_txt}")
 
     try:
         decision = RoleLLM(router, "feed_opinion").complete(system, user, MoodDecision)
@@ -3026,7 +3060,11 @@ def run_mood_loop() -> None:
     """Pase único de mood desde CLI (`--mood`). Fuerza recalcular (force=True)."""
     db     = init_db()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    run_mood_pass(router, db, force=True)
+    try:
+        bsky = build_channel()  # para el clima del feed (triggers); opcional
+    except SystemExit:
+        bsky = None
+    run_mood_pass(router, db, bsky=bsky, force=True)
     m = current_mood(db)
     log.info("Mood vigente: %s", m.name if m else "(ninguno)")
 
@@ -3034,151 +3072,11 @@ def run_mood_loop() -> None:
 # ---------------------------------------------------------------------------
 # Reflexión PÚBLICA (portado de maripobot: reflect_on_history/auto_reflect)
 # ---------------------------------------------------------------------------
-def run_public_reflection_pass(bsky: "BskyClient", router: ModelRouter,
-                               conn: sqlite3.Connection, *,
-                               activity_limit: int = 20, min_activity: int = 3) -> None:
-    """Tarea periódica OUTWARD: el bot postea una reflexión en primera persona
-    (≤300 chars, su voz) sobre lo que vivió — la pata pública de la reflexión
-    (la inward, `run_reflection_pass`, destila lecciones a la DB).
-
-    Material = lecciones recientes + actividad reciente del bot. El agente
-    decide si hay algo con peso (FeedDecision; should_post=false es el
-    resultado digno si no lo hay). Toggleable como toda tarea:
-    TASKS.public_reflection (UI / set_task_config). Sin material → no llama
-    al LLM (costo cero).
-    """
-    activity = recent_bot_activity(conn, limit=activity_limit)
-    lessons = [r["lesson_text"] for r in conn.execute(
-        "SELECT lesson_text FROM lessons ORDER BY id DESC LIMIT 8").fetchall()]
-    if len(activity) < min_activity and not lessons:
-        log.info("public_reflection: sin material — nada que reflexionar")
-        return
-
-    soul   = soul_text()
-    prompt = load_text(PROMPTS_DIR / "public_reflection_prompt.md")
-    parts  = [soul, f"\n---\n{current_datetime_line()}", mood_line(conn),
-              memory_block(conn), prefs_block(conn), f"\n---\n{prompt}"]
-    if lessons:
-        parts.append("\n---\nLecciones que destilaste últimamente:\n"
-                     + "\n".join(f"- {t}" for t in lessons))
-    recientes = recent_bot_posts(conn, limit=10)
-    if recientes:
-        parts.append("\n---\nTus posts recientes (NO te repitas — si ya "
-                     "reflexionaste sobre esto, should_post=false):\n"
-                     + "\n".join(f"- {t}" for t in recientes))
-    parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
-    system = "\n".join(p for p in parts if p)
-
-    def _fmt(a: dict) -> str:
-        who = f"→ @{a['reply_to_handle']}" if a.get("reply_to_handle") else "(post suelto)"
-        return f"- {a.get('posted_at', '')} {who}: {a.get('text', '')}"
-
-    user = "Tu actividad reciente (de más nueva a más vieja):\n" + \
-        "\n".join(_fmt(a) for a in activity)
-
-    llm = RoleLLM(router, "feed_opinion")
-    log_llm_context("public_reflection", system, user)
-    try:
-        decision = llm.complete(system, user, FeedDecision)
-    except Exception as e:
-        log.error("public_reflection: %s", e)
-        return
-    log.info("public_reflection: should_post=%s (%s)",
-             decision.should_post, decision.reason[:80])
-    if not decision.should_post:
-        return
-    text = (decision.text or "").strip()
-    if not text:
-        return
-    norm = _norm_text(text)
-    if any(_norm_text(t) == norm for t in recent_bot_posts(conn, limit=20)):
-        log.info("public_reflection: duplicado de un post reciente — skip")
-        return
-    uri = bsky.post(text)
-    log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
-    log.info("public_reflection: posteado %s", uri)
-
-
-def run_public_reflection_loop() -> None:
-    """Pase único desde CLI (`--reflect-public`). Ignora intervalo y toggle."""
-    db     = init_db()
-    bsky   = build_channel()
-    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    run_public_reflection_pass(bsky, router, db)
-    log.info("Public reflection pass completo.")
-
-
-def run_playlist_share_pass(bsky: "BskyClient", router: ModelRouter,
-                            conn: sqlite3.Connection) -> None:
-    """Tarea periódica OUTWARD: postea un tema al azar de la playlist comunitaria
-    (la misma que alimenta add_music_recommendation) con un comentario del LLM.
-
-    Config TASKS.playlist_share: `comment` (default true) — apagado, postea solo
-    título—artista+link, sin llamar al LLM (costo cero). Anti-repetición: evita
-    tracks cuyo link ya aparece en los posts recientes del bot; si TODOS son
-    recientes (playlist chica), elige igual al azar. Sin token de usuario o sin
-    playlist → skip silencioso (el admin todavía no corrió spotify_auth.py).
-    """
-    import spotify_auth
-    if not SPOTIFY_PLAYLIST_ID:
-        log.info("playlist_share: sin SPOTIFY_PLAYLIST_ID — skip")
-        return
-    token = spotify_auth.user_token()
-    if not token:
-        log.info("playlist_share: sin token de usuario (spotify_auth.py) — skip")
-        return
-    try:
-        tracks = [t for t in playlist_tracks(SPOTIFY_PLAYLIST_ID, token) if t.get("url")]
-    except Exception as e:
-        log.error("playlist_share: no pude leer la playlist: %s", e)
-        return
-    if not tracks:
-        log.info("playlist_share: playlist vacía — skip")
-        return
-
-    recientes = recent_bot_posts(conn, limit=30)
-    frescos = [t for t in tracks if not any(t["url"] in p for p in recientes)]
-    track = random.choice(frescos or tracks)
-    label = f"{track['title']} — {track['artist']}"
-
-    comment_on = bool(TASKS_CONFIG.get("playlist_share", {}).get("comment", True))
-    text = f"{label}\n{track['url']}"
-    if comment_on:
-        soul   = soul_text()
-        prompt = load_text(PROMPTS_DIR / "playlist_share_prompt.md")
-        system = "\n".join(p for p in [
-            soul, f"\n---\n{current_datetime_line()}", mood_line(conn), prefs_block(conn),
-            f"\n---\n{prompt}",
-            "\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md")] if p)
-        user = f"El tema que te tocó compartir: {label}\nLink: {track['url']}"
-        try:
-            decision = RoleLLM(router, "feed_opinion").complete(system, user, FeedDecision)
-            if not decision.should_post:
-                log.info("playlist_share: el agente declinó (%s)", decision.reason[:80])
-                return
-            comment = (decision.text or "").strip()
-            if comment:
-                text = comment if track["url"] in comment else f"{comment}\n{track['url']}"
-        except Exception as e:
-            # el comentario es opcional; el share es la función — degradar a sin comentario
-            log.warning("playlist_share: LLM falló (%s) — posteo sin comentario", e)
-
-    norm = _norm_text(text)
-    if any(_norm_text(t) == norm for t in recientes):
-        log.info("playlist_share: duplicado de un post reciente — skip")
-        return
-    uri = bsky.post(text)
-    log_bot_post(conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
-    log.info("playlist_share: posteado %s (%s)", uri, label)
-
-
-def run_playlist_share_loop() -> None:
-    """Pase único desde CLI (`--share-playlist`). Ignora intervalo y toggle."""
-    db     = init_db()
-    bsky   = build_channel()
-    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    run_playlist_share_pass(bsky, router, db)
-    log.info("Playlist share pass completo.")
+# (2026-07-26) run_public_reflection_pass y run_playlist_share_pass se
+# eliminaron: eran rutinas disfrazadas de tarea (conducta de posteo con
+# cadencia, prompt no editable en su lugar natural). Hoy son rutinas default
+# del template — routines/reflexion.md y routines/playlist.md — apoyadas en
+# las tools get_my_recent_posts y get_playlist_track (la pata de datos).
 
 
 # ---------------------------------------------------------------------------
@@ -3239,7 +3137,7 @@ def _make_mood_matcher(router: "ModelRouter") -> "Callable[[str], str | None]":
         index = moodmod.mood_index(MOODS_DIR)
         if not index:
             return None
-        options = "\n".join(f"- {n}: {d}" for n, d in index)
+        options = "\n".join(f"- {n}: {d}" for n, d, _ in index)
         try:
             result = RoleLLM(router, "classify").complete(
                 "Sos un clasificador. El bot quiso ponerse en un estado de ánimo que no "
@@ -3294,7 +3192,7 @@ def _tool_choose_mood(args: dict, ctx: ToolContext) -> ToolResult:
             chosen = moodmod.get_mood(MOODS_DIR, matched)
             approx = f" — tomé '{name}' como {matched}, lo más parecido que tengo"
     if not chosen:
-        options = ", ".join(n for n, _ in moodmod.mood_index(MOODS_DIR))
+        options = ", ".join(n for n, _, _ in moodmod.mood_index(MOODS_DIR))
         return ToolResult(text=f"no conozco el mood '{name}' ni encontré uno parecido. Disponibles: {options}")
     dbmod.kv_set(ctx.conn, "mood_state", json.dumps({
         "date": now_local().date().isoformat(), "mood": chosen.name, "reason": reason,
@@ -3452,6 +3350,32 @@ def _tool_create_event(args: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(text=f"dale, acción agendada: '{title}' el {when} (id {eid}) — "
                                "la ejecuto apenas llegue esa hora")
     return ToolResult(text=f"listo, agendé '{title}' para {who} el {when} (id {eid})")
+
+
+def _tool_get_playlist_track(args: dict, ctx: ToolContext) -> ToolResult:
+    """Un tema al azar de la playlist comunitaria, con anti-repetición contra los
+    posts recientes del bot (si TODOS son recientes — playlist chica — elige
+    igual). Da la pata de datos a la rutina de compartir música: la conducta
+    ("compartí un tema, comentalo") vive en routines/*.md."""
+    import spotify_auth
+    if not SPOTIFY_PLAYLIST_ID:
+        return ToolResult(text="no hay playlist comunitaria configurada (SPOTIFY_PLAYLIST_ID)")
+    token = spotify_auth.user_token()
+    if not token:
+        return ToolResult(text="playlist no disponible: falta la autorización de Spotify "
+                          "(el admin tiene que correr spotify_auth.py)")
+    try:
+        tracks = [t for t in playlist_tracks(SPOTIFY_PLAYLIST_ID, token) if t.get("url")]
+    except Exception as e:
+        return ToolResult(text=f"no pude leer la playlist ahora: {e}")
+    if not tracks:
+        return ToolResult(text="la playlist comunitaria está vacía")
+    recientes = recent_bot_posts(ctx.conn, limit=30)
+    frescos = [t for t in tracks if not any(t["url"] in p for p in recientes)]
+    track = random.choice(frescos or tracks)
+    return ToolResult(text=f"Tema al azar de la playlist comunitaria: "
+                           f"{track['title']} — {track['artist']}\n"
+                           f"Link (incluilo en el post): {track['url']}")
 
 
 def _tool_get_my_recent_posts(args: dict, ctx: ToolContext) -> ToolResult:
@@ -3903,7 +3827,8 @@ def _make_block_me_tool(bsky: "BskyClient | None") -> ToolHandler:
 
 def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | None") -> ToolHandler:
     """Handler de `summarize_feed`: resume en vivo los posts recientes de un feed.
-    Se cierra sobre bsky+router (no viven en ToolContext). Scope REPLY, toggleable."""
+    Se cierra sobre bsky+router (no viven en ToolContext). Scope REPLY +
+    FEED_REFLECTION (las rutinas pueden leer el clima antes de postear)."""
     def _summarize_feed(args: dict, ctx: ToolContext) -> ToolResult:
         if bsky is None or router is None:
             return ToolResult(text="[summarize_feed no disponible en este contexto]")
@@ -3914,7 +3839,14 @@ def _make_summarize_feed_tool(bsky: "BskyClient | None", router: "ModelRouter | 
         feed = next((f for f in enabled if f["name"] == name), None) if name else enabled[0]
         if feed is None:
             return ToolResult(text=f"no conozco un feed llamado '{name}'")
-        since = datetime.now(timezone.utc) - timedelta(hours=6)
+        # `hours` = cuánta conversación leer hacia atrás (clamp 1–48; default 6).
+        raw_hours = args.get("hours")
+        try:
+            hours = float(raw_hours) if raw_hours is not None else 6.0
+        except (TypeError, ValueError):
+            hours = 6.0
+        hours = min(48.0, max(1.0, hours))
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
         try:
             posts = bsky.get_feed_posts(
                 feed.get("type", "list"), feed.get("uri"), since=since, limit=50)
@@ -4062,7 +3994,7 @@ def build_tool_registry(config: dict | None = None, *,
     global _MOOD_MATCHER
     if router is not None:
         _MOOD_MATCHER = _make_mood_matcher(router)
-    mood_names = [n for n, _ in moodmod.mood_index(MOODS_DIR)]
+    mood_names = [n for n, _, _ in moodmod.mood_index(MOODS_DIR)]
     mood_param: dict = {"type": "string",
                         "description": "Uno de tus moods disponibles (elegí el más cercano a lo que "
                                        "sentís), o 'reset' para volver a tu humor de base."}
@@ -4155,19 +4087,24 @@ def build_tool_registry(config: dict | None = None, *,
     )
     reg.register(
         "summarize_feed",
-        "Resume los posts recientes (últimas horas) del feed de la comunidad. "
-        "Usala cuando un usuario pregunta qué se está hablando en el feed, pide un "
-        "resumen del feed/timeline, o quiere saber la actividad reciente de la comunidad.",
+        "Resume los posts recientes del feed de la comunidad. Usala cuando un usuario "
+        "pregunta qué se está hablando, o cuando tu rutina necesita leer el clima/los "
+        "temas del feed ANTES de decidir qué postear. 'hours' controla cuánta "
+        "conversación mirar hacia atrás (default 6, máx 48).",
         {
             "type": "object",
             "properties": {
                 "feed_name": {"type": "string",
-                              "description": "Nombre del feed a resumir. Omitir para el feed principal."}
+                              "description": "Nombre del feed a resumir. Omitir para el feed principal."},
+                "hours": {"type": "number",
+                          "description": "Cuántas horas hacia atrás leer (1-48; default 6)."},
             },
             "required": [],
         },
         _make_summarize_feed_tool(bsky, router),
-        {Scope.REPLY},
+        # FEED_REFLECTION: las rutinas ("leé el clima y posteá algo acorde") la
+        # necesitan en su fase de tools; sin autor de por medio, sin injection extra.
+        {Scope.REPLY, Scope.FEED_REFLECTION},
     )
     reg.register(
         "get_upcoming_events",
@@ -4220,7 +4157,18 @@ def build_tool_registry(config: dict | None = None, *,
             "required": [],
         },
         _tool_get_my_recent_posts,
-        {Scope.REPLY, Scope.ADMIN},
+        # FEED_REFLECTION: las rutinas reflexivas necesitan revisar la actividad
+        # propia (lectura inocua — es lo que el bot ya posteó en público).
+        {Scope.REPLY, Scope.ADMIN, Scope.FEED_REFLECTION},
+    )
+    reg.register(
+        "get_playlist_track",
+        "Trae UN tema al azar de la playlist comunitaria (con anti-repetición contra tus "
+        "posts recientes). Usala cuando tu rutina o el admin te piden compartir música de "
+        "la playlist; el resultado trae título, artista y el link a incluir en el post.",
+        {"type": "object", "properties": {}},
+        _tool_get_playlist_track,
+        {Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     reg.register(
         "reset_my_memory",
@@ -5567,11 +5515,7 @@ def run(mode: str) -> None:
         PeriodicTask("routines",  lambda: run_routines_pass(bsky, router, db, registry)),
         PeriodicTask("reflection", lambda: run_reflection_pass(router, db),
                      interval_hours=24, enabled=True),  # inward-only (no postea): destila lecciones
-        PeriodicTask("public_reflection", lambda: run_public_reflection_pass(bsky, router, db),
-                     interval_hours=24, enabled=True),  # outward: reflexión en primera persona
-        PeriodicTask("playlist_share", lambda: run_playlist_share_pass(bsky, router, db),
-                     interval_hours=24, enabled=True),  # outward: tema de la playlist comunitaria
-        PeriodicTask("mood", lambda: run_mood_pass(router, db),
+        PeriodicTask("mood", lambda: run_mood_pass(router, db, bsky=bsky),
                      interval_hours=6, enabled=True),  # inward: decide el humor del día (solo modo auto)
         PeriodicTask("bio", lambda: run_bio_pass(bsky, router, db),
                      interval_hours=6, enabled=False),  # outward: bio del perfil según prompts/bio.md
@@ -5752,18 +5696,6 @@ if __name__ == "__main__":
              "bot activity into db.lessons) and exit. Inward-only, never posts.",
     )
     parser.add_argument(
-        "--reflect-public",
-        action="store_true",
-        help="Run the PUBLIC reflection pass once (first-person post about what the "
-             "bot lived/learned, <=300 chars) and exit. Outward-facing.",
-    )
-    parser.add_argument(
-        "--share-playlist",
-        action="store_true",
-        help="Post a random track from the community playlist once (LLM comment per "
-             "TASKS.playlist_share.comment) and exit. Requires spotify_auth.py token.",
-    )
-    parser.add_argument(
         "--mood",
         action="store_true",
         help="Decide the bot's mood for today once (auto mode) and exit. Forces a "
@@ -5782,12 +5714,6 @@ if __name__ == "__main__":
 
     elif args.reflect:
         run_reflection_loop()
-
-    elif args.reflect_public:
-        run_public_reflection_loop()
-
-    elif args.share_playlist:
-        run_playlist_share_loop()
 
     elif args.mood:
         run_mood_loop()
