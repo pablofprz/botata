@@ -110,14 +110,16 @@ def test_sin_playlist_config(monkeypatch, _con_token):
 # ─── tool handler ────────────────────────────────────────────────────────────
 def test_tool_agrega_y_confirma(monkeypatch):
     monkeypatch.setattr(b, "add_track_to_playlist",
-                        lambda q: {"status": "added", "track": _TRACK})
+                        lambda q, topic=None: {"status": "added", "track": _TRACK,
+                                               "detalle": [{"playlist": "comunitaria", "status": "added"}]})
     out = b._tool_add_music({"query": "flaca"}, _CTX).text
     assert "agregué" in out and "Flaca" in out
 
 
 def test_tool_duplicado(monkeypatch):
     monkeypatch.setattr(b, "add_track_to_playlist",
-                        lambda q: {"status": "duplicate", "track": _TRACK})
+                        lambda q, topic=None: {"status": "duplicate", "track": _TRACK,
+                                               "detalle": [{"playlist": "comunitaria", "status": "duplicate"}]})
     assert "ya estaba" in b._tool_add_music({"query": "flaca"}, _CTX).text
 
 
@@ -126,7 +128,7 @@ def test_tool_query_vacia():
 
 
 def test_tool_error_graceful(monkeypatch):
-    def boom(q):
+    def boom(q, topic=None):
         raise RuntimeError("spotify 500")
     monkeypatch.setattr(b, "add_track_to_playlist", boom)
     assert "probá más tarde" in b._tool_add_music({"query": "x"}, _CTX).text
@@ -134,7 +136,7 @@ def test_tool_error_graceful(monkeypatch):
 
 def test_tool_sin_autorizar(monkeypatch):
     monkeypatch.setattr(b, "add_track_to_playlist",
-                        lambda q: {"status": "unavailable", "reason": "sin token"})
+                        lambda q, topic=None: {"status": "unavailable", "reason": "sin token"})
     assert "no está configurada" in b._tool_add_music({"query": "x"}, _CTX).text
 
 
@@ -180,3 +182,47 @@ def test_user_token_sin_cache_es_none(monkeypatch, tmp_path):
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "cid")
     monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "sec")
     assert sa.user_token() is None
+
+
+# ─── T38b: varias playlists destino + permisos reportados ───────────────────
+def test_agrega_a_todas_las_playlists_del_tema(monkeypatch, _con_token):
+    monkeypatch.setattr(b, "SOURCES", [
+        {"type": "spotify", "name": "rockola", "category": "rock",
+         "sources": ["PL_A", "PL_B"], "enabled": True}])
+    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=1: [_TRACK])
+    monkeypatch.setattr(b, "playlist_tracks", lambda pid, tok: [])
+    posteados = []
+    monkeypatch.setattr(b, "_spotify_post",
+                        lambda path, tok, payload: posteados.append(path) or {})
+    out = b.add_track_to_playlist("flaca", "rock")
+    assert out["status"] == "added"
+    assert posteados == ["/playlists/PL_A/items", "/playlists/PL_B/items"]
+
+
+def test_una_playlist_sin_permiso_se_reporta(monkeypatch, _con_token):
+    import urllib.error
+    monkeypatch.setattr(b, "SOURCES", [
+        {"type": "spotify", "name": "propia", "category": "rock",
+         "sources": ["PL_MIA"], "enabled": True},
+        {"type": "spotify", "name": "ajena", "category": "rock",
+         "sources": ["PL_AJENA"], "enabled": True}])
+    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=1: [_TRACK])
+    monkeypatch.setattr(b, "playlist_tracks", lambda pid, tok: [])
+
+    def _post(path, tok, payload):
+        if "PL_AJENA" in path:
+            raise urllib.error.HTTPError(path, 403, "Forbidden", {}, None)
+        return {}
+    monkeypatch.setattr(b, "_spotify_post", _post)
+    out = b.add_track_to_playlist("flaca", "rock")
+    assert out["status"] == "added"                     # la propia sí entró
+    estados = {d["playlist"]: d["status"] for d in out["detalle"]}
+    assert estados == {"propia": "added", "ajena": "denied"}
+
+
+def test_tool_avisa_cuando_no_pudo_en_ninguna(monkeypatch):
+    monkeypatch.setattr(b, "add_track_to_playlist",
+                        lambda q, topic=None: {"status": "denied", "track": _TRACK,
+                                               "detalle": [{"playlist": "ajena", "status": "denied"}]})
+    out = b._tool_add_music({"query": "flaca"}, _CTX).text
+    assert "no tengo permiso de escritura" in out and "ajena" in out

@@ -88,14 +88,15 @@ las fuentes que le correspondan, y un `type` que dice por dónde entra cada una:
 | `type` | `sources` contiene | Consumidor |
 |---|---|---|
 | `rss` | URLs de feeds | tool `get_news` |
-| `scrape` | `source_name` de Membrilla | tool `search_images` (parámetro `topic`) |
+| `membrilla` | `source_name` de Membrilla | tools `search_images` y `search_videos` (parámetro `topic`) |
 | `spotify` | ids de playlist | tool `get_playlist_track` (parámetro `topic`) |
 | `youtube` | canales (`@handle`, `UC…`) o listas (`PL…`) | tool `share_video` (parámetro `topic`) |
 
 Todo se resuelve **en query** (el tema se matchea contra category/name/description/fuentes),
 así editar el registro aplica en caliente sin reindexar. Permite varias playlists por tema,
 varios diarios por sección y varios grupos de cuentas por tema. `add_music_recommendation`
-escribe en la primera playlist habilitada (escribir exige destino inequívoco). Los registros
+escribe en **todas** las playlists que matcheen el tema, reportando por separado las que
+rechazan la escritura (403 = playlist ajena a la cuenta autorizada). Los registros
 viejos (`news_sites.json`, `content_sources.json`, `SPOTIFY_PLAYLIST_ID`) se migran solos.
 
 ### run(mode) — el runtime

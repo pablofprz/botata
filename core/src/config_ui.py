@@ -252,7 +252,7 @@ def validate_mcp(mcp: dict) -> list[str]:
     return errs
 
 
-SOURCE_TYPES = ("rss", "scrape", "spotify", "youtube")
+SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube")
 
 
 def validate_sources(sources: list) -> list[str]:
@@ -265,6 +265,8 @@ def validate_sources(sources: list) -> list[str]:
     for i, entry in enumerate(sources or []):
         tag = f"sources[{i}]"
         kind = (entry.get("type") or "").strip().lower()
+        if kind == "scrape":                       # nombre viejo del tipo
+            kind = entry["type"] = "membrilla"
         if kind not in SOURCE_TYPES:
             errs.append(f"{tag}: type inválido '{entry.get('type')}' (usar {list(SOURCE_TYPES)})")
         srcs = entry.get("sources")
@@ -450,7 +452,7 @@ class ConfigStore:
                 if isinstance(e, dict):
                     srcs = e.get("sources") or ([e["source"]] if e.get("source") else [])
                     if srcs:
-                        out.append({**e, "type": "scrape", "sources": srcs})
+                        out.append({**e, "type": "membrilla", "sources": srcs})
         except Exception:
             pass
         pl = str(settings.get("SPOTIFY_PLAYLIST_ID", "")).strip()

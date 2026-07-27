@@ -29,7 +29,7 @@ _SOURCES = [
 
 @pytest.fixture(autouse=True)
 def _cfg(monkeypatch):
-    monkeypatch.setattr(b, "SOURCES", [{**e, "type": "scrape"} for e in _SOURCES])
+    monkeypatch.setattr(b, "SOURCES", [{**e, "type": "membrilla"} for e in _SOURCES])
 
 
 # ─── loader: normaliza las formas que puede tener el archivo ─────────────────
@@ -70,9 +70,9 @@ def test_resuelve_tema_a_fuentes():
 
 def test_una_fuente_puede_estar_en_varios_temas(monkeypatch):
     monkeypatch.setattr(b, "SOURCES", [
-        {"type": "scrape", "category": "futbol",
+        {"type": "membrilla", "category": "futbol",
          "sources": ["compartida", "solo_futbol"], "enabled": True},
-        {"type": "scrape", "category": "humor", "sources": ["compartida"], "enabled": True},
+        {"type": "membrilla", "category": "humor", "sources": ["compartida"], "enabled": True},
     ])
     assert b.sources_for_topic("futbol") == ["compartida", "solo_futbol"]
     assert b.sources_for_topic("humor") == ["compartida"]

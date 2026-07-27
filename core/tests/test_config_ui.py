@@ -86,7 +86,7 @@ def test_sources_valida():
     assert cu.validate_sources(
         [{"type": "rss", "name": "X", "sources": ["https://x/rss"]}]) == []
     assert cu.validate_sources(
-        [{"type": "scrape", "category": "futbol", "sources": ["cuenta"]}]) == []
+        [{"type": "membrilla", "category": "futbol", "sources": ["cuenta"]}]) == []
 
 
 def test_sources_invalidas():
@@ -97,7 +97,7 @@ def test_sources_invalidas():
     assert any("no es una URL" in e for e in cu.validate_sources(
         [{"type": "rss", "name": "X", "sources": ["ftp://no"]}]))
     assert any("tema" in e for e in cu.validate_sources(
-        [{"type": "scrape", "sources": ["x"]}]))
+        [{"type": "membrilla", "sources": ["x"]}]))
 
 
 # ─── Store ───────────────────────────────────────────────────────────────────
@@ -120,14 +120,14 @@ def test_write_settings_invalido_no_toca_el_archivo(store):
 
 def test_sources_roundtrip(store):
     assert store.write_sources(
-        [{"type": "scrape", "category": "futbol", "sources": ["a", "b"], "enabled": True}]) == []
+        [{"type": "membrilla", "category": "futbol", "sources": ["a", "b"], "enabled": True}]) == []
     guardado = store.read_all()["sources"][0]
-    assert guardado["sources"] == ["a", "b"] and guardado["type"] == "scrape"
+    assert guardado["sources"] == ["a", "b"] and guardado["type"] == "membrilla"
 
 
 def test_sources_invalido_no_escribe(store):
-    store.write_sources([{"type": "scrape", "category": "ok", "sources": ["a"]}])
-    assert store.write_sources([{"type": "scrape", "category": "x", "sources": []}])
+    store.write_sources([{"type": "membrilla", "category": "ok", "sources": ["a"]}])
+    assert store.write_sources([{"type": "membrilla", "category": "x", "sources": []}])
     assert store.read_all()["sources"][0]["category"] == "ok"     # intacto
 
 

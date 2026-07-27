@@ -409,3 +409,21 @@ para un bot comunitario.**
 
 ---
 
+### T42 · Pinterest y Tumblr como conectores nativos (fetch en vivo)  `infra` `M`  `P3`
+Idea del admin (2026-07-27): *"si Pinterest te permite integración natural sin peligro de
+bloqueo, podría vivir fuera de Membrilla y agregarse como un tipo de conector más. Lo mismo
+con Tumblr."*
+
+- **Es viable, y es el tier correcto:** Pinterest (gallery-dl, boards públicos sin credenciales) y Tumblr (API v2 oficial con consumer key) son los dos **clientes de API estables** de Membrilla — no tienen el riesgo de bloqueo de IG/X. Encajarían como `type: "pinterest"` / `type: "tumblr"` del registro de fuentes (T38b), igual que se sumó `youtube`.
+- **El límite real a entender antes de hacerlo:** un conector en vivo trae **frescura**, no **búsqueda temática**. El índice semántico (vision + embeddings) es lo que permite resolver "un meme de fútbol"; una foto recién traída de un board no está descripta, así que solo sirve para "traeme lo último de este board". Es exactamente la frontera ya documentada en T36 (*fetch en vivo = lo último de fuente conocida; búsqueda por significado = retrieval sobre el índice*).
+- **Además:** para postear en Bluesky hay que subir el blob igual, así que el conector descarga de todos modos — la ventaja sobre Membrilla no es evitar la descarga sino evitar el ciclo batch.
+- **Acept.:** tipos nuevos en el registro + tool `get_latest_from_source(topic)` que trae lo último de esas fuentes, **sin pasar por el catálogo**; documentar en la UI que esas fuentes no participan de la búsqueda temática hasta que Membrilla las indexe. Se solapa con **T36**: conviene hacerlos juntos y decidir si el conector en vivo alimenta el índice (describe y guarda) o es efímero.
+
+### T43 · Reddit: ¿MCP server o tipo de fuente?  `infra` `S`  `P3`
+Duda del admin (2026-07-27) al ver el registro unificado: *"no me queda claro qué es ese MCP de Reddit y en qué se diferencia de RSS."*
+
+- **Estado:** `mcp_servers/reddit_server.py` (T18) lee subreddits **por RSS/Atom** — el mismo transporte que el tipo `rss` del registro. Lo que agrega es: (a) el **rate limiter de 61 s** que exige el RSS de Reddit (1 request/min por IP, global — sin esto, el segundo request devuelve 429), (b) parámetros propios (`sort` hot/new/top, ventana temporal, multireddit `a+b`), (c) cache de 10 min. Está **apagado** por default.
+- **La duda es legítima:** con T38b, agregar `https://reddit.com/r/x/.rss` como fuente `rss` es trivial — pero se comería el rate limit y rompería el resto de los feeds. O sea, el MCP se justifica **solo** por el limitador y los parámetros de sort.
+- **Opciones:** (1) dejarlo como está (server aparte, apagado); (2) convertirlo en `type: "reddit"` del registro, moviendo el limitador al fetch de Botata — un tipo menos que explicar y una dependencia menos, a cambio de meter el rate limiting en el motor.
+- **Bug encontrado de paso:** el `settings.json` declara `args: ["mcp_servers/reddit_server.py"]` (relativo al cwd) pero el archivo vive en **`core/mcp_servers/`** desde la reorg v2. Si alguien lo prende hoy, el server no levanta. Arreglar al tocar esto (o antes, si se prende).
+

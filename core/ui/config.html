@@ -381,7 +381,8 @@
     <p class="hint">De dónde saca contenido el bot, todo en un solo lugar: <b>un tema con
       las fuentes que le correspondan</b>. El <b>tipo</b> dice por dónde entra —
       <code>rss</code> (feeds de noticias → tool <code>get_news</code>),
-      <code>scrape</code> (cuentas/boards que trae 🍐 Membrilla → <code>search_images</code>) o
+      <code>membrilla</code> (cuentas/boards scrapeados → <code>search_images</code> y
+      <code>search_videos</code>) o
       <code>spotify</code> (playlists → <code>get_playlist_track</code>) o
       <code>youtube</code> (canales y listas → <code>share_video</code>).
       Podés tener <b>varias playlists</b> (rock, cumbia), varios grupos de cuentas por tema y
@@ -393,7 +394,7 @@
       Se aplica en caliente. Las API keys siguen en Credenciales.</p>
     <div id="c-sources"></div>
     <div style="margin-top:8px">
-      <button class="ghost" onclick="addSource('scrape')">+ contenido scrapeado</button>
+      <button class="ghost" onclick="addSource('membrilla')">+ Membrilla</button>
       <button class="ghost" onclick="addSource('rss')">+ feed RSS</button>
       <button class="ghost" onclick="addSource('spotify')">+ playlist de Spotify</button>
       <button class="ghost" onclick="addSource('youtube')">+ canal de YouTube</button>
@@ -1368,7 +1369,7 @@ function renderMcp() {
 // Un TEMA con sus fuentes, y un TIPO que dice por dónde entran. RSS es un tipo
 // más: antes eran tres secciones distintas (Integraciones / RSS / por tema).
 const SOURCE_TYPE_INFO = {
-  scrape:  {label: "contenido scrapeado (Membrilla)", ph: "cuenta_una, board_dos", tool: "search_images"},
+  membrilla: {label: "Membrilla (contenido scrapeado)", ph: "cuenta_una, board_dos", tool: "search_images / search_videos"},
   rss:     {label: "feed RSS", ph: "https://diario.com/rss.xml", tool: "get_news"},
   spotify: {label: "playlist de Spotify", ph: "37i9dQZF1DX... (id de la playlist)", tool: "get_playlist_track"},
   youtube: {label: "canal o lista de YouTube", ph: "@canal, UCxxxx (canal) o PLxxxx (lista)", tool: "share_video"},
@@ -1394,15 +1395,15 @@ function addSource(kind) {
   markDirty(); render();
 }
 function renderSources() {
-  const usadas = new Set(SOURCES.filter(e => e.type === "scrape").flatMap(e => e.sources ?? []));
+  const usadas = new Set(SOURCES.filter(e => e.type === "membrilla").flatMap(e => e.sources ?? []));
   $("c-sources").innerHTML = SOURCES.map((entry, i) => {
-    const kind = entry.type || "scrape";
-    const info = SOURCE_TYPE_INFO[kind] ?? SOURCE_TYPE_INFO.scrape;
-    const libres = kind === "scrape"
+    const kind = entry.type === "scrape" ? "membrilla" : (entry.type || "membrilla");
+    const info = SOURCE_TYPE_INFO[kind] ?? SOURCE_TYPE_INFO.membrilla;
+    const libres = kind === "membrilla"
       ? CATALOG_SOURCES.filter(n => !(entry.sources ?? []).includes(n)) : [];
     return `<div class="card">
     <div class="row">
-      <div style="max-width:210px">${selectInput(entry, "type", "tipo", Object.keys(SOURCE_TYPE_INFO), "scrape")}</div>
+      <div style="max-width:210px">${selectInput(entry, "type", "tipo", Object.keys(SOURCE_TYPE_INFO), "membrilla")}</div>
       <div style="max-width:230px">${textInput(entry, "category", "tema (futbol, rock...)")}</div>
       <div>${textInput(entry, "name", "nombre (opcional: Página/12)")}</div>
     </div>
@@ -1410,7 +1411,7 @@ function renderSources() {
       <div><label>fuentes (separadas por coma)</label>
         <input type="text" value="${esc(sourceList(entry))}"
                oninput="setSourceList(${i}, this.value)" placeholder="${esc(info.ph)}"></div>
-      ${kind === "scrape" ? `<div style="max-width:230px"><label>agregar del catálogo</label>
+      ${kind === "membrilla" ? `<div style="max-width:230px"><label>agregar del catálogo</label>
         <select onchange="addFromCatalog(${i}, this.value); this.value=''">
           <option value="">${libres.length ? "elegí una…" : "(todas agregadas)"}</option>
           ${libres.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}

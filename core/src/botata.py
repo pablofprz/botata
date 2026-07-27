@@ -206,11 +206,11 @@ MODELS_CONFIG      : dict | None = settings.get("MODELS")
 #
 #   config/sources.json = [{type, name, category, sources: [...], description, enabled}]
 #     type "rss"     → sources = URLs de feeds        (tool get_news)
-#     type "scrape"  → sources = source_name de Membrilla (tool search_images)
+#     type "membrilla" → sources = source_name de Membrilla (search_images/search_videos)
 #     type "spotify" → sources = ids de playlist      (tool get_playlist_track)
 #     type "youtube" → sources = canales/listas       (tool share_video)
 # ---------------------------------------------------------------------------
-SOURCE_TYPES = ("rss", "scrape", "spotify", "youtube")
+SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube")
 
 
 def _normalize_source_entry(e: dict) -> dict | None:
@@ -228,7 +228,10 @@ def _normalize_source_entry(e: dict) -> dict | None:
     srcs = [str(s).strip() for s in srcs if str(s).strip()]
     if not srcs:
         return None
-    return {**e, "type": (e.get("type") or "scrape").strip().lower(), "sources": srcs}
+    kind = (e.get("type") or "membrilla").strip().lower()
+    if kind == "scrape":          # nombre viejo del tipo (se renombró a 'membrilla')
+        kind = "membrilla"
+    return {**e, "type": kind, "sources": srcs}
 
 
 def _load_sources() -> list[dict]:
@@ -256,7 +259,7 @@ def _load_sources() -> list[dict]:
         try:  # contenido scrapeado viejo
             for e in load_json(CONFIG_DIR / "content_sources.json"):
                 if isinstance(e, dict):
-                    raw.append({**e, "type": "scrape"})
+                    raw.append({**e, "type": "membrilla"})
         except Exception:
             pass
     out = [n for n in (_normalize_source_entry(e) for e in raw) if n]
@@ -308,8 +311,8 @@ def topics_available() -> list[str]:
 
 
 def sources_for_topic(topic: str) -> list[str]:
-    """Fuentes de contenido scrapeado para un tema (usada por search_images)."""
-    return sources_of_type("scrape", topic) if (topic or "").strip() else []
+    """Fuentes de Membrilla para un tema (usada por search_images/search_videos)."""
+    return sources_of_type("membrilla", topic) if (topic or "").strip() else []
 
 # Leer la media (imágenes/video/GIF) de los posts del hilo: corre el modelo
 # vision (rol image_describe) sobre el frame/thumbnail y suma la descripción al
@@ -3065,13 +3068,24 @@ def _tool_use_skill(args: dict, ctx: ToolContext) -> ToolResult:
 
 
 def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
+    """Imagen del catálogo (excluye los videos: para eso está search_videos)."""
+    return _search_catalog_media(args, ctx, want_video=False)
+
+
+def _search_catalog_media(args: dict, ctx: ToolContext, *, want_video: bool) -> ToolResult:
+    """Núcleo común de search_images / search_videos.
+
+    Misma búsqueda híbrida sobre el catálogo; lo único que cambia es qué medio se
+    acepta como resultado. Un video vive en el catálogo como sus FRAMES (los
+    describe el modelo de visión, que no ve video), y `_postable_media_path`
+    traduce un frame al .mp4 padre — así que "es video" = el path posteable
+    termina en .mp4. Por eso el filtro va acá y no en SQL.
+    """
     query    = args.get("query", "")
     category = args.get("category")
     topic    = (args.get("topic") or "").strip()
-    # T38: el tema acota la búsqueda a las fuentes que el admin declaró para él
-    # (registro sources.json, type=scrape). Se resuelve en query, así editar aplica
-    # en caliente. Tema desconocido → avisamos en vez de devolver cualquier cosa.
-    sources = None
+    que      = "videos" if want_video else "imágenes"
+    sources  = None
     if topic:
         sources = sources_for_topic(topic)
         if not sources:
@@ -3079,22 +3093,29 @@ def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
                 f"no tengo fuentes declaradas para '{topic}'. Temas disponibles: "
                 + (", ".join(topics_available())
                    or "ninguno — el admin no cargó fuentes de contenido")))
-    results  = dbmod.prefer_fresh_media(
+    # Pool más grande que en imágenes: los videos son minoría en el catálogo y el
+    # filtro descarta candidatos después de la búsqueda.
+    results = dbmod.prefer_fresh_media(
         dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category,
-                                          sources=sources, limit=8))
-    # Primer candidato con path posteable (frame → video padre; ver _postable_media_path)
-    # — prefer_fresh_media ya mandó al fondo los usados hace poco (anti-repetición).
-    best, best_path = None, None
+                                          sources=sources, limit=25 if want_video else 8))
+    elegidos, best, best_path = [], None, None
     for r in results:
         p = _postable_media_path(r.get("file_path") or "")
-        if p:
+        if not p or p.lower().endswith(".mp4") != want_video:
+            continue
+        elegidos.append(r)
+        if best is None:
             best, best_path = r, p
-            break
     if not best:
-        return ToolResult(text=f"no encontré imágenes para '{query}'")
+        return ToolResult(text=f"no encontré {que} para '{query}'")
     dbmod.mark_image_used(ctx.conn, best["id"])
-    summary = ", ".join(f"{r['description'][:50]}… [{r['category']}]" for r in results[:3])
-    return ToolResult(text=f"encontré {len(results)} imágenes: {summary}", image_path=best_path)
+    summary = ", ".join(f"{r['description'][:50]}… [{r['category']}]" for r in elegidos[:3])
+    return ToolResult(text=f"encontré {len(elegidos)} {que}: {summary}", image_path=best_path)
+
+
+def _tool_search_videos(args: dict, ctx: ToolContext) -> ToolResult:
+    """Como search_images pero devuelve VIDEO del catálogo (TikTok y demás)."""
+    return _search_catalog_media(args, ctx, want_video=True)
 
 
 # ─── T9 · Calendar: leer/escribir la tabla events (T4) como tools ────────────
@@ -3429,21 +3450,32 @@ def _track_by_id(track_id: str, market: str = "AR") -> dict | None:
     }
 
 
-def add_track_to_playlist(query: str) -> dict:
-    """Agrega un tema a la playlist comunitaria: `query` puede ser texto de
+def _playlist_label(pid: str) -> str:
+    """Nombre legible de una playlist del registro (para reportar destinos)."""
+    for e in source_entries("spotify"):
+        if pid in e["sources"]:
+            return (e.get("name") or e.get("category") or pid).strip() or pid
+    return pid
+
+
+def add_track_to_playlist(query: str, topic: str | None = None) -> dict:
+    """Agrega un tema a las playlists del registro: `query` puede ser texto de
     búsqueda ('título artista') o un link/URI de Spotify (se usa el id directo,
     sin búsqueda — buscar una URL como texto devuelve basura o nada).
 
-    Devuelve {status: added|duplicate|not_found|unavailable, track?}. `unavailable`
-    = falta config o autorización de usuario (spotify_auth.py). Excepciones de red
-    las maneja el caller.
+    **Escribe en TODAS las playlists que matcheen `topic`** (sin topic, en todas
+    las habilitadas): tener varias listas no puede ser una limitación de base.
+    Cada destino se reporta por separado — una playlist ajena (sin permiso de
+    escritura) devuelve 403, se informa y las demás siguen.
+
+    Devuelve {status: added|duplicate|denied|not_found|unavailable, track?, detalle}.
     """
     import spotify_auth
-    # Escribir exige UN destino inequívoco: la primera playlist habilitada del
-    # registro (tras la migración, la de siempre). Leer sí puede abarcar varias.
-    destino = next(iter(sources_of_type("spotify")), "")
-    if not destino:
-        return {"status": "unavailable", "reason": "sin playlist de Spotify en las fuentes"}
+    destinos = sources_of_type("spotify", topic or "")
+    if not destinos:
+        return {"status": "unavailable",
+                "reason": (f"no hay playlist para el tema '{topic}'" if topic
+                           else "sin playlist de Spotify en las fuentes")}
     token = spotify_auth.user_token()
     if not token:
         return {"status": "unavailable",
@@ -3456,34 +3488,67 @@ def add_track_to_playlist(query: str) -> dict:
         track = tracks[0] if tracks and tracks[0].get("id") else None
     if not track:
         return {"status": "not_found"}
-    # Dedup doble: por ID y por canción (título+artista normalizados) — el mismo
-    # tema existe en Spotify con IDs distintos según la edición/remaster.
     key = _norm_track_key(track["title"], track["artist"])
-    existentes = playlist_tracks(destino, token)
-    if any(e["id"] == track["id"] or _norm_track_key(e["title"], e["artist"]) == key
-           for e in existentes):
-        return {"status": "duplicate", "track": track}
-    _spotify_post(f"/playlists/{destino}/items", token,
-                  {"uris": [f"spotify:track:{track['id']}"]})
-    return {"status": "added", "track": track}
+    detalle = []
+    for pid in destinos:
+        etiqueta = _playlist_label(pid)
+        try:
+            # Dedup doble: por ID y por canción (título+artista normalizados) — el
+            # mismo tema existe en Spotify con IDs distintos según la edición.
+            existentes = playlist_tracks(pid, token)
+            if any(e["id"] == track["id"] or _norm_track_key(e["title"], e["artist"]) == key
+                   for e in existentes):
+                detalle.append({"playlist": etiqueta, "status": "duplicate"})
+                continue
+            _spotify_post(f"/playlists/{pid}/items", token,
+                          {"uris": [f"spotify:track:{track['id']}"]})
+            detalle.append({"playlist": etiqueta, "status": "added"})
+        except urllib.error.HTTPError as e:
+            # 403 = la playlist no es de la cuenta autorizada (o falta el scope).
+            motivo = "sin permiso de escritura" if e.code == 403 else f"error {e.code}"
+            log.warning("add_track_to_playlist: %s en %s", motivo, etiqueta)
+            detalle.append({"playlist": etiqueta, "status": "denied", "reason": motivo})
+        except Exception as e:
+            log.warning("add_track_to_playlist: fallo en %s: %s", etiqueta, e)
+            detalle.append({"playlist": etiqueta, "status": "denied", "reason": str(e)[:80]})
+    estados = {d["status"] for d in detalle}
+    status = ("added" if "added" in estados
+              else "duplicate" if "duplicate" in estados else "denied")
+    return {"status": status, "track": track, "detalle": detalle}
 
 
 def _tool_add_music(args: dict, ctx: ToolContext) -> ToolResult:
     """Tool `add_music_recommendation`: recomendación de un power_user → la playlist."""
     query = (args.get("query") or "").strip()
+    topic = (args.get("topic") or "").strip() or None
     if not query:
         return ToolResult(text="necesito saber qué canción o artista querés recomendar")
     try:
-        out = add_track_to_playlist(query)
+        out = add_track_to_playlist(query, topic)
     except Exception as e:
         log.error("add_music_recommendation: %s", e)
         return ToolResult(text="no pude tocar la playlist ahora, probá más tarde")
     track = out.get("track") or {}
     label = f"{track.get('title')} — {track.get('artist')}"
+    detalle = out.get("detalle") or []
+
+    def _listar(estado: str) -> str:
+        return ", ".join(d["playlist"] for d in detalle if d["status"] == estado)
+
     if out["status"] == "added":
-        return ToolResult(text=f"listo, agregué {label} a la playlist ({track.get('url')})")
+        txt = f"listo, agregue {label} a {_listar('added')} ({track.get('url')})"
+        if _listar("duplicate"):
+            txt += f"; ya estaba en {_listar('duplicate')}"
+        if _listar("denied"):
+            txt += f"; en {_listar('denied')} no pude (no tengo permiso de escritura)"
+        return ToolResult(text=txt.replace("agregue", "agregué"))
     if out["status"] == "duplicate":
-        return ToolResult(text=f"{label} ya estaba en la playlist ({track.get('url')})")
+        return ToolResult(text=f"{label} ya estaba en {_listar('duplicate')} ({track.get('url')})")
+    if out["status"] == "denied":
+        return ToolResult(text=(
+            f"encontré {label} pero no pude agregarlo: no tengo permiso de escritura en "
+            f"{_listar('denied') or 'esa playlist'}. Tiene que ser una playlist de la "
+            "cuenta de Spotify que autorizó el bot."))
     if out["status"] == "not_found":
         return ToolResult(text=f"no encontré '{query}' en Spotify, probá con título y artista")
     log.warning("add_music_recommendation no disponible: %s", out.get("reason"))
@@ -4006,6 +4071,22 @@ def build_tool_registry(config: dict | None = None, *,
         {Scope.ADMIN},
     )
     reg.register(
+        "search_videos",
+        "Search the catalog for a VIDEO matching a query (TikToks and other clips the "
+        "bot has indexed). Same idea as search_images but returns video. Use when the "
+        "request asks for a video/clip, or when a video fits better than a still image.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query in Spanish, e.g. 'baile gracioso', 'gol de Messi'."},
+                "topic": {"type": "string", "description": "Optional TOPIC filter: restricts to the sources the admin registered for that topic."},
+            },
+            "required": ["query"],
+        },
+        _tool_search_videos,
+        {Scope.ADMIN},
+    )
+    reg.register(
         "summarize_feed",
         "Resume los posts recientes del feed de la comunidad. Usala cuando un usuario "
         "pregunta qué se está hablando, o cuando tu rutina necesita leer el clima/los "
@@ -4155,7 +4236,10 @@ def build_tool_registry(config: dict | None = None, *,
             "properties": {
                 "query": {"type": "string",
                           "description": "La canción: 'título artista' (ej. 'Flaca Calamaro') "
-                                         "o el link/URI de Spotify tal cual llegó."}
+                                         "o el link/URI de Spotify tal cual llegó."},
+                "topic": {"type": "string",
+                          "description": "Opcional: tema de la(s) playlist(s) destino "
+                                         "(ej. 'rock'). Sin esto va a todas las habilitadas."}
             },
             "required": ["query"],
         },
@@ -4257,8 +4341,8 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             f"{f['name']}={'on' if f.get('enabled', True) else 'off'} "
             f"({f.get('interval_hours', 6)}h)"
             for f in FEEDS_CONFIG) or "ninguno"))
-        for kind, etiqueta in (("rss", "RSS"), ("scrape", "contenido scrapeado"),
-                               ("spotify", "playlists")):
+        for kind, etiqueta in (("rss", "RSS"), ("membrilla", "contenido de Membrilla"),
+                               ("spotify", "playlists"), ("youtube", "canales de YouTube")):
             ents = [e for e in SOURCES if e["type"] == kind]
             if ents:
                 lines.append(f"fuentes {etiqueta}: " + ", ".join(
