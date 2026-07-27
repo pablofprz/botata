@@ -83,14 +83,16 @@ def test_create_event_requires_title_and_date(conn):
     assert "necesito" in r.text
 
 
-def test_user_sees_own_and_community_not_others(conn):
+def test_everyone_sees_all_events(conn):
+    # No hay eventos privados: el bot es de comunidades. `handle` dice de quién
+    # es el evento (a quién saludar), no quién puede verlo.
     b._tool_create_event({"title": "comunidad-ev", "event_at": "2026-09-01"}, _ctx(conn, ADMIN))
     b._tool_create_event(
         {"title": "user2-ev", "event_at": "2026-09-02", "handle": U2}, _ctx(conn, ADMIN))
     b._tool_create_event({"title": "user1-ev", "event_at": "2026-09-03"}, _ctx(conn, U1))
     out = b._tool_get_upcoming_events({}, _ctx(conn, U1)).text
     assert "comunidad-ev" in out and "user1-ev" in out
-    assert "user2-ev" not in out  # privacidad: no ve el evento privado de otro
+    assert "user2-ev" in out  # ve también el cumple/evento de otro
 
 
 def test_admin_and_proactive_loop_see_all(conn):

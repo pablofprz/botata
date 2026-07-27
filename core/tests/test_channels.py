@@ -1,4 +1,4 @@
-"""Tests de channels.py (T28): MastodonChannel contra una API falsa."""
+"""Tests de channels.py (T28): MastodonChannel y DiscordChannel contra APIs falsas."""
 from __future__ import annotations
 
 import sys
@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from channels import MastodonChannel, strip_html, truncate_post  # noqa: E402
+from channels import DiscordChannel, MastodonChannel, strip_html, truncate_post  # noqa: E402
 
 
 # ─── API falsa (shape de Mastodon.py: dicts con acceso por clave) ────────────
@@ -175,3 +175,162 @@ def test_get_feed_posts_following():
     assert [p["uri"] for p in posts] == ["10", "11"]
     assert posts[0]["handle"] == "ana"
     assert ch.get_feed_posts("feed", "x", since=None) == []  # tipo bluesky-only
+
+
+# ═══ DiscordChannel ══════════════════════════════════════════════════════════
+_BOT = {"id": "1", "username": "botata", "bot": True}
+_ANA = {"id": "900", "username": "ana", "global_name": "Ana"}
+_OTRO_BOT = {"id": "666", "username": "spambot", "bot": True}
+
+
+def _msg(id, content, author=_ANA, mentions=None, ref=None, ref_msg=None,
+         attachments=None):
+    m = {
+        "id": str(id),
+        "content": content,
+        "author": author,
+        "mentions": mentions or [],
+        "attachments": attachments or [],
+        "timestamp": "2026-07-25T12:00:00+00:00",
+    }
+    if ref:
+        m["message_reference"] = {"message_id": str(ref)}
+        if ref_msg:
+            m["referenced_message"] = ref_msg
+    return m
+
+
+class FakeResp:
+    def __init__(self, data, status=200):
+        self._data, self.status_code, self.headers = data, status, {}
+
+    def json(self):
+        return self._data
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeDiscordHttp:
+    """Shape mínimo de httpx.Client que DiscordChannel usa (.request)."""
+
+    def __init__(self):
+        self.posted = []
+        bot_hello = _msg(15, "hola gente, soy botata", author=_BOT)
+        self.messages = {
+            "15": bot_hello,
+            # mención directa al bot
+            "20": _msg(20, "<@1> qué opinás?", mentions=[_BOT]),
+            # reply a un mensaje del bot, sin mencionarlo
+            "21": _msg(21, "seguí contando", ref=15, ref_msg=bot_hello),
+            # charla ajena y otro bot: se ignoran
+            "22": _msg(22, "hablando de otra cosa"),
+            "23": _msg(23, "<@1> spam", author=_OTRO_BOT, mentions=[_BOT]),
+            # un mensaje del propio bot: se ignora
+            "24": _msg(24, "yo mismo", author=_BOT),
+        }
+
+    def request(self, method, path, params=None, json=None, files=None, data=None):
+        if path == "/users/@me":
+            return FakeResp(_BOT)
+        if method == "GET" and path == "/channels/111/messages":
+            ids = ["24", "23", "22", "21", "20"]  # reverso-cronológico
+            return FakeResp([self.messages[i] for i in ids])
+        if method == "GET" and path.startswith("/channels/111/messages/"):
+            mid = path.rsplit("/", 1)[1]
+            if mid not in self.messages:
+                return FakeResp({"message": "Unknown Message"}, status=404)
+            return FakeResp(self.messages[mid])
+        if method == "POST" and path == "/channels/111/messages":
+            self.posted.append({"json": json, "files": files, "data": data})
+            return FakeResp({"id": "99"})
+        return FakeResp({"message": "Not Found"}, status=404)
+
+
+def make_discord():
+    http = FakeDiscordHttp()
+    return DiscordChannel("tok", ["111"], http=http), http
+
+
+def test_discord_login_y_handle():
+    ch, _ = make_discord()
+    assert ch.handle == "botata"
+
+
+def test_discord_get_mentions_filtra_y_mapea():
+    ch, _ = make_discord()
+    mentions = ch.get_mentions()
+    # quedan la mención directa (20) y la reply al bot (21); se filtran
+    # el mensaje propio, el otro bot y la charla ajena
+    assert {m["uri"] for m in mentions} == {"111/20", "111/21"}
+    m20 = next(m for m in mentions if m["cid"] == "20")
+    assert m20["author_handle"] == "ana"
+    assert m20["text"] == "@botata qué opinás?"  # <@1> traducido
+
+
+def test_discord_thread_info_cadena_de_replies():
+    ch, _ = make_discord()
+    ctx, root_uri, root_cid, media = ch.get_thread_info("111/21", "21")
+    assert ctx == "botata: hola gente, soy botata"
+    assert root_uri == "111/15" and root_cid == "15"
+    assert media == ""
+
+
+def test_discord_reply_referencia_al_parent():
+    ch, http = make_discord()
+    out = ch.reply("de acuerdo", "111/20", "20", "111/20", "20")
+    assert out == "111/99"
+    payload = http.posted[-1]["json"]
+    assert payload["content"] == "de acuerdo"
+    assert payload["message_reference"]["message_id"] == "20"
+
+
+def test_discord_post_al_canal_principal():
+    ch, http = make_discord()
+    out = ch.post("un posteo proactivo")
+    assert out == "111/99"
+    assert http.posted[-1]["json"] == {"content": "un posteo proactivo"}
+
+
+def test_discord_get_mention_by_uri():
+    ch, _ = make_discord()
+    m = ch.get_mention_by_uri("111/21")
+    assert m["uri"] == "111/21" and m["author_handle"] == "ana"
+    assert m["thread_context"] == "botata: hola gente, soy botata"
+    assert m["thread_root_uri"] == "111/15"
+    assert ch.get_mention_by_uri("111/404") is None
+
+
+def test_discord_get_profile_cache_de_vistos():
+    ch, _ = make_discord()
+    assert ch.get_profile("ana") is None  # todavía no vista
+    ch.get_mentions()
+    p = ch.get_profile("@ana")
+    assert p.did == "900" and p.display_name == "Ana" and p.description == ""
+    assert ch.resolve_did("ana") == "900"
+
+
+def test_discord_block_user_no_op():
+    ch, _ = make_discord()
+    assert ch.block_user("ana") is False
+
+
+def test_discord_feed_posts_tipo_channel():
+    ch, _ = make_discord()
+    posts = ch.get_feed_posts("channel", "111", since=None)
+    # sin bots (23, 24 fuera) — quedan los mensajes humanos
+    assert {p["uri"] for p in posts} == {"111/20", "111/21", "111/22"}
+    p21 = next(p for p in posts if p["uri"] == "111/21")
+    assert p21["reply_to"] == "111/15"
+    assert ch.get_feed_posts("following", None, since=None) == []
+
+
+def test_discord_media_note_en_attachments():
+    ch, http = make_discord()
+    http.messages["21"]["attachments"] = [
+        {"content_type": "image/png", "filename": "gato.png"},
+        {"filename": "audio.ogg"},
+    ]
+    *_, media = ch.get_thread_info("111/21", "21")
+    assert media == "[image: gato.png] [file: audio.ogg]"

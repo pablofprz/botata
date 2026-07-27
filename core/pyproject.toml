@@ -41,7 +41,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["botata", "db", "router", "tools", "skills", "moods", "scheduler", "mcp_tools", "mem_admin", "budget", "clearsky", "config_ui", "catalog", "parse_memory", "spotify_auth", "instance", "init_instance", "channels"]
+py-modules = ["botata", "db", "router", "tools", "skills", "moods", "routines", "scheduler", "mcp_tools", "mem_admin", "budget", "clearsky", "config_ui", "catalog", "parse_memory", "spotify_auth", "instance", "init_instance", "channels"]
 
 # --- ruff: tipado estricto, sin opinionated noise ---------------------------
 [tool.ruff]

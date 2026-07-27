@@ -1,7 +1,8 @@
 """Tests de eventos-acción (kind='bot_action'): órdenes agendadas para el bot.
 
 Cubre: helpers de db (due/mark done), gating de permisos en create_event
-(default solo admin, parametrizable), y ejecución + marca en el heartbeat.
+(default solo admin, parametrizable), y ejecución + marca en la tarea `actions`
+(cada ciclo del loop — antes esperaban la cadencia del heartbeat).
 """
 from __future__ import annotations
 
@@ -93,13 +94,7 @@ def test_config_any_habilita_usuarios(conn, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='bot_action'").fetchone()[0] == 1
 
 
-# ─── heartbeat: ejecuta y marca done ─────────────────────────────────────────
-@pytest.fixture(autouse=True)
-def _hb_paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(b, "HEARTBEAT_OVERRIDE_PATH", tmp_path / "heartbeat_override.md")
-    monkeypatch.setattr(b, "HEARTBEAT_CHECKLIST_PATH", tmp_path / "heartbeat_checklist.md")
-
-
+# ─── tarea `actions`: ejecuta y marca done (antes vivía en el ex-heartbeat) ──
 class FakeBsky:
     def __init__(self):
         self.posts = []
@@ -120,42 +115,42 @@ class FakeLLM:
         return self.decision
 
 
-def _run_hb(conn, bsky, llm, monkeypatch):
+def _run_actions(conn, bsky, llm, monkeypatch):
     monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
-    b.run_heartbeat_pass(bsky, router=None, conn=conn)
+    b.run_actions_pass(bsky, router=None, conn=conn)
 
 
-def test_heartbeat_ejecuta_accion_vencida(conn, monkeypatch):
+def test_actions_ejecuta_accion_vencida(conn, monkeypatch):
     eid = d.create_event(conn, title="himno", event_at=_hora(-1), kind="bot_action",
                          description="postear el himno completo")
     decision = b.FeedDecision(should_post=True, reason="orden", text="¡Oíd mortales!")
     bsky, llm = FakeBsky(), FakeLLM(decision)
-    _run_hb(conn, bsky, llm, monkeypatch)
+    _run_actions(conn, bsky, llm, monkeypatch)
     assert bsky.posts == ["¡Oíd mortales!"]
-    assert "ACCIONES AGENDADAS" in llm.last_system
+    # el encuadre viene de prompts/actions.md de la instancia (template en inglés)
+    assert "himno" in llm.last_system
     assert "postear el himno completo" in llm.last_system
     assert conn.execute("SELECT done FROM events WHERE id=?", (eid,)).fetchone()[0] == 1
 
 
-def test_heartbeat_accion_declinada_igual_se_marca(conn, monkeypatch):
+def test_actions_accion_declinada_igual_se_marca(conn, monkeypatch):
     """Una orden considerada no se reintenta para siempre: declinada → done."""
     eid = d.create_event(conn, title="x", event_at=_hora(-1), kind="bot_action")
     bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=False, reason="ya lo dije"))
-    _run_hb(conn, bsky, llm, monkeypatch)
+    _run_actions(conn, bsky, llm, monkeypatch)
     assert bsky.posts == []
     assert conn.execute("SELECT done FROM events WHERE id=?", (eid,)).fetchone()[0] == 1
 
 
-def test_heartbeat_accion_futura_no_dispara(conn, monkeypatch):
+def test_actions_accion_futura_no_dispara(conn, monkeypatch):
     d.create_event(conn, title="x", event_at=_hora(+3), kind="bot_action")
     bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=True, text="hola"))
-    _run_hb(conn, bsky, llm, monkeypatch)
-    # sin acciones vencidas, sin otros eventos ni instrucciones → ni llama al LLM
-    # (la bot_action futura se filtra de hoy/próximos: es orden, no contexto)
+    _run_actions(conn, bsky, llm, monkeypatch)
+    # sin acciones vencidas el pase ni llama al LLM
     assert llm.calls == 0 and bsky.posts == []
 
 
-def test_heartbeat_error_llm_no_marca(conn, monkeypatch):
+def test_actions_error_llm_no_marca(conn, monkeypatch):
     eid = d.create_event(conn, title="x", event_at=_hora(-1), kind="bot_action")
 
     class BoomLLM:
@@ -163,5 +158,23 @@ def test_heartbeat_error_llm_no_marca(conn, monkeypatch):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(b, "RoleLLM", lambda router, role: BoomLLM())
-    b.run_heartbeat_pass(FakeBsky(), router=None, conn=conn)  # no lanza
+    b.run_actions_pass(FakeBsky(), router=None, conn=conn)  # no lanza
+    assert conn.execute("SELECT done FROM events WHERE id=?", (eid,)).fetchone()[0] == 0
+
+
+def test_rutinas_no_ejecutan_acciones(conn, tmp_path, monkeypatch):
+    """Regresión de la separación: una bot_action vencida NO entra al contexto
+    de las rutinas — la ejecuta la tarea `actions`. El pase de la rutina corre
+    (tiene cuerpo) pero la orden no aparece ni se marca done."""
+    rd = tmp_path / "routines"
+    rd.mkdir()
+    (rd / "general.md").write_text("---\ninterval_hours: 1\n---\nmirá el ambiente\n",
+                                   encoding="utf-8")
+    monkeypatch.setattr(b, "ROUTINES_DIR", rd)
+    eid = d.create_event(conn, title="himno-secreto", event_at=_hora(-1), kind="bot_action")
+    bsky, llm = FakeBsky(), FakeLLM(b.FeedDecision(should_post=False, reason="nada"))
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    b.run_routines_pass(bsky, router=None, conn=conn)
+    assert llm.calls == 1
+    assert "himno-secreto" not in llm.last_system
     assert conn.execute("SELECT done FROM events WHERE id=?", (eid,)).fetchone()[0] == 0

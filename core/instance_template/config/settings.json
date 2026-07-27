@@ -1,8 +1,11 @@
 {
 	"BOT_NAME": "",
 	"LANGUAGE": "es",
+	"COMMUNITY_NAME": "",
+	"TIMEZONE": "America/Argentina/Buenos_Aires",
 	"CHANNEL": "bluesky",
 	"MASTODON_BASE_URL": "",
+	"DISCORD_CHANNEL_IDS": [],
 	"BOT_HANDLE": "",
 	"ADMIN_HANDLE": "",
 	"ADMIN_HANDLES": [],
@@ -12,6 +15,11 @@
 	"IMAGE_MODEL": "google/gemini-2.5-flash",
 	"POLL_INTERVAL_SECONDS": 60,
 	"NEWS_ENABLED": false,
+	"CALENDAR_ANNOUNCE": {
+		"from": "admin",
+		"groups": [],
+		"feed": false
+	},
 	"FEEDS": [],
 	"TOOLS": {},
 	"USER_GROUPS": {},
@@ -39,15 +47,20 @@
 		"feed": {
 			"enabled": true
 		},
+		"calendar": {
+			"enabled": true
+		},
+		"actions": {
+			"enabled": true
+		},
+		"routines": {
+			"enabled": true
+		},
 		"news": {
 			"enabled": false
 		},
 		"mentions": {
 			"enabled": true
-		},
-		"heartbeat": {
-			"enabled": false,
-			"interval_hours": 12.0
 		},
 		"reflection": {
 			"enabled": true,
@@ -60,6 +73,10 @@
 		"playlist_share": {
 			"enabled": false,
 			"interval_hours": 24.0
+		},
+		"bio": {
+			"enabled": false,
+			"interval_hours": 6.0
 		}
 	}
 }

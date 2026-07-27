@@ -40,6 +40,41 @@ EMBED_MODEL_NAME = "BAAI/bge-m3"
 # (cosine > 0.92 ⟺ distance < 0.08). Se usa en el paso de upsert/dedup.
 DEDUP_THRESHOLD = 0.92
 
+# ─── Zona horaria local de la instancia ─────────────────────────────────────
+# Las fechas "humanas" (events.event_at, defaults de "ahora"/"hoy") se
+# interpretan en la zona LOCAL de la instancia. Default: Argentina (UTC-3, sin
+# DST); botata.py y config_ui.py la pisan al arrancar con set_local_tz(TIMEZONE).
+LOCAL_TZ: Any = timezone(timedelta(hours=-3))
+
+
+def set_local_tz(name: str) -> str:
+    """Configura la zona local desde settings (TIMEZONE). Acepta nombre IANA
+    ('America/Argentina/Buenos_Aires') u offset fijo ('UTC-3', 'UTC+5:30').
+    Devuelve una descripción legible. Nombre inválido → warning y queda la
+    zona vigente (un typo en settings no deja al bot sin reloj)."""
+    global LOCAL_TZ
+    name = (name or "").strip()
+    if not name:
+        return str(LOCAL_TZ)
+    m = re.fullmatch(r"UTC([+-])(\d{1,2})(?::(\d{2}))?", name, re.I)
+    if m:
+        sign = 1 if m.group(1) == "+" else -1
+        LOCAL_TZ = timezone(sign * timedelta(hours=int(m.group(2)),
+                                             minutes=int(m.group(3) or 0)))
+        return name.upper()
+    try:
+        from zoneinfo import ZoneInfo
+        LOCAL_TZ = ZoneInfo(name)
+        return name
+    except Exception:
+        log.warning("TIMEZONE %r inválida (¿falta tzdata?) — sigo en %s", name, LOCAL_TZ)
+        return str(LOCAL_TZ)
+
+
+def local_now() -> datetime:
+    """Ahora en la zona local de la instancia, naive (mismo formato que event_at)."""
+    return datetime.now(LOCAL_TZ).replace(tzinfo=None)
+
 # ─── Esquema ────────────────────────────────────────────────────────────────
 _SCHEMA = """
 -- ─── users: identidad y perfil base ──────────────────────────────────
@@ -330,8 +365,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Migraciones idempotentes sobre DBs existentes (el _SCHEMA solo crea, no altera).
 
     - events.done (2026-07-19): marca de cumplimiento para eventos-acción
-      (kind='bot_action') — el heartbeat los ejecuta una sola vez.
-    - events.recur (2026-07-24): recurrencia ('daily'|'weekly'|'monthly'|NULL).
+      (kind='bot_action') — la tarea actions los ejecuta una sola vez.
+    - events.recur (2026-07-24): recurrencia ('daily'|'weekly'|'monthly'|'yearly'|NULL).
       event_at define la PRIMERA ocurrencia (y con ella la hora, el día de
       semana o el día del mes según el patrón).
     """
@@ -342,6 +377,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "recur" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN recur TEXT")
         log.info("migración: events.recur agregada")
+    if "announced_at" not in cols:
+        # 2026-07-26: última ocurrencia ANUNCIADA por la tarea calendar (el
+        # calendario actúa siempre; esto garantiza una vez y solo una por
+        # ocurrencia). NULL = nunca anunciado.
+        conn.execute("ALTER TABLE events ADD COLUMN announced_at TEXT")
+        log.info("migración: events.announced_at agregada")
+    if "announce" not in cols:
+        # 2026-07-26: switch por evento — ¿la tarea calendar lo anuncia? Se fija
+        # al CREAR (según la política CALENDAR_ANNOUNCE + quién lo creó) y el
+        # admin lo togglea desde la UI. NULL = evento legado o creador bajo
+        # política 'groups': se decide a la hora de anunciar (gate viejo).
+        conn.execute("ALTER TABLE events ADD COLUMN announce INTEGER")
+        log.info("migración: events.announce agregada")
 
 
 # ─── Embeddings (bge-m3, lazy) ─────────────────────────────────────────────
@@ -820,9 +868,9 @@ def prefer_fresh_media(
 
 
 # ─── Events / calendario (T4) ──────────────────────────────────────────────
-# event_at se guarda en hora de Argentina (ISO 8601). Las queries usan por
-# default "ahora"/"hoy" en AR (UTC-3, sin DST); pasá `now`/`day` explícito para
-# testear o para otra zona.
+# event_at se guarda en hora LOCAL de la instancia (ISO 8601, naive — ver
+# LOCAL_TZ / settings TIMEZONE). Las queries usan por default "ahora"/"hoy" en
+# esa zona; pasá `now`/`day` explícito para testear.
 _EVENT_FIELDS = ("handle", "title", "description", "event_at", "kind", "source", "recur")
 
 
@@ -836,23 +884,36 @@ def create_event(
     kind: str = "other",
     source: str | None = None,
     recur: str | None = None,
+    announce: bool | None = None,
 ) -> int:
     """Crea un evento. Devuelve su id. handle=None → evento de comunidad.
 
-    `recur`: None (una vez) | 'daily' | 'weekly' | 'monthly'. En los recurrentes,
+    `recur`: None (una vez) | 'daily' | 'weekly' | 'monthly' | 'yearly'. En los recurrentes,
     event_at es la PRIMERA ocurrencia: fija la hora y — según el patrón — el día
     de semana o del mes. (bot_action recurrente no está soportado: el done es
     único por evento.)
+
+    `announce`: ¿la tarea calendar anuncia este evento? True/False lo fija el
+    creador (política CALENDAR_ANNOUNCE evaluada al crear; el admin lo togglea
+    después desde la UI). None = se decide a la hora de anunciar (gate viejo).
     """
-    if recur not in (None, "daily", "weekly", "monthly"):
+    if recur not in (None, "daily", "weekly", "monthly", "yearly"):
         raise ValueError(f"recur inválido: {recur!r}")
     cur = conn.execute(
-        "INSERT INTO events (handle, title, description, event_at, kind, source, recur) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (handle, title, description, event_at, kind, source, recur),
+        "INSERT INTO events (handle, title, description, event_at, kind, source, recur, announce) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (handle, title, description, event_at, kind, source, recur,
+         None if announce is None else int(announce)),
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def set_event_announce(conn: sqlite3.Connection, event_id: int, announce: bool) -> None:
+    """Prende/apaga el anuncio automático de un evento (switch del admin en la UI)."""
+    conn.execute("UPDATE events SET announce = ? WHERE id = ?",
+                 (int(announce), event_id))
+    conn.commit()
 
 
 def get_event(conn: sqlite3.Connection, event_id: int) -> dict | None:
@@ -907,7 +968,8 @@ def delete_event(conn: sqlite3.Connection, event_id: int) -> bool:
 def _next_occurrence(event_at: str, recur: str, now_dt: datetime) -> datetime | None:
     """Próxima ocurrencia (>= now) de un evento recurrente cuya primera vez fue
     `event_at`. daily = todos los días; weekly = mismo día de semana; monthly =
-    mismo día del mes (los meses sin ese día se saltean)."""
+    mismo día del mes (los meses sin ese día se saltean); yearly = misma fecha
+    cada año (29/2 solo en bisiestos)."""
     try:
         first = datetime.fromisoformat(event_at)
     except ValueError:
@@ -915,6 +977,15 @@ def _next_occurrence(event_at: str, recur: str, now_dt: datetime) -> datetime | 
     if first >= now_dt:
         return first
     t = first.time()
+    if recur == "yearly":
+        for y in range(now_dt.year, now_dt.year + 5):  # +5: cubre 29/2
+            try:
+                cand = datetime(y, first.month, first.day, t.hour, t.minute, t.second)
+            except ValueError:  # 29/2 en año no bisiesto
+                continue
+            if cand >= now_dt:
+                return cand
+        return None
     if recur == "daily":
         cand = datetime.combine(now_dt.date(), t)
         return cand if cand >= now_dt else cand + timedelta(days=1)
@@ -949,11 +1020,12 @@ def upcoming_events(
     `event_at` ya movido a esa ocurrencia; el campo `recur` distingue).
 
     Si `handle` se pasa → eventos de ese usuario + los de comunidad (handle IS NULL).
-    Si es None → todos. `now` default = ahora en AR (UTC-3).
+    Si es None → todos. `now` default = ahora en la zona local (LOCAL_TZ).
     """
-    now_expr = "datetime(replace(?,'T',' '))" if now is not None \
-        else "datetime('now','-3 hours')"
-    params: list[Any] = [now] if now is not None else []
+    if now is None:
+        now = local_now().isoformat(timespec="minutes")
+    now_expr = "datetime(replace(?,'T',' '))"
+    params: list[Any] = [now]
     # replace(): event_at ISO usa 'T', datetime() de SQLite usa espacio — sin
     # normalizar, la comparación de strings miente (ver due_bot_actions).
     where = [f"(datetime(replace(event_at,'T',' ')) >= {now_expr} OR recur IS NOT NULL)"]
@@ -964,10 +1036,7 @@ def upcoming_events(
         f"SELECT * FROM events WHERE {' AND '.join(where)} ORDER BY event_at ASC",
         tuple(params),
     ).fetchall()
-    if now is not None:
-        now_dt = datetime.fromisoformat(now)
-    else:
-        now_dt = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=3)
+    now_dt = datetime.fromisoformat(now)
     out: list[dict] = []
     for r in rows:
         ev = dict(r)
@@ -990,14 +1059,16 @@ def events_today(
     """Eventos cuyo event_at cae en `day` (YYYY-MM-DD) + los recurrentes cuya
     pauta matchea ese día (daily siempre; weekly mismo día de semana; monthly
     mismo día del mes — siempre desde su primera ocurrencia en adelante).
-    Default = hoy en AR."""
-    day_expr = "?" if day is not None else "date('now','-3 hours')"
-    params: list[Any] = [day] if day is not None else []
+    Default = hoy en la zona local (LOCAL_TZ)."""
+    if day is None:
+        day = local_now().date().isoformat()
+    day_expr = "?"
     hits = (f"(date(event_at) = {day_expr} OR (date(event_at) <= {day_expr} AND ("
             "(recur = 'daily') OR "
             f"(recur = 'weekly' AND strftime('%w', event_at) = strftime('%w', {day_expr})) OR "
-            f"(recur = 'monthly' AND strftime('%d', event_at) = strftime('%d', {day_expr})))))")
-    params = params * (4 if day is not None else 0)  # una copia por placeholder usado
+            f"(recur = 'monthly' AND strftime('%d', event_at) = strftime('%d', {day_expr})) OR "
+            f"(recur = 'yearly' AND strftime('%m-%d', event_at) = strftime('%m-%d', {day_expr})))))")
+    params: list[Any] = [day] * 5  # una copia por placeholder usado
     where = [hits]
     if handle is not None:
         where.append("(handle = ? OR handle IS NULL)")
@@ -1113,12 +1184,13 @@ def due_bot_actions(conn: sqlite3.Connection, *, now: str | None = None) -> list
     """Eventos-acción (kind='bot_action') vencidos y no cumplidos: event_at <= ahora.
 
     Son órdenes agendadas para el bot ("posteá X a tal hora"), no contexto: el
-    heartbeat las ejecuta en el primer pase después de la hora y las marca done.
-    `now` default = ahora en AR (UTC-3).
+    la tarea `actions` las ejecuta en el primer ciclo después de la hora y las
+    marca done. `now` default = ahora en la zona local (LOCAL_TZ).
     """
-    now_expr = "datetime(replace(?,'T',' '))" if now is not None \
-        else "datetime('now','-3 hours')"
-    params: tuple = (now,) if now is not None else ()
+    if now is None:
+        now = local_now().isoformat(timespec="minutes")
+    now_expr = "datetime(replace(?,'T',' '))"
+    params: tuple = (now,)
     # datetime(replace(...)) normaliza el separador: event_at se guarda ISO con 'T'
     # pero datetime('now') devuelve con espacio, y en comparación de strings
     # 'T' > ' ' haría que NINGÚN evento del día aparezca como vencido.
@@ -1133,6 +1205,60 @@ def due_bot_actions(conn: sqlite3.Connection, *, now: str | None = None) -> list
 def mark_event_done(conn: sqlite3.Connection, event_id: int) -> None:
     """Marca un evento-acción como cumplido (no se vuelve a ejecutar)."""
     conn.execute("UPDATE events SET done = 1 WHERE id = ?", (event_id,))
+    conn.commit()
+
+
+def due_calendar_announcements(conn: sqlite3.Connection, *, now: str | None = None,
+                               grace_hours: int = 24) -> list[dict]:
+    """Eventos comunes (kind != 'bot_action') cuya ocurrencia venció y NO fue
+    anunciada: el motor de "el calendario actúa SIEMPRE" (tarea calendar).
+
+    Para recurrentes se calcula la ocurrencia más reciente dentro de la ventana
+    de gracia. `grace_hours` acota lo perdido: si el bot estuvo caído más que
+    eso, el anuncio ya no tiene sentido y la ocurrencia se saltea (queda para
+    la próxima). Cada dict sale con `occurrence` (ISO) para marcarla anunciada.
+    """
+    now_dt = datetime.fromisoformat(now) if now is not None else local_now()
+    floor = now_dt - timedelta(hours=grace_hours)
+    rows = conn.execute("SELECT * FROM events WHERE kind != 'bot_action'").fetchall()
+    out: list[dict] = []
+    for r in rows:
+        ev = dict(r)
+        if ev.get("recur"):
+            # ocurrencia más RECIENTE dentro de [piso, ahora]: si hubiera varias
+            # vencidas en la ventana, la última es la que vale anunciar.
+            occ = _next_occurrence(ev["event_at"], ev["recur"], now_dt=floor)
+            while occ is not None and occ <= now_dt:
+                nxt = _next_occurrence(ev["event_at"], ev["recur"],
+                                       now_dt=occ + timedelta(minutes=1))
+                if nxt is None or nxt > now_dt:
+                    break
+                occ = nxt
+            if occ is None:
+                continue
+        else:
+            try:
+                occ = datetime.fromisoformat(ev["event_at"])
+            except ValueError:
+                continue
+            if occ < floor:
+                continue  # más viejo que la gracia: anunciar tarde ya no suma
+        if occ > now_dt:
+            continue  # todavía no venció
+        occ_iso = occ.isoformat(timespec="minutes" if occ.second == 0 else "seconds")
+        if ev.get("announced_at") and ev["announced_at"] >= occ_iso:
+            continue  # esta ocurrencia ya se anunció
+        ev["occurrence"] = occ_iso
+        out.append(ev)
+    out.sort(key=lambda e: e["occurrence"])
+    return out
+
+
+def mark_event_announced(conn: sqlite3.Connection, event_id: int,
+                         occurrence: str) -> None:
+    """Registra que la ocurrencia `occurrence` (ISO) ya fue anunciada."""
+    conn.execute("UPDATE events SET announced_at = ? WHERE id = ?",
+                 (occurrence, event_id))
     conn.commit()
 
 

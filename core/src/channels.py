@@ -10,7 +10,11 @@ en botata.py es la implementación original y de referencia):
     .get_thread_info(uri, cid) -> (context_text, root_uri, root_cid, leaf_media)
     .get_mention_by_uri(uri) -> dict | None   # + thread_context/thread_root_uri/cid
     .reply(text, parent_uri, parent_cid, root_uri, root_cid, media_path=None) -> uri
-    .post(text, limit=295, media_path=None) -> uri
+    .post(text, limit=295, media_path=None, target=None) -> uri
+                                              # target: destino opcional (rutinas con channel) —
+                                              # Discord = id de canal; Bluesky y
+                                              # Mastodon lo ignoran (un solo timeline)
+    .set_bio(text) -> bool                    # actualiza la bio del perfil del bot
     .get_profile(handle) -> obj(.did, .display_name, .description) | None
     .block_user(handle) -> bool
     .set_media_describer(fn) -> None          # vision inyectada (puede ignorarse)
@@ -19,16 +23,23 @@ en botata.py es la implementación original y de referencia):
     .get_list_members(uri) -> list[str] · .get_follows() -> list[str]
 
 Identificadores: cada canal usa los suyos (Bluesky: at:// URIs + cid; Mastodon:
-ids de status). El resto del sistema los trata como strings opacos — la DB
-(`replied_posts`, `bot_posts`) ya es agnóstica. En Mastodon `cid` == id del
-status (no existe el concepto; se duplica para no tocar el grafo).
+ids de status; Discord: "channel_id/message_id" — la reply necesita el canal).
+El resto del sistema los trata como strings opacos — la DB (`replied_posts`,
+`bot_posts`) ya es agnóstica. En Mastodon `cid` == id del status; en Discord
+`cid` == message_id (el concepto no existe; se duplica para no tocar el grafo).
 
 MastodonChannel usa Mastodon.py (import lazy: los deploys Bluesky no lo pagan).
+DiscordChannel usa la API REST v10 por httpx (ya es dep del motor) — SIN
+discord.py ni gateway: el poll loop del bot ya marca la cadencia, y el dedup
+vive en la DB, así que releer los últimos mensajes por canal es inocuo.
 """
 from __future__ import annotations
 
+import json
 import logging
+import mimetypes
 import re
+import time
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
@@ -187,7 +198,10 @@ class MastodonChannel:
                                        media_ids=media_ids)
         return str(status["id"])
 
-    def post(self, text: str, limit: int = 295, media_path: str | None = None) -> str:
+    def post(self, text: str, limit: int = 295, media_path: str | None = None,
+             target: str | None = None) -> str:
+        if target:
+            log.debug("post: Mastodon no tiene canales — target %r ignorado", target)
         text = truncate_post(text, limit)
         media_ids = self._upload_media(media_path) if media_path else None
         status = self._api.status_post(text, media_ids=media_ids)
@@ -201,6 +215,15 @@ class MastodonChannel:
             log.warning("upload de media falló (%s): %s — posteo sin media",
                         Path(media_path).name, e)
             return None
+
+    def set_bio(self, text: str) -> bool:
+        """Actualiza la bio (note) de la cuenta del bot. True si OK."""
+        try:
+            self._api.account_update_credentials(note=text)
+            return True
+        except Exception as e:
+            log.error("set_bio (Mastodon): %s", e)
+            return False
 
     def get_profile(self, handle: str):
         account = self._lookup_account(handle)
@@ -289,3 +312,306 @@ class MastodonChannel:
         except Exception as e:
             log.warning("account_following falló: %s", e)
             return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+_USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+_CHAN_MENTION_RE = re.compile(r"<#(\d+)>")
+_ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
+
+
+class DiscordChannel:
+    """Canal Discord por REST v10 (httpx, sin discord.py ni gateway).
+
+    Modelo: el bot escucha una lista fija de canales (`channel_ids`, settings
+    `DISCORD_CHANNEL_IDS`). "Mención" = mensaje que @menciona al bot o que
+    responde (reply) a un mensaje del bot. El resto de los mensajes se ignora.
+
+    Diferencias absorbidas acá (el grafo no se entera):
+    - Push vs poll: no hay endpoint de notificaciones — se releen los últimos
+      25 mensajes por canal en cada poll y el dedup lo hace la DB (has_replied),
+      igual que Mastodon relee notificaciones.
+    - uri = "channel_id/message_id" (postear una reply exige el canal);
+      cid = message_id.
+    - Hilo: se reconstruye subiendo por message_reference (cadena de replies),
+      no existe el thread à la Bluesky.
+    - Menciones en el content vienen como <@id> → se traducen a @username con
+      el array `mentions` del mensaje.
+    - Sin bios para bots ni bloqueo de usuarios: get_profile devuelve
+      description vacía (con cache de usuarios vistos), block_user es no-op.
+    - Los mensajes de otros bots se ignoran (anti-loop).
+    - Media: attachments anotados por filename/content_type (sin alt-text).
+    - Límite 2000 chars (los callers pasan ≤300, entra sobrado).
+    """
+
+    API = "https://discord.com/api/v10"
+    HISTORY_LIMIT = 25   # mensajes por canal y por poll (dedup por DB)
+    THREAD_HOPS = 12     # tope de la cadena de replies al reconstruir contexto
+
+    def __init__(self, bot_token: str, channel_ids: list[str], http=None):
+        if http is None:
+            import httpx  # lazy: simetría con los otros canales
+            http = httpx.Client(
+                base_url=self.API,
+                headers={"Authorization": f"Bot {bot_token}"},
+                timeout=30,
+            )
+        self._http = http
+        self._channel_ids = [str(c) for c in channel_ids]
+        self._users: dict[str, dict] = {}  # username → user visto en mensajes
+        me = self._get("/users/@me")
+        self._me_id = str(me["id"])
+        self.handle = me["username"]
+        log.info("Logged in to Discord as @%s (escuchando %d canal(es))",
+                 self.handle, len(self._channel_ids))
+
+    # ── HTTP helpers (retry simple ante 429) ─────────────────────────────
+    def _request(self, method: str, path: str, **kw):
+        for attempt in (1, 2):
+            resp = self._http.request(method, path, **kw)
+            if resp.status_code == 429 and attempt == 1:
+                wait = float(resp.headers.get("Retry-After", "1"))
+                log.warning("Discord 429 en %s — espero %.1fs", path, wait)
+                time.sleep(min(wait, 10))
+                continue
+            resp.raise_for_status()
+            return resp.json() if resp.status_code != 204 else None
+        return None
+
+    def _get(self, path: str, **params):
+        return self._request("GET", path, params=params or None)
+
+    # ── mapeo mensaje → dict del grafo ───────────────────────────────────
+    def _remember_users(self, msg: dict) -> None:
+        for u in [msg.get("author") or {}, *(msg.get("mentions") or [])]:
+            if u.get("username"):
+                self._users[u["username"].lower()] = u
+
+    def _msg_text(self, msg: dict) -> str:
+        """content → texto plano: <@id> → @username, <#id>/<@&id> se limpian."""
+        by_id = {str(u["id"]): u for u in msg.get("mentions") or []}
+        if msg.get("author"):
+            by_id.setdefault(str(msg["author"]["id"]), msg["author"])
+
+        def _user(m):
+            u = by_id.get(m.group(1))
+            return f"@{u['username']}" if u else "@?"
+
+        text = _USER_MENTION_RE.sub(_user, msg.get("content") or "")
+        text = _CHAN_MENTION_RE.sub("#canal", text)
+        text = _ROLE_MENTION_RE.sub("", text)
+        return text.strip()
+
+    @staticmethod
+    def _media_note(msg: dict) -> str:
+        pieces = []
+        for att in msg.get("attachments") or []:
+            kind = (att.get("content_type") or "file").split("/")[0]
+            name = att.get("filename") or ""
+            pieces.append(f"[{kind}: {name}]" if name else f"[{kind}]")
+        return " ".join(pieces)
+
+    def _full_text(self, msg: dict) -> str:
+        text = self._msg_text(msg)
+        media = self._media_note(msg)
+        return f"{text} {media}".strip() if media else text
+
+    def _is_for_me(self, msg: dict) -> bool:
+        if str((msg.get("author") or {}).get("id")) == self._me_id:
+            return False
+        if (msg.get("author") or {}).get("bot"):
+            return False  # anti-loop entre bots
+        if any(str(u["id"]) == self._me_id for u in msg.get("mentions") or []):
+            return True
+        ref = msg.get("referenced_message")
+        return bool(ref and str((ref.get("author") or {}).get("id")) == self._me_id)
+
+    def _to_mention(self, channel_id: str, msg: dict) -> dict:
+        self._remember_users(msg)
+        return {
+            "uri"           : f"{channel_id}/{msg['id']}",
+            "cid"           : str(msg["id"]),
+            "author_handle" : msg["author"]["username"],
+            "text"          : self._msg_text(msg),
+        }
+
+    # ── contrato Channel ─────────────────────────────────────────────────
+    def get_mentions(self) -> list[dict]:
+        mentions = []
+        for ch in self._channel_ids:
+            try:
+                msgs = self._get(f"/channels/{ch}/messages", limit=self.HISTORY_LIMIT)
+            except Exception as e:
+                log.error("messages de canal %s falló: %s", ch, e)
+                continue
+            for msg in msgs or []:
+                if self._is_for_me(msg):
+                    mentions.append(self._to_mention(ch, msg))
+        return mentions
+
+    def mark_all_read(self) -> None:
+        pass  # no existe el concepto; dedup por DB
+
+    def _fetch_message(self, channel_id: str, message_id: str) -> dict | None:
+        try:
+            msg = self._get(f"/channels/{channel_id}/messages/{message_id}")
+            if msg:
+                self._remember_users(msg)
+            return msg
+        except Exception as e:
+            log.warning("fetch de %s/%s falló: %s", channel_id, message_id, e)
+            return None
+
+    def get_thread_info(self, uri: str, cid: str) -> tuple[str, str, str, str]:
+        channel_id, _, message_id = uri.partition("/")
+        leaf = self._fetch_message(channel_id, message_id)
+        if leaf is None:
+            return "", uri, cid, ""
+        # subir por la cadena de replies (message_reference) hasta la raíz
+        chain, msg = [], leaf
+        for _ in range(self.THREAD_HOPS):
+            ref = (msg.get("message_reference") or {}).get("message_id")
+            if not ref:
+                break
+            parent = msg.get("referenced_message") or self._fetch_message(channel_id, str(ref))
+            if parent is None:
+                break
+            chain.append(parent)
+            msg = parent
+        chain.reverse()  # raíz primero
+        lines = [f"{m['author']['username']}: {self._full_text(m)}" for m in chain]
+        root = chain[0] if chain else leaf
+        root_uri = f"{channel_id}/{root['id']}"
+        return "\n".join(lines), root_uri, str(root["id"]), self._media_note(leaf)
+
+    def get_mention_by_uri(self, uri: str) -> dict | None:
+        channel_id, _, message_id = uri.partition("/")
+        msg = self._fetch_message(channel_id, message_id)
+        if msg is None:
+            return None
+        context, root_uri, root_cid, _ = self.get_thread_info(uri, str(msg["id"]))
+        out = self._to_mention(channel_id, msg)
+        out["text"] = self._full_text(msg)
+        out.update(thread_context=context, thread_root_uri=root_uri,
+                   thread_root_cid=root_cid)
+        return out
+
+    def reply(self, text: str, parent_uri: str, parent_cid: str,
+              root_uri: str, root_cid: str, media_path: str | None = None) -> str:
+        channel_id, _, message_id = parent_uri.partition("/")
+        payload = {
+            "content": text[:2000],
+            "message_reference": {"message_id": message_id,
+                                  "fail_if_not_exists": False},
+        }
+        msg = self._post_message(channel_id, payload, media_path)
+        return f"{channel_id}/{msg['id']}"
+
+    def post(self, text: str, limit: int = 295, media_path: str | None = None,
+             target: str | None = None) -> str:
+        """Sin target → canal principal (el primero); con target (rutinas) → ese canal."""
+        channel_id = str(target) if target else \
+            (self._channel_ids[0] if self._channel_ids else None)
+        if not channel_id:
+            raise RuntimeError("DISCORD_CHANNEL_IDS vacío: no hay canal donde postear")
+        payload = {"content": truncate_post(text, limit)}
+        msg = self._post_message(channel_id, payload, media_path)
+        return f"{channel_id}/{msg['id']}"
+
+    def _post_message(self, channel_id: str, payload: dict,
+                      media_path: str | None) -> dict:
+        path = f"/channels/{channel_id}/messages"
+        if media_path:
+            p = Path(media_path)
+            try:
+                mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+                files = {"files[0]": (p.name, p.read_bytes(), mime)}
+                return self._request("POST", path, files=files,
+                                     data={"payload_json": json.dumps(payload)})
+            except OSError as e:
+                log.warning("upload de media falló (%s): %s — posteo sin media",
+                            p.name, e)
+        return self._request("POST", path, json=payload)
+
+    def set_bio(self, text: str) -> bool:
+        """Actualiza el "About Me" del bot (description de la application):
+        único campo tipo bio que la API REST le deja tocar a un bot."""
+        try:
+            self._request("PATCH", "/applications/@me", json={"description": text})
+            return True
+        except Exception as e:
+            log.error("set_bio (Discord): %s", e)
+            return False
+
+    def get_profile(self, handle: str):
+        u = self._users.get(handle.lstrip("@").lower())
+        if u is None:
+            return None  # sin lookup global por username en la API de bots
+        return SimpleNamespace(
+            did=str(u["id"]),
+            display_name=u.get("global_name") or None,
+            description="",  # Discord no expone bios a los bots
+        )
+
+    def resolve_did(self, handle: str) -> str | None:
+        u = self._users.get(handle.lstrip("@").lower())
+        return str(u["id"]) if u else None
+
+    def block_user(self, handle: str) -> bool:
+        log.warning("block_user: Discord no tiene bloqueo de usuarios para bots "
+                    "(moderación = permisos del server); @%s queda sin bloquear", handle)
+        return False
+
+    def set_media_describer(self, fn) -> None:
+        # Vision sobre attachments: pendiente; se anota filename/content_type.
+        log.debug("set_media_describer: DiscordChannel anota attachments (vision pendiente)")
+
+    # ── fuentes de feed (loop proactivo) ─────────────────────────────────
+    def get_feed_posts(self, source_type: str, identifier: str | None,
+                       since: datetime | None, limit: int = 50) -> list[dict]:
+        """`channel` → mensajes recientes de un canal por id (o del principal)."""
+        if source_type != "channel":
+            log.warning("fuente de feed no soportada en Discord: %s", source_type)
+            return []
+        channel_id = str(identifier) if identifier else \
+            (self._channel_ids[0] if self._channel_ids else None)
+        if not channel_id:
+            return []
+        try:
+            msgs = self._get(f"/channels/{channel_id}/messages",
+                             limit=min(limit, 100))
+        except Exception as e:
+            log.error("feed del canal %s falló: %s", channel_id, e)
+            return []
+        posts = []
+        for msg in msgs or []:  # vienen en orden reverso-cronológico
+            created = msg.get("timestamp")
+            created_dt = datetime.fromisoformat(created) if created else None
+            if created_dt and created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            if since and created_dt and created_dt <= since:
+                break
+            if (msg.get("author") or {}).get("bot"):
+                continue
+            text = self._msg_text(msg)
+            if not text:
+                continue
+            self._remember_users(msg)
+            ref = (msg.get("message_reference") or {}).get("message_id")
+            posts.append({
+                "handle"     : msg["author"]["username"],
+                "text"       : text,
+                "uri"        : f"{channel_id}/{msg['id']}",
+                "indexed_at" : created or "",
+                "reply_to"   : f"{channel_id}/{ref}" if ref else None,
+            })
+        log.info("canal %s: %d posts", channel_id, len(posts))
+        return posts
+
+    def get_list_members(self, list_id: str) -> list[str]:
+        log.warning("get_list_members: Discord no tiene listas (usar USER_GROUPS)")
+        return []
+
+    def get_follows(self) -> list[str]:
+        log.warning("get_follows: Discord no tiene follows (usar USER_GROUPS)")
+        return []

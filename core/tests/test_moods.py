@@ -1,4 +1,4 @@
-"""Tests del sistema de moods (estados de ánimo del bot).
+﻿"""Tests del sistema de moods (estados de ánimo del bot).
 
 El pase auto (`run_mood_pass`) va con un router mockeado (sin red ni LLM). El foco
 es la resolución (`current_mood`) en los 4 modos, la idempotencia por día, el
@@ -79,7 +79,7 @@ def test_manual_fixed_nonexistent(conn):
 
 
 def test_manual_schedule_today(conn):
-    key = b._WEEKDAY_KEYS[b.now_ar().weekday()]
+    key = b._WEEKDAY_KEYS[b.now_local().weekday()]
     b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"schedule": {key: "gloomy"}}}
     m = b.current_mood(conn)
     assert m and m.name == "gloomy"
@@ -91,7 +91,7 @@ def test_manual_schedule_unmapped_day(conn):
 
 
 def test_manual_fixed_beats_schedule(conn):
-    key = b._WEEKDAY_KEYS[b.now_ar().weekday()]
+    key = b._WEEKDAY_KEYS[b.now_local().weekday()]
     b.MOODS_CONFIG = {"enabled": True, "mode": "manual",
                       "manual": {"fixed": "upbeat", "schedule": {key: "gloomy"}}}
     assert b.current_mood(conn).name == "upbeat"

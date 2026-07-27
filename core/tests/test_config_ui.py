@@ -65,6 +65,9 @@ def test_settings_valido_pasa():
     (lambda s: s["TOOLS"]["web_search"].update(groups=["fantasma"]), "desconocido"),
     (lambda s: s["TOOLS"]["web_search"].update(groups="music_users"), "lista"),
     (lambda s: s.update(USER_GROUPS={"g": ["feed:fantasma"]}), "no matchea"),
+    (lambda s: s.update(BOT_ACTIONS_FROM="banana"), "BOT_ACTIONS_FROM"),
+    (lambda s: s.update(READ_THREAD_MEDIA="si"), "READ_THREAD_MEDIA"),
+    (lambda s: s.update(TIMEZONE="Zona/Inexistente"), "TIMEZONE"),
 ])
 def test_settings_invalido_falla(mutacion, fragmento):
     s = json.loads(json.dumps(_SETTINGS))
@@ -236,6 +239,224 @@ def test_data_validaciones(store):
     assert store.edit_events({"action": "add", "title": "x", "event_at": "2099-01-01",
                               "handle": "nadie.test"}) != []  # sin perfil → error claro
     assert store.edit_memory({"action": "delete", "id": 999}) == ["id inexistente"]
+
+
+def test_event_edit_fecha_y_recurrencia(store):
+    assert store.edit_events({"action": "add", "title": "juntada",
+                              "event_at": "2099-01-01T21:00"}) == []
+    ev = store.read_data()["events"][0]
+    assert store.edit_events({"action": "edit", "id": ev["id"],
+                              "event_at": "2099-01-02T22:30", "recur": "weekly"}) == []
+    ev2 = store.read_data()["events"][0]
+    assert ev2["event_at"] == "2099-01-02T22:30" and ev2["recur"] == "weekly"
+    # sacar la recurrencia (vuelve a "una sola vez")
+    assert store.edit_events({"action": "edit", "id": ev["id"],
+                              "event_at": "2099-01-02T22:30", "recur": ""}) == []
+    assert store.read_data()["events"][0]["recur"] is None
+    # validaciones
+    assert store.edit_events({"action": "edit", "id": 999,
+                              "event_at": "2099-01-01T10:00"}) == ["id inexistente"]
+    assert store.edit_events({"action": "edit", "id": ev["id"],
+                              "event_at": "mañana"}) != []
+    assert store.edit_events({"action": "edit", "id": ev["id"],
+                              "event_at": "2099-01-01T10:00", "recur": "cada tanto"}) != []
+
+
+# ─── Importar calendario (CSV / ICS) ──────────────────────────────────────────
+_CSV_IMPORT = """fecha,titulo,descripcion,tipo,de_quien,repeticion
+2099-08-15,Cumple de Ana,,birthday,ana.test,anual
+2099-08-01T21:00,Juntada,en el bar,community,,mensual
+2099-09-01,Tipo raro,,fiesta,,
+banana,Fecha rota,,,,
+"""
+
+
+def test_import_csv_preview_y_confirmacion(store):
+    import db as dbmod
+    conn = dbmod.init_db(store.db_path)
+    conn.execute("INSERT INTO users(handle) VALUES ('ana.test')")
+    conn.commit()
+    conn.close()
+
+    prev = store.import_events({"text": _CSV_IMPORT, "dry_run": True})
+    assert prev["ok"] and prev["dry_run"]
+    estados = {r["titulo"]: r["estado"] for r in prev["rows"]}
+    assert estados == {"Cumple de Ana": "ok", "Juntada": "ok",
+                       "Tipo raro": "error", "Fecha rota": "error"}
+    assert prev["importables"] == 2 and prev["importados"] == 0
+    assert store.read_data()["events"] == []  # la vista previa no escribe
+
+    real = store.import_events({"text": _CSV_IMPORT, "dry_run": False})
+    assert real["importados"] == 2
+    evs = {e["title"]: e for e in store.read_data()["events"]}
+    assert evs["Cumple de Ana"]["recur"] == "yearly"    # alias 'anual'
+    assert evs["Cumple de Ana"]["handle"] == "ana.test"
+    assert evs["Juntada"]["recur"] == "monthly"
+    # reimportar → duplicados, no re-inserta
+    again = store.import_events({"text": _CSV_IMPORT, "dry_run": False})
+    assert again["importados"] == 0
+    assert sum(1 for r in again["rows"] if r["estado"] == "duplicado") == 2
+
+
+def test_import_csv_punto_y_coma_y_vacio(store):
+    assert store.import_events({"text": ""})["ok"] is False
+    out = store.import_events({"text": "fecha;titulo\n2099-01-01;Año nuevo",
+                               "dry_run": False})
+    assert out["importados"] == 1
+    assert store.import_events({"text": "cualquier,cosa\n1,2"})["ok"] is False  # sin fecha/titulo
+
+
+def test_import_ics(store):
+    ics = "\r\n".join([
+        "BEGIN:VCALENDAR", "VERSION:2.0",
+        "BEGIN:VEVENT",
+        "DTSTART;VALUE=DATE:20990815",
+        "SUMMARY:Cumple de Ana",
+        "RRULE:FREQ=YEARLY",
+        "END:VEVENT",
+        "BEGIN:VEVENT",
+        "DTSTART:20990801T210000Z",
+        "SUMMARY:Juntada\\, la de siempre",
+        "DESCRIPTION:linea uno\\nlinea dos",
+        "END:VEVENT",
+        "BEGIN:VEVENT",
+        "DTSTART:20990901T120000",
+        "SUMMARY:Regla rara",
+        "RRULE:FREQ=WEEKLY;BYDAY=MO,TU",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ])
+    out = store.import_events({"text": ics, "dry_run": False})
+    estados = {r["titulo"]: r["estado"] for r in out["rows"]}
+    assert estados["Cumple de Ana"] == "ok"
+    assert estados["Juntada, la de siempre"] == "ok"   # coma des-escapada
+    assert estados["Regla rara"] == "error"            # RRULE compuesta
+    evs = {e["title"]: e for e in store.read_data()["events"]}
+    assert evs["Cumple de Ana"]["recur"] == "yearly"
+    assert evs["Juntada, la de siempre"]["event_at"] == "2099-08-01T18:00"  # Z → AR
+
+
+# ─── Memoria por usuario (visor + borrado con limpieza de embeddings) ─────────
+def test_user_memory_viewer_y_borrado(store):
+    import numpy as np
+    import db as dbmod
+    conn = dbmod.init_db(store.db_path)
+    emb = np.zeros(dbmod.EMBED_DIM, dtype=np.float32).tobytes()
+    conn.execute("INSERT INTO users(handle, display_name) VALUES ('ana.test', 'Ana')")
+    conn.execute("INSERT INTO user_facts(id, handle, fact_text) "
+                 "VALUES (1, 'ana.test', 'le gustan los gatos')")
+    conn.execute("INSERT INTO user_facts_vec(rowid, embedding, partition_key) "
+                 "VALUES (1, ?, 'ana.test')", (emb,))
+    conn.execute("INSERT INTO interactions(handle, summary) "
+                 "VALUES ('ana.test', 'charla de prueba')")
+    conn.execute("INSERT INTO lessons(id, lesson_text) VALUES (7, 'lección x')")
+    conn.execute("INSERT INTO lessons_vec(rowid, embedding) VALUES (7, ?)", (emb,))
+    conn.commit()
+    conn.close()
+
+    over = store.read_user_memory()
+    assert over["users"][0]["handle"] == "ana.test"
+    assert over["users"][0]["facts"] == 1
+    assert [x["id"] for x in over["lessons"]] == [7]
+
+    d = store.read_user_memory("@Ana.Test")  # normaliza @ y mayúsculas
+    assert d["facts"][0]["fact_text"] == "le gustan los gatos"
+    assert d["interactions"][0]["summary"] == "charla de prueba"
+
+    assert store.delete_user_memory({"kind": "fact", "id": 1}) == []
+    assert store.delete_user_memory({"kind": "lesson", "id": 7}) == []
+    assert store.delete_user_memory({"kind": "fact", "id": 99}) == ["id inexistente"]
+    assert store.delete_user_memory({"kind": "banana", "id": 1}) != []
+    assert store.delete_user_memory({"kind": "fact", "id": "x"}) != []
+
+    conn = dbmod.init_db(store.db_path)
+    for tabla in ("user_facts", "user_facts_vec", "lessons", "lessons_vec"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0] == 0, tabla
+    conn.close()
+
+
+def test_behavior_file_editor(store):
+    """Editor de skills/rooms de la UI: crear/leer/borrar con validación de
+    frontmatter y sin traversal."""
+    skill_md = "---\nname: lore\ndescription: lore de la comunidad\n---\nel lore\n"
+    assert store.edit_behavior_file(
+        {"kind": "skill", "action": "save", "file": "lore.md", "text": skill_md})["ok"]
+    got = store.edit_behavior_file({"kind": "skill", "action": "get", "file": "lore.md"})
+    assert got["ok"] and "el lore" in got["text"]
+    assert any(s["name"] == "lore" for s in store._skills_info())
+    # validaciones de skill
+    for text in ("sin frontmatter",
+                 "---\nname: x\n---\ncuerpo",             # falta description
+                 "---\nname: x\ndescription: d\n---\n "):  # cuerpo vacío
+        assert not store.edit_behavior_file(
+            {"kind": "skill", "action": "save", "file": "x.md", "text": text})["ok"]
+    # nombres/kind inválidos (anti-traversal incluido)
+    for body in ({"kind": "banana", "action": "get", "file": "x.md"},
+                 {"kind": "skill", "action": "get", "file": "../evil.md"},
+                 {"kind": "skill", "action": "get", "file": "sub/x.md"},
+                 {"kind": "skill", "action": "get", "file": "README.md"},
+                 {"kind": "skill", "action": "banana", "file": "lore.md"}):
+        assert not store.edit_behavior_file(body)["ok"]
+    # routine: channel opcional (si está, numérico) e interval numérico
+    rt_md = "---\nchannel: 123\ninterval_hours: 1\nenabled: true\n---\nmemes acá\n"
+    assert store.edit_behavior_file(
+        {"kind": "routine", "action": "save", "file": "memes.md", "text": rt_md})["ok"]
+    rt_sin_canal = "---\ninterval_hours: 4\n---\nposteá algo al feed\n"
+    assert store.edit_behavior_file(
+        {"kind": "routine", "action": "save", "file": "general.md", "text": rt_sin_canal})["ok"]
+    info = store._routines_info()
+    assert {i["name"] for i in info} >= {"memes", "general"}
+    memes = next(i for i in info if i["name"] == "memes")
+    assert memes["channel"] == "123" and memes["enabled"]
+    assert next(i for i in info if i["name"] == "general")["channel"] == ""
+    for text in ("---\nchannel: no-numerico\n---\nx\n",
+                 "---\nchannel: 123\ninterval_hours: banana\n---\nx\n"):
+        assert not store.edit_behavior_file(
+            {"kind": "routine", "action": "save", "file": "memes.md", "text": text})["ok"]
+    # kind viejo "room" ya no existe
+    assert not store.edit_behavior_file(
+        {"kind": "room", "action": "save", "file": "memes.md", "text": rt_md})["ok"]
+    # delete
+    assert store.edit_behavior_file({"kind": "routine", "action": "delete", "file": "memes.md"})["ok"]
+    assert store.edit_behavior_file({"kind": "routine", "action": "delete", "file": "general.md"})["ok"]
+    assert not store.edit_behavior_file({"kind": "routine", "action": "get", "file": "memes.md"})["ok"]
+    assert store._routines_info() == []
+
+
+def test_user_memory_alta_manual(store, monkeypatch):
+    """Alta desde la UI: usa los upserts reales (dedup incluido) con embed mockeado
+    (no cargar bge-m3 en tests)."""
+    import numpy as np
+    import db as dbmod
+    # ones, no zeros: la distancia coseno contra el vector nulo es indefinida (NULL)
+    monkeypatch.setattr(dbmod, "embed",
+                        lambda text: np.ones(dbmod.EMBED_DIM, dtype=np.float32).tobytes())
+    conn = dbmod.init_db(store.db_path)
+    conn.execute("INSERT INTO users(handle) VALUES ('ana.test')")
+    conn.commit()
+    conn.close()
+
+    assert store.add_user_memory({"kind": "fact", "handle": "@Ana.Test",
+                                  "text": "vive en Rosario"}) == []
+    # dedup semántico: el mismo embedding (mock) → equivalente → rechazado
+    assert store.add_user_memory({"kind": "fact", "handle": "ana.test",
+                                  "text": "vive en Rosario"}) != []
+    assert store.add_user_memory({"kind": "lesson",
+                                  "text": "respuestas cortas funcionan"}) == []
+    # validaciones
+    assert store.add_user_memory({"kind": "fact", "text": "sin handle"}) != []
+    assert store.add_user_memory({"kind": "fact", "handle": "nadie.test",
+                                  "text": "x"}) != []       # usuario sin perfil
+    assert store.add_user_memory({"kind": "interaction", "text": "x"}) != []
+    assert store.add_user_memory({"kind": "lesson", "text": "  "}) != []
+    assert store.add_user_memory({"kind": "lesson", "text": "y",
+                                  "scope": "banana"}) != []  # scope inválido
+
+    conn = dbmod.init_db(store.db_path)
+    assert conn.execute("SELECT fact_text FROM user_facts").fetchall()[0][0] == "vive en Rosario"
+    assert conn.execute("SELECT COUNT(*) FROM user_facts_vec").fetchone()[0] == 1
+    assert conn.execute("SELECT scope FROM lessons").fetchone()[0] == "community"
+    conn.close()
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ class FakeLLM:
         self.calls = calls
 
     def call_with_tools(self, system, user, tools):
+        self.last_system = system
         return "", self.calls
 
 
@@ -89,3 +90,21 @@ def test_una_sola_tool_sigue_igual():
     executed = []
     out = _run([FakeCall("add_music_recommendation", {"query": "tema1"})], executed)
     assert out["reply_text"] == "agregué tema1"
+
+
+def test_rutinas_actuales_entran_al_contexto(tmp_path, monkeypatch):
+    """"Dejá de postear memes" tiene que resolverse a la rutina correcta por lo
+    que HACE: la lista de rutinas (apagadas incluidas) entra al system prompt."""
+    rd = tmp_path / "routines"
+    rd.mkdir()
+    (rd / "shitposting.md").write_text(
+        "---\ninterval_hours: 4\n---\nposteá un meme, no repitas\n", encoding="utf-8")
+    (rd / "apagada.md").write_text(
+        "---\ninterval_hours: 2\nenabled: false\n---\ncompartí una canción\n", encoding="utf-8")
+    monkeypatch.setattr(b, "ROUTINES_DIR", rd)
+    llm = FakeLLM([FakeCall("add_music_recommendation", {"query": "x"})])
+    node = b.HandleAdminCommandNode(llm, conn=None, registry=_registry([]))
+    node.run(dict(_STATE))
+    assert "RUTINAS ACTUALES" in llm.last_system
+    assert "shitposting" in llm.last_system and "posteá un meme" in llm.last_system
+    assert "apagada (OFF)" in llm.last_system  # las deshabilitadas también se ven

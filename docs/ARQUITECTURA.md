@@ -372,23 +372,29 @@ Tareas registradas:
 | `feed` | grafo proactivo por cada feed configurado | on |
 | `news` | RSS de noticias por fuente (`mode: comment\|post`, dedup `posted_news`) | on (pero `NEWS_ENABLED:false` manda) |
 | `mentions` | poll + proceso de menciones | on |
-| `heartbeat` | pase de calendario agéntico | **off**, 12h |
+| `routines` | TODA la conducta proactiva con cadencia (rutinas en `routines/*.md`) | on, cada ciclo |
 
-**Heartbeat**: lee `events_today` + `upcoming_events` + instrucciones en dos capas:
-`prompts/heartbeat_checklist.md` (default versionado, editable a mano — el mecanismo principal) y
-`context/heartbeat_override.md` (override runtime que escribe el comando `set_heartbeat` — auxiliar,
-lo pisa temporalmente; borrarlo vuelve al default). Sin eventos NI instrucciones en ninguna
-capa, no llama al LLM (costo cero). Con material, compone SOUL + fecha + `heartbeat_engine.md`
-+ skills + instrucciones + eventos + posts recientes, y decide con `FeedDecision`. Imágenes
-autónomas (T12): si hay catálogo, ofrece `image_query` y adjunta vía `resolve_catalog_image`
-(mismo guardrail que el feed); toggle `TASKS.heartbeat.autonomous_images`, default **true**
-(las instrucciones del heartbeat ya son del admin, a diferencia de los feeds opt-in). Reparto
-estilo OpenClaw (un archivo = un rol): `heartbeat_engine.md` = SOLO invariantes del pase
-(regla dura anti-alucinación de eventos, **jamás** eventos personales no celebrables,
-anti-spam, callar es digno, formato); las tareas viven en la checklist `prompts/heartbeat_checklist.md`
-(ítem 1 hoy: calendario) — editarla reemplaza la conducta de verdad, sin criterio duplicado
-en el marco.
-Verificado en vivo: saluda una vez y a la pasada siguiente se niega a repetirse.
+**Rutinas (2026-07-26, unifica el ex-heartbeat y los ex-rooms)**: una rutina = un
+archivo `routines/*.md` de la instancia — frontmatter `interval_hours` (cadencia
+determinística por cursor `routine:{name}`; el timing JAMÁS se delega al LLM, lección
+T4d) + `channel` opcional (Discord) + `enabled`; el cuerpo es prompt libre (qué hacer
+y con qué actitud), releído por pase → edición en caliente. El pase compone SOUL +
+fecha + mood + memoria + prefs + `routines_engine.md` (invariantes: anti-alucinación
+de eventos, anti-spam, callar es digno, formato) + skills + el cuerpo de la rutina +
+eventos como contexto (con filtro anti-bypass: los vencidos salen — anunciar es de la
+tarea `calendar`) + posts recientes, y decide con `FeedDecision` (puede callarse: la
+cadencia es "como máximo cada X horas"). Imágenes autónomas si hay catálogo. Sin
+`channel` postea al feed principal con dedup global; con `channel` postea EN ese canal
+(`post(target=)`), ve los últimos mensajes del canal como contexto, dedupea por canal
+(`recent_bot_posts(uri_prefix)`) y su cuerpo además MATIZA las replies de ese canal
+(registro debajo de SOUL + mood — nunca reemplaza la identidad, misma relación que
+moods↔SOUL). `interval_hours: 0` con channel = rutina solo-actitud. Los canales con
+rutina se escuchan solos (merge en `build_channel`; rutina nueva → reiniciar para
+escuchar; el posteo proactivo anda sin reiniciar). El admin las administra por
+comando con **`set_routine`** (crea/modifica: instructions/interval/channel/enabled,
+update parcial conserva lo no pasado) y **`delete_routine`** — scope `admin`
+estricto (el lock global impide promoverlas a scopes públicos por post; la vieja
+`set_heartbeat` se eliminó). También editables desde la UI (sección ⏰ Rutinas).
 
 ## 12. BskyClient (la capa de plataforma)
 
@@ -440,7 +446,7 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 ## 15. Operación
 
 - **Entrypoints CLI**: `python -m botata` (loop completo; `--mode open|admin_only`) ·
-  `--proactive [--force-post]` (pase de feed one-shot) · `--news` · `--heartbeat` ·
+  `--proactive [--force-post]` (pase de feed one-shot) · `--news` · `--routines` ·
   `--fetch-feeds [--backfill]` · `--post-summary <feed>`. Satélites: `mem_admin.py`,
   `catalog.py`, `scrape_ig.py`, `migrate_maripobot.py`.
 - **Panel de configuración** (`python config_ui.py`, T22): UI web solo-localhost (stdlib,
@@ -490,4 +496,4 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
   `--post-summary`); candidato a borrarse cuando esos caminos se porten.
 - **Validaciones en vivo pendientes**: T10 `/blockme` y T11 `/resetme` nunca se ejecutaron
   contra prod (necesitan cuenta descartable). Toggles apagados esperando al admin:
-  `reddit`, `browser`, `heartbeat`, `NEWS_ENABLED`.
+  `reddit`, `browser`, `NEWS_ENABLED`.

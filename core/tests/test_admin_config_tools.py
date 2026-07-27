@@ -29,7 +29,7 @@ def env(tmp_path, monkeypatch):
                    "interval_hours": 6, "enabled": True, "posting_policy": "active"}],
         "TOOLS": {},
         "USER_GROUPS": {"music_users": ["fulano.bsky.social"], "vip": ["mengano.com"]},
-        "TASKS": {"heartbeat": {"enabled": False, "interval_hours": 12}},
+        "TASKS": {"reflection": {"enabled": False, "interval_hours": 12}},
         "MCP": {"reddit": {"transport": "stdio", "command": "python", "enabled": False}},
     }
     (tmp_path / "config" / "settings.json").write_text(
@@ -41,9 +41,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "USER_GROUPS", json.loads(json.dumps(settings["USER_GROUPS"])))
     tasks = [PeriodicTask("feed", lambda: None),
              PeriodicTask("mentions", lambda: None),
-             PeriodicTask("heartbeat", lambda: None, interval_hours=12, enabled=False)]
+             PeriodicTask("reflection", lambda: None, interval_hours=12, enabled=False)]
     monkeypatch.setattr(b, "_RUNTIME_TASKS", tasks)
-    monkeypatch.setattr(b, "HEARTBEAT_OVERRIDE_PATH", tmp_path / "context" / "heartbeat_override.md")
+    monkeypatch.setattr(b, "ROUTINES_DIR", tmp_path / "routines")
     reg = b.build_tool_registry()
     return tmp_path, reg, tasks
 
@@ -127,11 +127,11 @@ def test_guard_user_groups_protegido(env):
 def test_set_task_vivo_y_persistido(env):
     tmp, reg, tasks = env
     out = reg.execute("set_task_config",
-                      {"task": "heartbeat", "enabled": True, "interval_hours": 6}, _CTX)
+                      {"task": "reflection", "enabled": True, "interval_hours": 6}, _CTX)
     assert "aplicado en vivo" in out.text
-    hb = next(t for t in tasks if t.name == "heartbeat")
-    assert hb.enabled is True and hb.interval_hours == 6.0
-    disk = _disk(tmp)["TASKS"]["heartbeat"]
+    rt = next(t for t in tasks if t.name == "reflection")
+    assert rt.enabled is True and rt.interval_hours == 6.0
+    disk = _disk(tmp)["TASKS"]["reflection"]
     assert disk["enabled"] is True and disk["interval_hours"] == 6.0
 
 
@@ -167,38 +167,82 @@ def test_set_news(env):
     assert _disk(tmp)["NEWS_ENABLED"] is True
 
 
-# ─── set_heartbeat (todo-en-uno: instrucciones + frecuencia + on/off) ────────
-def test_set_heartbeat_completo(env):
-    tmp, reg, tasks = env
-    out = reg.execute("set_heartbeat", {
-        "instructions": "suplicale a un usuario random que te dé dulce de batata",
-        "interval_hours": 0.0833, "enabled": True}, _CTX)
-    assert "dulce de batata" in out.text and "5 minutos" in out.text
-    assert "aplicado en vivo" in out.text
-    hb = next(t for t in tasks if t.name == "heartbeat")
-    assert hb.enabled is True and abs(hb.interval_hours - 0.0833) < 1e-6   # vivo
-    assert _disk(tmp)["TASKS"]["heartbeat"]["enabled"] is True             # disco
-    assert "dulce de batata" in b.HEARTBEAT_OVERRIDE_PATH.read_text(encoding="utf-8")
-
-
-def test_set_heartbeat_borrar_instrucciones(env):
+# ─── rutinas por comando (set_routine / delete_routine, solo admin) ──────────
+def test_set_heartbeat_ya_no_existe(env):
+    """La tool set_heartbeat se eliminó con la unificación en rutinas."""
     _, reg, _ = env
-    reg.execute("set_heartbeat", {"instructions": "algo"}, _CTX)
-    out = reg.execute("set_heartbeat", {"instructions": ""}, _CTX)
-    assert "borré" in out.text
-    assert b.HEARTBEAT_OVERRIDE_PATH.read_text(encoding="utf-8") == ""
+    assert reg.get("set_heartbeat") is None
 
 
-def test_set_heartbeat_sin_args(env):
+def test_get_config_lista_rutinas(env, tmp_path):
     _, reg, _ = env
-    out = reg.execute("set_heartbeat", {}, _CTX)
-    assert "decime qué" in out.text
+    out = reg.execute("get_bot_config", {}, _CTX)
+    assert "rutinas: ninguna" in out.text
+    rd = tmp_path / "routines"
+    rd.mkdir()
+    (rd / "memes.md").write_text("---\ninterval_hours: 4\n---\nposteá memes\n",
+                                 encoding="utf-8")
+    out = reg.execute("get_bot_config", {}, _CTX)
+    assert "memes" in out.text
 
 
-def test_set_heartbeat_es_config_tool_protegida(env):
+def test_set_routine_crea(env, tmp_path):
     _, reg, _ = env
-    out = reg.execute("set_tool_config", {"tool": "set_heartbeat", "enabled": False}, _CTX)
-    assert "anti-lockout" in out.text
+    out = reg.execute("set_routine", {
+        "name": "Memes", "instructions": "posteá un meme, no repitas",
+        "interval_hours": 4}, _CTX)
+    assert "creada" in out.text and "4 h" in out.text
+    import routines as r
+    rt = r.load_routines(tmp_path / "routines")[0]
+    assert rt.name == "memes" and rt.interval_hours == 4.0 and rt.channel == ""
+    assert rt.body == "posteá un meme, no repitas" and rt.enabled
+
+
+def test_set_routine_update_parcial_conserva_cuerpo(env, tmp_path):
+    _, reg, _ = env
+    reg.execute("set_routine", {"name": "canciones", "instructions": "compartí un tema",
+                                "interval_hours": 4}, _CTX)
+    out = reg.execute("set_routine", {"name": "canciones", "interval_hours": 6}, _CTX)
+    assert "actualizada" in out.text
+    import routines as r
+    rt = r.load_routines(tmp_path / "routines")[0]
+    assert rt.interval_hours == 6.0 and rt.body == "compartí un tema"
+
+
+def test_set_routine_apagar_y_borrar(env, tmp_path):
+    _, reg, _ = env
+    reg.execute("set_routine", {"name": "memes", "instructions": "x", "interval_hours": 4}, _CTX)
+    out = reg.execute("set_routine", {"name": "memes", "enabled": False}, _CTX)
+    assert "apagada" in out.text
+    import routines as r
+    assert r.load_routines(tmp_path / "routines") == []  # deshabilitada no corre
+    out = reg.execute("delete_routine", {"name": "memes"}, _CTX)
+    assert "borrada" in out.text
+    assert not (tmp_path / "routines" / "memes.md").exists()
+    out = reg.execute("delete_routine", {"name": "memes"}, _CTX)
+    assert "no tengo" in out.text
+
+
+def test_set_routine_validaciones(env, tmp_path):
+    _, reg, _ = env
+    # crear sin instrucciones → rebota
+    out = reg.execute("set_routine", {"name": "nueva", "interval_hours": 2}, _CTX)
+    assert "necesito las" in out.text
+    # nombre inválido (anti-traversal incluido)
+    for bad in ("../evil", "con espacios", "readme"):
+        out = reg.execute("set_routine", {"name": bad, "instructions": "x"}, _CTX)
+        assert "inválido" in out.text, bad
+    # channel no numérico
+    out = reg.execute("set_routine", {"name": "x", "instructions": "x",
+                                      "channel": "banana"}, _CTX)
+    assert "numérico" in out.text
+    assert not (tmp_path / "routines").exists()  # nada se escribió
+
+
+def test_routine_tools_son_solo_admin(env):
+    _, reg, _ = env
+    assert reg.get("set_routine").scopes == frozenset({"admin"})
+    assert reg.get("delete_routine").scopes == frozenset({"admin"})
 
 
 # ─── set_mcp_enabled ─────────────────────────────────────────────────────────
@@ -270,7 +314,7 @@ def test_get_refleja_estado_vivo(env):
     reg.execute("set_tool_config", {"tool": "web_search", "enabled": False}, _CTX)
     out = reg.execute("get_bot_config", {}, _CTX)
     assert "web_search" in out.text and "apagadas" in out.text
-    assert "heartbeat=off" in out.text
+    assert "reflection=off" in out.text
 
 
 def test_config_tools_son_solo_admin(env):

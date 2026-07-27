@@ -69,6 +69,33 @@ def test_sin_resultados(monkeypatch, _con_token):
     assert b.add_track_to_playlist("zzz")["status"] == "not_found"
 
 
+def test_link_de_spotify_usa_el_id_directo(monkeypatch, _con_token):
+    # un link no se busca como texto: se extrae el id y se resuelve por /tracks/<id>
+    pedidos = []
+    monkeypatch.setattr(b, "_track_by_id", lambda tid, market="AR":
+                        pedidos.append(tid) or _TRACK)
+    monkeypatch.setattr(b, "search_spotify_tracks",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no debía buscar")))
+    monkeypatch.setattr(b, "playlist_tracks", lambda pid, tok: [])
+    monkeypatch.setattr(b, "_spotify_post", lambda path, tok, payload: {})
+    url = "agregá https://open.spotify.com/track/19e87xAfffHLkKWVaKJYHe?si=a78a7e694c8b49e7"
+    assert b.add_track_to_playlist(url)["status"] == "added"
+    assert pedidos == ["19e87xAfffHLkKWVaKJYHe"]
+
+
+def test_link_variantes_de_formato():
+    rx = b._SPOTIFY_TRACK_REF_RE
+    assert rx.search("https://open.spotify.com/intl-es/track/abc123DEF456ghi?si=x").group(1) == "abc123DEF456ghi"
+    assert rx.search("spotify:track:abc123DEF456ghi").group(1) == "abc123DEF456ghi"
+    assert rx.search("flaca calamaro") is None  # texto normal → va a búsqueda
+
+
+def test_link_con_id_inexistente(monkeypatch, _con_token):
+    monkeypatch.setattr(b, "_track_by_id", lambda tid, market="AR": None)
+    out = b.add_track_to_playlist("https://open.spotify.com/track/idQueNoExiste123")
+    assert out["status"] == "not_found"
+
+
 def test_sin_token_es_unavailable(monkeypatch):
     monkeypatch.setattr(sa, "user_token", lambda: None)
     assert b.add_track_to_playlist("flaca")["status"] == "unavailable"

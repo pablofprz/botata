@@ -20,6 +20,8 @@ interfaces separadas (decisión del admin, 2026-07-12).
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import logging
 import os
@@ -28,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import webbrowser
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -43,14 +46,16 @@ BASE_DIR = instance_dir()      # T28c: la instancia a editar (default = raíz de
 UI_HTML = REPO_DIR / "ui" / "config.html"  # asset del motor, no de la instancia
 
 ENV_KEYS = [
-    "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "OPENROUTER_API_KEY", "LLM_API_KEY",
+    "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "DISCORD_BOT_TOKEN",
+    "OPENROUTER_API_KEY", "LLM_API_KEY",
     "BRAVE_API_KEY",
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY",
     "IG_USERNAME", "IG_PASSWORD", "GOOGLE_OAUTH_ID", "GOOGLE_OAUTH_SECRET",
 ]
 
-_CHANNELS = {"bluesky", "mastodon"}
-_FEED_TYPES = {"list", "feed", "following", "local"}  # `local` = timeline local (Mastodon)
+_CHANNELS = {"bluesky", "mastodon", "discord"}
+# `local` = timeline local (Mastodon); `channel` = mensajes de un canal (Discord)
+_FEED_TYPES = {"list", "feed", "following", "local", "channel"}
 _POLICIES = {"conservative", "balanced", "active"}
 _NEWS_MODES = {"comment", "post"}
 _MCP_TRANSPORTS = {"stdio", "http"}
@@ -74,14 +79,39 @@ def validate_settings(s: dict) -> list[str]:
     channel = s.get("CHANNEL", "bluesky")
     if channel not in _CHANNELS:
         errs.append(f"CHANNEL inválido '{channel}' (usar {sorted(_CHANNELS)})")
-    if s.get("LANGUAGE", "es") not in ("es", "en"):
-        errs.append("LANGUAGE inválido (es|en)")
+    # LANGUAGE es texto libre ("es", "english", "portuñol rioplatense"...): se
+    # inyecta tal cual en el identity_block del system prompt.
+    if not (isinstance(s.get("LANGUAGE", "es"), str) and str(s.get("LANGUAGE", "es")).strip()):
+        errs.append("LANGUAGE debe ser un texto no vacío (ej. 'es', 'english')")
     if not isinstance(s.get("BOT_NAME", ""), str):
         errs.append("BOT_NAME debe ser un string")
+    if not isinstance(s.get("COMMUNITY_NAME", ""), str):
+        errs.append("COMMUNITY_NAME debe ser un string")
+    if s.get("BOT_ACTIONS_FROM", "admin") not in ("admin", "any"):
+        errs.append("BOT_ACTIONS_FROM inválido (admin|any)")
+    if not isinstance(s.get("READ_THREAD_MEDIA", True), bool):
+        errs.append("READ_THREAD_MEDIA debe ser booleano")
+    tzname = s.get("TIMEZONE", "")
+    if tzname:
+        if not isinstance(tzname, str):
+            errs.append("TIMEZONE debe ser un string")
+        elif not re.fullmatch(r"UTC[+-]\d{1,2}(:\d{2})?", tzname.strip(), re.I):
+            try:
+                from zoneinfo import ZoneInfo
+                ZoneInfo(tzname.strip())
+            except Exception:
+                errs.append(f"TIMEZONE '{tzname}' no es una zona IANA válida "
+                            "(ej. America/Argentina/Buenos_Aires) ni un offset 'UTC-3'")
     if channel == "mastodon" and not str(
             s.get("MASTODON_BASE_URL", "")).startswith(("http://", "https://")):
         errs.append("CHANNEL=mastodon requiere MASTODON_BASE_URL "
                     "(ej. https://mastodon.social)")
+    if channel == "discord":
+        ids = s.get("DISCORD_CHANNEL_IDS", [])
+        if (not isinstance(ids, list) or not ids
+                or not all(str(i).strip().isdigit() for i in ids)):
+            errs.append("CHANNEL=discord requiere DISCORD_CHANNEL_IDS: lista no "
+                        "vacía de ids numéricos de canal (el primero es el principal)")
     if not isinstance(s.get("POLL_INTERVAL_SECONDS", 60), (int, float)):
         errs.append("POLL_INTERVAL_SECONDS debe ser numérico")
 
@@ -119,6 +149,24 @@ def validate_settings(s: dict) -> list[str]:
                 elif feed.get("type", "list") not in ("list", "following"):
                     errs.append(f"USER_GROUPS.{gname}: '{m}' es type={feed.get('type')} — "
                                 "solo list/following tienen membresía definida")
+
+    ca = s.get("CALENDAR_ANNOUNCE", {})
+    if not isinstance(ca, dict):
+        errs.append("CALENDAR_ANNOUNCE debe ser un objeto {from, groups}")
+    else:
+        if str(ca.get("from", "admin")) not in ("admin", "groups", "any"):
+            errs.append("CALENDAR_ANNOUNCE.from inválido (admin|groups|any)")
+        if not isinstance(ca.get("feed", False), bool):
+            errs.append("CALENDAR_ANNOUNCE.feed debe ser booleano")
+        ca_groups = ca.get("groups", [])
+        if not (isinstance(ca_groups, list)
+                and all(isinstance(g, str) and g.strip() for g in ca_groups)):
+            errs.append("CALENDAR_ANNOUNCE.groups debe ser una lista de nombres de grupo")
+        elif str(ca.get("from", "admin")) == "groups":
+            unknown = set(ca_groups) - set(groups)
+            if unknown:
+                errs.append(f"CALENDAR_ANNOUNCE.groups: grupo(s) desconocido(s) "
+                            f"{sorted(unknown)} (definilos en USER_GROUPS)")
 
     for name, cfg in s.get("TOOLS", {}).items():
         bad = set(cfg.get("scopes", [])) - ALL_SCOPES
@@ -300,6 +348,12 @@ class ConfigStore:
         """Conexión al DB del bot (WAL: convive con el bot corriendo). Lazy
         import para que la UI arranque aunque falte sqlite-vec."""
         import db as dbmod
+        try:  # los defaults de "hoy"/"ahora" del calendario usan la tz de la instancia
+            tz = json.loads(self.settings_path.read_text(encoding="utf-8")).get("TIMEZONE", "")
+            if tz:
+                dbmod.set_local_tz(tz)
+        except Exception:
+            pass
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         return dbmod, dbmod.init_db(self.db_path)
 
@@ -328,6 +382,7 @@ class ConfigStore:
             "news": news,
             "env_keys": self._env_status(),
             "skills": self._skills_info(),
+            "routines": self._routines_info(),
             "moods": self._moods_info(),
             "prompts": self._prompt_files(),
             "soul": soul_path.read_text(encoding="utf-8") if soul_path.exists() else "",
@@ -335,6 +390,28 @@ class ConfigStore:
             "instance": {"path": str(self.base), "name": self.base.name,
                          "scrape_dir": str(scrape), "scrape_items": scrape_items},
         }
+
+    def _routines_info(self) -> list[dict]:
+        """Rutinas (conducta proactiva, routines/*.md) con cuerpo — para la UI."""
+        out = []
+        routines_dir = self.base / "routines"
+        if not routines_dir.is_dir():
+            return out
+        for path in sorted(routines_dir.glob("*.md")):
+            if path.name.upper() == "README.MD":
+                continue
+            parsed = _parse_frontmatter(path.read_text(encoding="utf-8"))
+            if parsed is None:
+                continue
+            meta, body = parsed
+            out.append({
+                "file": path.name, "name": path.stem,
+                "channel": (meta.get("channel") or "").strip(),
+                "interval_hours": meta.get("interval_hours", "0"),
+                "enabled": meta.get("enabled", "true").lower() != "false",
+                "body": body.strip(),
+            })
+        return out
 
     def _moods_info(self) -> list[dict]:
         """Moods con cuerpo completo (editables desde la UI)."""
@@ -358,6 +435,28 @@ class ConfigStore:
         return out
 
     _MOOD_NAME_RE = re.compile(r"^[a-z0-9_-]{2,30}$")
+
+    def set_mood_today(self, body: dict) -> list[str]:
+        """Fija el mood de HOY en vivo (kv `mood_state`, lo que lee current_mood
+        en modo auto). mood vacío = soltar (vuelve al default/decisión del bot).
+        Ojo: en MOODS.mode manual manda `manual.fixed/schedule` (settings)."""
+        name = (body.get("mood") or "").strip().lower()
+        if name and not (self.moods_dir / f"{name}.md").exists():
+            return [f"no existe el mood '{name}'"]
+        dbmod, conn = self._db()
+        try:
+            if not name:
+                conn.execute("DELETE FROM kv WHERE key = 'mood_state'")
+                conn.commit()
+                return []
+            from datetime import datetime, timedelta, timezone
+            today = (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
+            dbmod.kv_set(conn, "mood_state", json.dumps(
+                {"date": today, "mood": name, "mode": "ui",
+                 "reason": "seteado por el admin desde la UI"}))
+            return []
+        finally:
+            conn.close()
 
     def edit_mood(self, body: dict) -> list[str]:
         """Crea/edita/borra un mood (archivo moods/<name>.md)."""
@@ -494,16 +593,82 @@ class ConfigStore:
                     mood_state = json.loads(raw)
                 except json.JSONDecodeError:
                     pass
+            # corte "desde ayer" calculado en Python con la tz de la instancia
+            # (LOCAL_TZ, seteada en _db) — nada de offsets hardcodeados en SQL
+            cutoff = (dbmod.local_now() - timedelta(days=1)).isoformat(timespec="minutes")
             events = conn.execute(
                 "SELECT * FROM events "
-                "WHERE datetime(replace(event_at,'T',' ')) >= datetime('now','-3 hours','-1 day') "
-                "ORDER BY event_at ASC LIMIT 100").fetchall()
+                "WHERE datetime(replace(event_at,'T',' ')) >= datetime(replace(?,'T',' ')) "
+                "ORDER BY event_at ASC LIMIT 100", (cutoff,)).fetchall()
+            ev_list = []
+            for r in events:
+                ev = dict(r)
+                # announce efectivo para mostrar el switch: NULL (legado/groups)
+                # → se estima con la política actual (igual que el gate del motor,
+                # sin membresías por feed — best-effort para la UI).
+                ev["announce_effective"] = (bool(ev["announce"])
+                                            if ev.get("announce") is not None
+                                            else self._announce_default(ev.get("source")))
+                ev_list.append(ev)
+            rt_rows = conn.execute(
+                "SELECT feed_name, last_run FROM feed_cursors "
+                "WHERE feed_name LIKE 'routine:%'").fetchall()
             return {
                 "memory": dbmod.list_bot_memory(conn),
                 "preferences": dbmod.list_preferences(conn),
-                "events": [dict(r) for r in events],
+                "events": ev_list,
                 "mood_state": mood_state,
+                "routine_last_runs": {r["feed_name"][len("routine:"):]: r["last_run"]
+                                      for r in rt_rows},
+                "bio_current": dbmod.kv_get(conn, "bio_current"),
             }
+        finally:
+            conn.close()
+
+    def _announce_default(self, source: str | None) -> bool:
+        """Estimación UI del switch de anuncio para eventos legados (announce
+        NULL): misma política que el motor (CALENDAR_ANNOUNCE + creador), sin
+        resolver membresías por feed (best-effort de solo lectura)."""
+        try:
+            s = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        src = (source or "").strip()
+        ca = s.get("CALENDAR_ANNOUNCE", {}) or {}
+        if src == "feed":
+            return bool(ca.get("feed", False))
+        admins = {str(h).lstrip("@").lower()
+                  for h in [s.get("ADMIN_HANDLE", "")] + list(s.get("ADMIN_HANDLES") or [])
+                  if h}
+        creator = None
+        if src.startswith("tool:@"):
+            creator = src[len("tool:@"):].lower() or None
+        elif src in ("ui", "admin") or src.startswith("/"):
+            return True
+        if creator in admins:
+            return True
+        mode = str(ca.get("from", "admin")).lower()
+        if mode == "any":
+            return True
+        if mode == "groups" and creator:
+            allowed = set(ca.get("groups") or [])
+            groups = s.get("USER_GROUPS", {}) or {}
+            member = {g for g, hs in groups.items()
+                      if isinstance(hs, list)
+                      and creator in {str(h).lstrip("@").lower() for h in hs}}
+            return bool(allowed & member)
+        return False
+
+    def set_event_announce(self, body: dict) -> list[str]:
+        """Switch 📣 por evento: prende/apaga el anuncio automático (tarea
+        calendar) de un evento puntual. Deja el valor EXPLÍCITO en DB."""
+        dbmod, conn = self._db()
+        try:
+            eid = int(body.get("id", 0))
+            if not dbmod.get_event(conn, eid):
+                return ["id de evento inexistente"]
+            dbmod.set_event_announce(conn, eid, bool(body.get("announce")))
+            return []
         finally:
             conn.close()
 
@@ -520,6 +685,97 @@ class ConfigStore:
                     return ["id inexistente"]
             else:
                 return ["action inválida (add|delete)"]
+            return []
+        finally:
+            conn.close()
+
+    def read_user_memory(self, handle: str | None = None) -> dict:
+        """Visor de memoria por usuario. Sin handle → overview (usuarios con
+        conteo de hechos + lecciones); con handle → sus hechos e interacciones.
+        Best-effort: sin DB accesible devuelve vacío con error legible."""
+        try:
+            dbmod, conn = self._db()
+        except Exception as e:
+            return {"error": f"DB no accesible: {e}", "users": [], "lessons": []}
+        try:
+            if not handle:
+                users = conn.execute(
+                    "SELECT u.handle, u.display_name, COUNT(f.id) AS facts "
+                    "FROM users u LEFT JOIN user_facts f ON f.handle = u.handle "
+                    "GROUP BY u.handle ORDER BY facts DESC, u.handle").fetchall()
+                lessons = conn.execute(
+                    "SELECT id, scope, lesson_text, created_at FROM lessons "
+                    "ORDER BY id DESC LIMIT 200").fetchall()
+                return {"users": [dict(r) for r in users],
+                        "lessons": [dict(r) for r in lessons]}
+            handle = handle.strip().lstrip("@").lower()
+            facts = conn.execute(
+                "SELECT id, fact_text, source_uri, created_at FROM user_facts "
+                "WHERE handle = ? ORDER BY id DESC", (handle,)).fetchall()
+            inter = conn.execute(
+                "SELECT id, summary, source_uri, created_at FROM interactions "
+                "WHERE handle = ? ORDER BY id DESC LIMIT 50", (handle,)).fetchall()
+            return {"facts": [dict(r) for r in facts],
+                    "interactions": [dict(r) for r in inter]}
+        finally:
+            conn.close()
+
+    _USERMEM_KINDS = {"fact": ("user_facts", "user_facts_vec"),
+                      "lesson": ("lessons", "lessons_vec"),
+                      "interaction": ("interactions", None)}
+
+    def delete_user_memory(self, body: dict) -> list[str]:
+        """Borra un registro de memoria semántica. fact/lesson limpian también su
+        embedding en vec0 (misma lógica que mem_admin — sin esto quedan vectores
+        huérfanos); el índice FTS se sincroniza solo por triggers."""
+        kind = body.get("kind")
+        if kind not in self._USERMEM_KINDS:
+            return ["kind inválido (fact|lesson|interaction)"]
+        try:
+            rid = int(body.get("id", 0))
+        except (TypeError, ValueError):
+            return ["id inválido"]
+        table, vec = self._USERMEM_KINDS[kind]
+        dbmod, conn = self._db()
+        try:
+            cur = conn.execute(f"DELETE FROM {table} WHERE id = ?", (rid,))
+            if cur.rowcount == 0:
+                return ["id inexistente"]
+            if vec:
+                conn.execute(f"DELETE FROM {vec} WHERE rowid = ?", (rid,))
+            conn.commit()
+            return []
+        finally:
+            conn.close()
+
+    def add_user_memory(self, body: dict) -> list[str]:
+        """Alta manual de memoria semántica: fact (por usuario) o lesson
+        (conductual, scope community o user:<handle>). Usa los MISMOS upserts
+        que el bot — dedup semántico incluido. Ojo: la primera alta carga el
+        modelo de embeddings (bge-m3) en el proceso de la UI (~30s, una vez)."""
+        kind = body.get("kind")
+        text = (body.get("text") or "").strip()
+        if kind not in ("fact", "lesson"):
+            return ["kind inválido (fact|lesson)"]
+        if not text:
+            return ["falta el texto"]
+        dbmod, conn = self._db()
+        try:
+            if kind == "fact":
+                handle = (body.get("handle") or "").strip().lstrip("@").lower()
+                if not handle:
+                    return ["falta el handle"]
+                if not dbmod.user_exists(conn, handle):
+                    return [f"@{handle} no tiene perfil en la DB todavía "
+                            "(el bot crea perfiles al interactuar)"]
+                rid = dbmod.upsert_user_fact(conn, handle, text, source_uri="ui")
+            else:
+                scope = (body.get("scope") or "community").strip() or "community"
+                if scope != "community" and not scope.startswith("user:"):
+                    return ["scope inválido (community | user:<handle>)"]
+                rid = dbmod.upsert_lesson(conn, text, scope)
+            if rid is None:
+                return ["ya existe una memoria semánticamente equivalente (dedup)"]
             return []
         finally:
             conn.close()
@@ -563,21 +819,97 @@ class ConfigStore:
                     return [f"@{handle} no tiene perfil en el bot — dejá el handle "
                             "vacío para un evento de comunidad"]
                 recur = (body.get("recur") or "").strip() or None
-                if recur not in (None, "daily", "weekly", "monthly"):
-                    return ["recur inválido (vacío|daily|weekly|monthly)"]
+                if recur not in (None, "daily", "weekly", "monthly", "yearly"):
+                    return ["recur inválido (vacío|daily|weekly|monthly|yearly)"]
                 dbmod.create_event(
                     conn, title=title, event_at=event_at, handle=handle,
                     description=(body.get("description") or "").strip() or None,
                     kind=(body.get("kind") or "other").strip() or "other",
-                    source="ui", recur=recur)
+                    source="ui", recur=recur, announce=True)
+            elif body.get("action") == "edit":
+                # Edición acotada a fecha/hora y repetición (lo que pide cambiar
+                # un evento mal agendado; título/dueño = borrar y recrear).
+                event_at = (body.get("event_at") or "").strip()
+                if not _EVENT_AT_RE.match(event_at):
+                    return ["event_at inválido (YYYY-MM-DD o YYYY-MM-DDTHH:MM)"]
+                recur = (body.get("recur") or "").strip() or None
+                if recur not in (None, "daily", "weekly", "monthly", "yearly"):
+                    return ["recur inválido (vacío|daily|weekly|monthly|yearly)"]
+                if not dbmod.update_event(conn, int(body.get("id", 0)),
+                                          event_at=event_at, recur=recur):
+                    return ["id inexistente"]
             elif body.get("action") == "delete":
                 if not dbmod.delete_event(conn, int(body.get("id", 0))):
                     return ["id inexistente"]
             else:
-                return ["action inválida (add|delete)"]
+                return ["action inválida (add|edit|delete)"]
             return []
         finally:
             conn.close()
+
+    # ─── Importación de calendario (CSV / ICS) ──────────────────────────────
+    _IMPORT_KINDS = {"other", "birthday", "meetup", "reminder", "community"}
+
+    def import_events(self, body: dict) -> dict:
+        """Importa eventos desde texto CSV o ICS (autodetectado por contenido).
+        dry_run=True (default) → solo vista previa por fila, no escribe nada;
+        False → inserta las filas OK (source='import'). `bot_action` queda
+        excluido a propósito: las órdenes al bot se agendan a mano."""
+        text = (body.get("text") or "").strip().lstrip("﻿")
+        if not text:
+            return {"ok": False, "errors": ["texto vacío: pegá el CSV o el ICS"]}
+        dry = bool(body.get("dry_run", True))
+        try:
+            rows = _parse_ics(text) if text.startswith("BEGIN:VCALENDAR") \
+                else _parse_import_csv(text)
+        except ValueError as e:
+            return {"ok": False, "errors": [str(e)]}
+        if not rows:
+            return {"ok": False, "errors": ["no encontré ningún evento en el texto"]}
+        dbmod, conn = self._db()
+        try:
+            results, importados = [], 0
+            for r in rows:
+                item = {"fila": r["fila"], "titulo": r["titulo"], "estado": "ok",
+                        "detalle": ""}
+                err = r["error"] or self._validate_import_row(conn, dbmod, r)
+                if err:
+                    item.update(estado="error", detalle=err)
+                elif dbmod.event_exists(conn, title=r["titulo"],
+                                        event_at=r["fecha"], handle=r["handle"]):
+                    item.update(estado="duplicado", detalle="ya estaba agendado")
+                else:
+                    item["detalle"] = r["fecha"] \
+                        + (f" · {r['recur']}" if r["recur"] else "") \
+                        + (f" · @{r['handle']}" if r["handle"] else " · comunidad")
+                    if not dry:
+                        # announce=True: el import lo hace el admin desde la UI
+                        # (source 'import' era origen desconocido para el gate
+                        # viejo y los eventos importados no se anunciaban nunca).
+                        dbmod.create_event(
+                            conn, title=r["titulo"], event_at=r["fecha"],
+                            handle=r["handle"], description=r["descripcion"] or None,
+                            kind=r["tipo"], source="import", recur=r["recur"],
+                            announce=True)
+                        importados += 1
+                results.append(item)
+            return {"ok": True, "dry_run": dry, "rows": results, "importados": importados,
+                    "importables": sum(1 for x in results if x["estado"] == "ok")}
+        finally:
+            conn.close()
+
+    def _validate_import_row(self, conn, dbmod, r: dict) -> str | None:
+        if not r["titulo"]:
+            return "falta el título"
+        if not _EVENT_AT_RE.match(r["fecha"] or ""):
+            return "fecha inválida (YYYY-MM-DD o YYYY-MM-DDTHH:MM)"
+        if r["tipo"] == "bot_action":
+            return "bot_action no se importa (las órdenes al bot van a mano)"
+        if r["tipo"] not in self._IMPORT_KINDS:
+            return f"tipo desconocido: '{r['tipo']}' (usar {'|'.join(sorted(self._IMPORT_KINDS))})"
+        if r["handle"] and not dbmod.user_exists(conn, r["handle"]):
+            return f"@{r['handle']} no tiene perfil en el bot (dejá de_quien vacío = comunidad)"
+        return None
 
     def _env_status(self) -> dict[str, bool]:
         """Qué claves están seteadas. NUNCA los valores."""
@@ -653,6 +985,58 @@ class ConfigStore:
         self._atomic_write(self.env_path, "\n".join(out) + "\n")
         return []
 
+    # Editor de archivos de comportamiento (skills/*.md y routines/*.md): la UI
+    # puede crearlos/editarlos/borrarlos enteros. Nombre pelado (sin traversal);
+    # el save valida el frontmatter mínimo de cada tipo.
+    _BEHAVIOR_DIRS = {"skill": "skills", "routine": "routines"}
+    _BEHAVIOR_FILE_RE = re.compile(r"^[a-zA-Z0-9_-]{1,40}\.md$")
+
+    def edit_behavior_file(self, body: dict) -> dict:
+        kind = body.get("kind")
+        subdir = self._BEHAVIOR_DIRS.get(kind)
+        if not subdir:
+            return {"ok": False, "errors": ["kind inválido (skill|routine)"]}
+        fname = (body.get("file") or "").strip()
+        if not self._BEHAVIOR_FILE_RE.match(fname) or fname.upper() == "README.MD":
+            return {"ok": False, "errors":
+                    ["nombre inválido (letras/números/guiones + .md, no README)"]}
+        path = self.base / subdir / fname
+        action = body.get("action")
+        if action == "get":
+            if not path.exists():
+                return {"ok": False, "errors": [f"{subdir}/{fname} no existe"]}
+            return {"ok": True, "text": path.read_text(encoding="utf-8")}
+        if action == "delete":
+            if not path.exists():
+                return {"ok": False, "errors": [f"{subdir}/{fname} no existe"]}
+            path.unlink()
+            return {"ok": True}
+        if action != "save":
+            return {"ok": False, "errors": ["action inválida (get|save|delete)"]}
+        text = body.get("text", "")
+        parsed = _parse_frontmatter(text)
+        if parsed is None:
+            return {"ok": False, "errors": ["falta el frontmatter (bloque --- ... ---)"]}
+        meta, fbody = parsed
+        if kind == "skill" and not (meta.get("name") and meta.get("description")):
+            return {"ok": False, "errors":
+                    ["una skill necesita name y description en el frontmatter"]}
+        if kind == "routine":
+            channel = (meta.get("channel") or "").strip()
+            if channel and not channel.isdigit():
+                return {"ok": False, "errors":
+                        ["channel debe ser el id numérico de un canal de Discord "
+                         "(u omitirse para postear al feed principal)"]}
+            try:
+                float(meta.get("interval_hours", "0") or 0)
+            except ValueError:
+                return {"ok": False, "errors": ["interval_hours debe ser numérico"]}
+        if not fbody.strip():
+            return {"ok": False, "errors": ["el cuerpo no puede quedar vacío"]}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write(path, text if text.endswith("\n") else text + "\n")
+        return {"ok": True}
+
     def set_skill_enabled(self, name: str, enabled: bool) -> list[str]:
         """Reescribe solo la línea `enabled:` del frontmatter (o la inserta)."""
         for path in sorted(self.skills_dir.glob("*.md")):
@@ -670,6 +1054,121 @@ class ConfigStore:
             self._atomic_write(path, new)
             return []
         return [f"skill desconocida: {name}"]
+
+
+# ─── Parsers del import de calendario ────────────────────────────────────────
+# CSV: encabezado fecha,titulo[,descripcion,tipo,de_quien,repeticion] — coma o
+# punto y coma (autodetectado). ICS: subconjunto de RFC 5545 (DTSTART/SUMMARY/
+# DESCRIPTION/RRULE con FREQ simple) — alcanza para exports de Google/Outlook.
+
+_RECUR_ALIASES = {
+    "": None, "una vez": None, "no": None, "none": None,
+    "daily": "daily", "diario": "daily", "diaria": "daily",
+    "weekly": "weekly", "semanal": "weekly",
+    "monthly": "monthly", "mensual": "monthly",
+    "yearly": "yearly", "anual": "yearly", "annual": "yearly",
+}
+
+
+def _parse_import_csv(text: str) -> list[dict]:
+    first = text.splitlines()[0]
+    delim = ";" if first.count(";") > first.count(",") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delim)
+    if not reader.fieldnames:
+        raise ValueError("CSV sin encabezado")
+    norm = {f: (f or "").strip().lower().replace("í", "i").replace("ó", "o")
+                                        .replace("é", "e").replace("_", "_")
+            for f in reader.fieldnames}
+    if not {"fecha", "titulo"} <= set(norm.values()):
+        raise ValueError("el CSV necesita encabezado con al menos: fecha,titulo "
+                         "(opcionales: descripcion,tipo,de_quien,repeticion)")
+    out = []
+    for i, raw in enumerate(reader, start=2):  # fila 1 = encabezado
+        row = {norm[k]: (v or "").strip() for k, v in raw.items() if k in norm}
+        if not any(row.values()):
+            continue  # fila vacía
+        rec_raw = row.get("repeticion", "").strip().lower()
+        rec = _RECUR_ALIASES.get(rec_raw, "__bad__")
+        out.append({
+            "fila": i,
+            "fecha": row.get("fecha", ""),
+            "titulo": row.get("titulo", ""),
+            "descripcion": row.get("descripcion", ""),
+            "tipo": (row.get("tipo") or "other").strip().lower() or "other",
+            "handle": row.get("de_quien", "").lstrip("@").strip().lower() or None,
+            "recur": None if rec == "__bad__" else rec,
+            "error": (f"repetición desconocida: '{rec_raw}' (vacía|daily|weekly|"
+                      "monthly|yearly o diario/semanal/mensual/anual)"
+                      if rec == "__bad__" else None),
+        })
+    return out
+
+
+def _ics_datetime(val: str) -> str | None:
+    """DTSTART de ICS → ISO local. '20260801' → fecha; '...T210000' → fecha+hora;
+    sufijo Z (UTC) → se convierte a hora AR (UTC-3)."""
+    v = val.strip()
+    utc = v.endswith("Z")
+    v = v.rstrip("Z")
+    try:
+        if "T" in v:
+            dt = datetime.strptime(v, "%Y%m%dT%H%M%S")
+            if utc:
+                dt -= timedelta(hours=3)
+            return dt.strftime("%Y-%m-%dT%H:%M")
+        return datetime.strptime(v, "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _ics_unescape(val: str) -> str:
+    return (val.replace("\\n", " ").replace("\\,", ",")
+               .replace("\\;", ";").replace("\\\\", "\\").strip())
+
+
+def _parse_ics(text: str) -> list[dict]:
+    lines: list[str] = []
+    for ln in text.replace("\r\n", "\n").split("\n"):  # unfold RFC 5545
+        if ln[:1] in (" ", "\t") and lines:
+            lines[-1] += ln[1:]
+        else:
+            lines.append(ln)
+    freq_map = {"DAILY": "daily", "WEEKLY": "weekly",
+                "MONTHLY": "monthly", "YEARLY": "yearly"}
+    out: list[dict] = []
+    cur: dict | None = None
+    for ln in lines:
+        u = ln.strip()
+        if u == "BEGIN:VEVENT":
+            cur = {"fila": len(out) + 1, "fecha": "", "titulo": "", "descripcion": "",
+                   "tipo": "other", "handle": None, "recur": None, "error": None}
+        elif u == "END:VEVENT" and cur is not None:
+            out.append(cur)
+            cur = None
+        elif cur is not None and ":" in u:
+            key, _, val = u.partition(":")
+            prop = key.split(";")[0].upper()
+            if prop == "DTSTART":
+                fecha = _ics_datetime(val)
+                if fecha is None:
+                    cur["error"] = cur["error"] or f"DTSTART ilegible: '{val}'"
+                else:
+                    cur["fecha"] = fecha
+            elif prop == "SUMMARY":
+                cur["titulo"] = _ics_unescape(val)
+            elif prop == "DESCRIPTION":
+                cur["descripcion"] = _ics_unescape(val)[:300]
+            elif prop == "RRULE":
+                parts = dict(p.split("=", 1) for p in val.split(";") if "=" in p)
+                freq = parts.pop("FREQ", "").upper()
+                parts.pop("WKST", None)  # inofensivo, se ignora
+                extras = {k: v for k, v in parts.items() if not (k == "INTERVAL" and v == "1")}
+                if freq not in freq_map or extras:
+                    cur["error"] = cur["error"] or \
+                        f"RRULE no soportada ('{val}'): solo FREQ simple daily/weekly/monthly/yearly"
+                else:
+                    cur["recur"] = freq_map[freq]
+    return out
 
 
 # ─── HTTP ────────────────────────────────────────────────────────────────────
@@ -695,6 +1194,12 @@ def make_handler(store: ConfigStore):
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 self._send(200, UI_HTML.read_bytes(), ctype="text/html")
+            elif self.path == "/botata_200.png":
+                logo = REPO_DIR / "ui" / "botata_200.png"
+                if logo.exists():
+                    self._send(200, logo.read_bytes(), ctype="image/png")
+                else:
+                    self._send(404, {"error": "not found"})
             elif self.path == "/api/config":
                 self._send(200, store.read_all())
             elif self.path == "/api/data":
@@ -717,14 +1222,31 @@ def make_handler(store: ConfigStore):
                     errs = store.set_skill_enabled(body.get("name", ""), bool(body.get("enabled")))
                 elif self.path == "/api/memory":
                     errs = store.edit_memory(body)
+                elif self.path == "/api/memory/user":
+                    self._send(200, store.read_user_memory(body.get("handle")))
+                    return
+                elif self.path == "/api/memory/user/delete":
+                    errs = store.delete_user_memory(body)
+                elif self.path == "/api/memory/user/add":
+                    errs = store.add_user_memory(body)
+                elif self.path == "/api/behavior-file":
+                    self._send(200, store.edit_behavior_file(body))
+                    return
                 elif self.path == "/api/preferences":
                     errs = store.edit_preferences(body)
                 elif self.path == "/api/events":
                     errs = store.edit_events(body)
+                elif self.path == "/api/events/announce":
+                    errs = store.set_event_announce(body)
+                elif self.path == "/api/events/import":
+                    self._send(200, store.import_events(body))
+                    return
                 elif self.path == "/api/soul":
                     errs = store.write_soul(body.get("text", ""))
                 elif self.path == "/api/moods":
                     errs = store.edit_mood(body)
+                elif self.path == "/api/mood-today":
+                    errs = store.set_mood_today(body)
                 elif self.path == "/api/prompt":
                     self._send(200, store.edit_prompt(body))
                     return
@@ -755,20 +1277,46 @@ def make_handler(store: ConfigStore):
     return ConfigHandler
 
 
-def serve(base_dir: Path, port: int = 8787) -> ThreadingHTTPServer:
-    """Crea el server (sin loop). El caller decide serve_forever/thread."""
+def _port_busy(port: int) -> bool:
+    """True si ya hay algo escuchando en 127.0.0.1:port. Necesario porque
+    HTTPServer usa SO_REUSEADDR y en Windows eso deja bindear un puerto YA
+    ocupado sin error: dos UIs terminaban pisándose en el 8787 en silencio."""
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.2)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def serve(base_dir: Path, port: int | None = 8787) -> ThreadingHTTPServer:
+    """Crea el server (sin loop). El caller decide serve_forever/thread.
+
+    port None = 8787 o el siguiente libre (hasta +20): varias UIs abiertas a la
+    vez (una por instancia) no colisionan. Puerto explícito = estricto: si está
+    ocupado, falla con mensaje claro — el caller lo pidió por algo.
+    """
     store = ConfigStore(base_dir)
-    return ThreadingHTTPServer(("127.0.0.1", port), make_handler(store))
+    if port is not None:
+        if port != 0 and _port_busy(port):
+            raise SystemExit(f"el puerto {port} ya está ocupado (¿otra UI abierta?) — "
+                             "cerrala, elegí otro con --port, u omití --port para "
+                             "que busque uno libre")
+        return ThreadingHTTPServer(("127.0.0.1", port), make_handler(store))
+    for p in range(8787, 8807):
+        if not _port_busy(p):
+            return ThreadingHTTPServer(("127.0.0.1", p), make_handler(store))
+    raise SystemExit("sin puertos libres en 8787-8806 — ¿cuántas UIs tenés abiertas? "
+                     "(o pasá --port explícito)")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Panel de configuración de botata (localhost)")
-    parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--port", type=int, default=None,
+                        help="puerto fijo (default: 8787 o el siguiente libre)")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--instance", help="Directorio de la instancia a editar (default: raíz del repo)")
     args = parser.parse_args()
     httpd = serve(BASE_DIR, args.port)
-    url = f"http://127.0.0.1:{args.port}/"
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
     print(f"botata config UI → {url}  (Ctrl+C para salir)  [instancia: {BASE_DIR}]")
     print("Los cambios en settings/.env/noticias requieren reiniciar el bot.")
     if not args.no_browser:
