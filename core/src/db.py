@@ -705,31 +705,45 @@ def hybrid_search_image_catalog(
     query: str,
     *,
     category: str | None = None,
+    sources: list[str] | None = None,
     limit: int = 5,
     rrf_k: int = 60,
 ) -> list[dict]:
     """Recupera las `limit` imágenes más relevantes para `query`.
 
-    Búsqueda híbrida (vec0 + FTS5 + RRF). Filtra por `category` si se pasa.
+    Búsqueda híbrida (vec0 + FTS5 + RRF). Filtros opcionales:
+    - `category`: tipo de archivo ('meme' | 'foto' | 'arte' | 'captura' | 'otro').
+    - `sources`: lista de `source_name` (cuentas/boards de origen). Es el filtro
+      TEMÁTICO (T38): el registro `content_sources.json` traduce un tema
+      ("fútbol") al conjunto de fuentes que el admin declaró para ese tema, y
+      acá se aplica. Lista vacía = ninguna fuente declarada → sin resultados
+      (mejor devolver nada que ignorar el filtro y postear cualquier cosa).
+
     Devuelve lista de dicts con todos los campos de image_catalog.
     """
+    if sources is not None and not sources:
+        return []
     q = embed(query)
     pool = max(limit * 3, 15)
 
+    # WHERE dinámico: los filtros se combinan (se aplican sobre la tabla base `i`,
+    # por eso la rama vectorial también joinea cuando hay alguno).
+    conds, params = [], []
     if category:
+        conds.append("i.category = ?")
+        params.append(category)
+    if sources:
+        conds.append(f"i.source_name IN ({','.join('?' for _ in sources)})")
+        params.extend(sources)
+    extra = (" AND " + " AND ".join(conds)) if conds else ""
+
+    if conds:
         vec_rows = conn.execute(
             "SELECT v.rowid AS id FROM image_catalog_vec v "
             "JOIN image_catalog i ON i.id = v.rowid "
-            "WHERE v.embedding MATCH ? AND k = ? AND i.category = ? "
+            f"WHERE v.embedding MATCH ? AND k = ?{extra} "
             "ORDER BY v.distance",
-            (q, pool, category),
-        ).fetchall()
-        fts_rows = conn.execute(
-            "SELECT i.id AS id FROM image_catalog_fts "
-            "JOIN image_catalog i ON i.id = image_catalog_fts.rowid "
-            "WHERE image_catalog_fts MATCH ? AND i.category = ? "
-            "ORDER BY rank LIMIT ?",
-            (_fts_query(query), category, pool),
+            (q, pool, *params),
         ).fetchall()
     else:
         vec_rows = conn.execute(
@@ -737,12 +751,13 @@ def hybrid_search_image_catalog(
             "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
             (q, pool),
         ).fetchall()
-        fts_rows = conn.execute(
-            "SELECT i.id AS id FROM image_catalog_fts "
-            "JOIN image_catalog i ON i.id = image_catalog_fts.rowid "
-            "WHERE image_catalog_fts MATCH ? ORDER BY rank LIMIT ?",
-            (_fts_query(query), pool),
-        ).fetchall()
+    fts_rows = conn.execute(
+        "SELECT i.id AS id FROM image_catalog_fts "
+        "JOIN image_catalog i ON i.id = image_catalog_fts.rowid "
+        f"WHERE image_catalog_fts MATCH ?{extra} "
+        "ORDER BY rank LIMIT ?",
+        (_fts_query(query), *params, pool),
+    ).fetchall()
 
     if not vec_rows and not fts_rows:
         return []

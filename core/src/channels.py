@@ -328,9 +328,9 @@ class DiscordChannel:
     responde (reply) a un mensaje del bot. El resto de los mensajes se ignora.
 
     Diferencias absorbidas acá (el grafo no se entera):
-    - Push vs poll: no hay endpoint de notificaciones — se releen los últimos
-      25 mensajes por canal en cada poll y el dedup lo hace la DB (has_replied),
-      igual que Mastodon relee notificaciones.
+    - Push vs poll: no hay endpoint de notificaciones — se leen los mensajes
+      nuevos por canal en cada poll (cursor `after` en memoria, paginado con
+      tope) y el dedup lo hace la DB (has_replied).
     - uri = "channel_id/message_id" (postear una reply exige el canal);
       cid = message_id.
     - Hilo: se reconstruye subiendo por message_reference (cadena de replies),
@@ -340,13 +340,16 @@ class DiscordChannel:
     - Sin bios para bots ni bloqueo de usuarios: get_profile devuelve
       description vacía (con cache de usuarios vistos), block_user es no-op.
     - Los mensajes de otros bots se ignoran (anti-loop).
-    - Media: attachments anotados por filename/content_type (sin alt-text).
+    - Media: los attachments traen URL del CDN → vision sobre las imágenes del
+      mensaje que se va a contestar; el resto se anota por filename/content_type.
     - Límite 2000 chars (los callers pasan ≤300, entra sobrado).
     """
 
     API = "https://discord.com/api/v10"
-    HISTORY_LIMIT = 25   # mensajes por canal y por poll (dedup por DB)
-    THREAD_HOPS = 12     # tope de la cadena de replies al reconstruir contexto
+    HISTORY_LIMIT = 50        # primer poll de un canal (sin cursor): cuánto mirar atrás
+    CATCHUP_PAGE = 100        # máximo por request que acepta la API
+    MAX_CATCHUP_PAGES = 5     # tope duro por canal y ciclo (500 msgs)
+    THREAD_HOPS = 12          # tope de la cadena de replies al reconstruir contexto
 
     def __init__(self, bot_token: str, channel_ids: list[str], http=None):
         if http is None:
@@ -359,6 +362,8 @@ class DiscordChannel:
         self._http = http
         self._channel_ids = [str(c) for c in channel_ids]
         self._users: dict[str, dict] = {}  # username → user visto en mensajes
+        self._last_seen: dict[str, str] = {}   # channel_id → id del último mensaje leído
+        self._media_describer = None           # vision inyectada (set_media_describer)
         me = self._get("/users/@me")
         self._me_id = str(me["id"])
         self.handle = me["username"]
@@ -402,18 +407,34 @@ class DiscordChannel:
         text = _ROLE_MENTION_RE.sub("", text)
         return text.strip()
 
-    @staticmethod
-    def _media_note(msg: dict) -> str:
+    def _media_note(self, msg: dict, *, describe: bool = False) -> str:
+        """Anota los adjuntos del mensaje. Con `describe`, corre vision sobre las
+        imágenes (los attachments de Discord traen URL directa al CDN) en vez de
+        anotar solo el nombre del archivo — sin esto el bot 've' `[image: foto.jpg]`
+        y no puede comentar un meme que le mandan.
+
+        Se describe SOLO donde importa (el mensaje que el bot está por contestar),
+        nunca en la lectura masiva del feed: una llamada de vision por imagen y por
+        mensaje leído sería carísimo."""
         pieces = []
         for att in msg.get("attachments") or []:
             kind = (att.get("content_type") or "file").split("/")[0]
             name = att.get("filename") or ""
-            pieces.append(f"[{kind}: {name}]" if name else f"[{kind}]")
+            desc = ""
+            if describe and kind == "image" and self._media_describer and att.get("url"):
+                try:
+                    desc = self._media_describer(att["url"]) or ""
+                except Exception:
+                    log.debug("vision sobre attachment falló", exc_info=True)
+            if desc:
+                pieces.append(f"[{kind}: {desc}]")
+            else:
+                pieces.append(f"[{kind}: {name}]" if name else f"[{kind}]")
         return " ".join(pieces)
 
-    def _full_text(self, msg: dict) -> str:
+    def _full_text(self, msg: dict, *, describe: bool = False) -> str:
         text = self._msg_text(msg)
-        media = self._media_note(msg)
+        media = self._media_note(msg, describe=describe)
         return f"{text} {media}".strip() if media else text
 
     def _is_for_me(self, msg: dict) -> bool:
@@ -435,12 +456,51 @@ class DiscordChannel:
             "text"          : self._msg_text(msg),
         }
 
+    def _new_messages(self, ch: str) -> list[dict]:
+        """Mensajes del canal desde el último poll, paginando hacia el presente.
+
+        Sin gateway, el riesgo real no es releer de más sino **perder menciones**:
+        si en un ciclo entran más mensajes que el lote que leemos, los más viejos
+        del lote nunca se ven y el dedup por DB no los recupera (nunca se leyeron).
+        Por eso, con cursor, se pagina con `after` hasta alcanzar el presente, con
+        un tope por ciclo para que un canal desbocado no se coma el loop.
+
+        El cursor vive en memoria: al reiniciar se relee la ventana inicial, y las
+        menciones a medio procesar las recupera `retry_stuck_mentions` por URI.
+        """
+        last = self._last_seen.get(ch)
+        if last is None:                      # primer poll del canal: ventana corta
+            msgs = self._get(f"/channels/{ch}/messages", limit=self.HISTORY_LIMIT) or []
+            if msgs:
+                self._last_seen[ch] = str(max(int(m["id"]) for m in msgs))
+            return msgs
+
+        out: list[dict] = []
+        for _ in range(self.MAX_CATCHUP_PAGES):
+            batch = self._get(f"/channels/{ch}/messages",
+                              after=last, limit=self.CATCHUP_PAGE) or []
+            if not batch:
+                break
+            out.extend(batch)
+            # Los ids de Discord son snowflakes crecientes: avanzar al máximo del
+            # lote es correcto sin importar en qué orden los devuelva la API.
+            last = str(max(int(m["id"]) for m in batch))
+            self._last_seen[ch] = last
+            if len(batch) < self.CATCHUP_PAGE:
+                break
+        else:
+            log.warning(
+                "canal %s: más de %d mensajes nuevos en un ciclo — puede haber "
+                "menciones sin leer. Bajá POLL_INTERVAL_SECONDS o revisá el canal.",
+                ch, self.MAX_CATCHUP_PAGES * self.CATCHUP_PAGE)
+        return out
+
     # ── contrato Channel ─────────────────────────────────────────────────
     def get_mentions(self) -> list[dict]:
         mentions = []
         for ch in self._channel_ids:
             try:
-                msgs = self._get(f"/channels/{ch}/messages", limit=self.HISTORY_LIMIT)
+                msgs = self._new_messages(ch)
             except Exception as e:
                 log.error("messages de canal %s falló: %s", ch, e)
                 continue
@@ -482,7 +542,9 @@ class DiscordChannel:
         lines = [f"{m['author']['username']}: {self._full_text(m)}" for m in chain]
         root = chain[0] if chain else leaf
         root_uri = f"{channel_id}/{root['id']}"
-        return "\n".join(lines), root_uri, str(root["id"]), self._media_note(leaf)
+        # Vision solo sobre la hoja: es el mensaje que el bot está por contestar.
+        # La cadena de contexto queda con la anotación barata (costo acotado).
+        return "\n".join(lines), root_uri, str(root["id"]), self._media_note(leaf, describe=True)
 
     def get_mention_by_uri(self, uri: str) -> dict | None:
         channel_id, _, message_id = uri.partition("/")
@@ -491,7 +553,7 @@ class DiscordChannel:
             return None
         context, root_uri, root_cid, _ = self.get_thread_info(uri, str(msg["id"]))
         out = self._to_mention(channel_id, msg)
-        out["text"] = self._full_text(msg)
+        out["text"] = self._full_text(msg, describe=True)
         out.update(thread_context=context, thread_root_uri=root_uri,
                    thread_root_cid=root_cid)
         return out
@@ -563,8 +625,9 @@ class DiscordChannel:
         return False
 
     def set_media_describer(self, fn) -> None:
-        # Vision sobre attachments: pendiente; se anota filename/content_type.
-        log.debug("set_media_describer: DiscordChannel anota attachments (vision pendiente)")
+        """Vision sobre los attachments: el describidor se llama con la URL del CDN
+        (`make_media_describer` acepta post_view de Bluesky o URL suelta)."""
+        self._media_describer = fn
 
     # ── fuentes de feed (loop proactivo) ─────────────────────────────────
     def get_feed_posts(self, source_type: str, identifier: str | None,

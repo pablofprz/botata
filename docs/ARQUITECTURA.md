@@ -63,7 +63,7 @@ cablea. Eso permite testearlos aislados y, a futuro (M7), reutilizarlos con otro
 4. Timezone Argentina (`ZoneInfo` con fallback UTC-3 fijo; Windows no trae tzdata del SO).
 5. `settings = load_json(config/settings.json)` → constantes de módulo:
    `BSKY_HANDLE`, `ADMIN_HANDLE`, `POLL_INTERVAL`, `FEEDS_CONFIG`, `TOOLS_CONFIG`,
-   `MCP_CONFIG`, `TASKS_CONFIG`, `MODELS_CONFIG`, `NEWS_ENABLED`, `NEWS_SOURCES`.
+   `MCP_CONFIG`, `TASKS_CONFIG`, `MODELS_CONFIG`, `NEWS_SOURCES`.
 
 **Env vars obligatorias** (el import falla sin ellas): `BSKY_PASSWORD`, `OPENROUTER_API_KEY`.
 **Opcionales por feature**: `BRAVE_API_KEY` (web_search), `SPOTIFY_CLIENT_ID/SECRET`
@@ -75,11 +75,17 @@ cablea. Eso permite testearlos aislados y, a futuro (M7), reutilizarlos con otro
 |---|---|---|
 | `BOT_HANDLE` / `ADMIN_HANDLE` | identidad y gate de admin | todo el sistema |
 | `MODELS` | endpoints/aliases/roles del router | `router.py` |
-| `FEEDS[]` | fuentes proactivas (list/feed/following) + política + intervalo | grafo de feed |
+| `FEEDS[]` | fuentes de LECTURA (list/feed/following/local/channel) + intervalo | grafo de feed |
 | `TOOLS` | enable/scopes por tool | `ToolRegistry.apply_config` |
 | `TASKS` | enable/intervalo por tarea periódica | `scheduler.apply_tasks_config` |
 | `MCP` | servers MCP externos (transport/command/filtros) | `mcp_tools` |
-| `NEWS_ENABLED` | master toggle de noticias RSS | `run_news_pass` |
+| `MEMBRILLA` | repo + comandos del scraper hermano (botón "Lanzar scraper" de la UI) | `config_ui.py` |
+
+Además, dos registros **fuera** de settings.json, ambos en `config/` de la instancia y con la
+misma forma (lista de fuentes con `category`): `news_sites.json` (RSS → tool `get_news`) y
+**`content_sources.json`** (T38: qué cuenta/board scrapeado es de qué tema → parámetro `topic`
+de `search_images`). El tema se resuelve **en query** contra `source_name`, así editarlos
+aplica en caliente sin reindexar.
 
 ### run(mode) — el runtime
 
@@ -164,21 +170,19 @@ parents reconstruida), `thread_root_uri/cid`, `mode`, `is_admin`. Los nodos van 
   y se reintenta cada `failed` refetcheando el post por URI (la poll normal solo ve las
   últimas 25 notificaciones; sin esto, una mención fallida vieja se perdía para siempre).
 
-## 5. El grafo de feed (flujo proactivo)
+## 5. El grafo de feed (pase de LECTURA)
 
-El bot no solo responde: lee el feed de la comunidad y decide si tiene algo que decir.
+El bot lee el feed de la comunidad y aprende de él. **Nunca postea desde acá**
+(2026-07-27, T28 fase 3d): opinar sobre lo leído es trabajo de las rutinas, que
+consultan esta lectura vía `summarize_feed` y `context/feeds/*.md`.
 
 ```mermaid
 graph TD
     A[START] --> F[fetch<br/><i>gate de intervalo + fetch posts</i>]
     F -->|sin posts| Z[END]
     F -->|hay posts| L[learn<br/><i>hechos + eventos → memoria (T6)</i>]
-    L --> S[summarize<br/><i>rol feed_summary</i>]
-    S -->|sin resumen| Z
-    S --> R[reflect<br/><i>rol feed_opinion · DECIDE</i>]
-    R -->|no vale la pena| Z
-    R -->|should_post| P[post<br/><i>dedup + postea</i>]
-    P --> Z
+    L --> S[summarize<br/><i>rol feed_summary → context/feeds/*.md</i>]
+    S --> Z
 ```
 
 - **FetchFeedNode**: respeta `interval_hours` por feed (cursor en `feed_cursors`); soporta
@@ -188,13 +192,10 @@ graph TD
   Extrae `FeedLearnings`: hechos autorrevelados (solo de usuarios que ya tienen perfil —
   gate `user_exists`, para no acumular datos de desconocidos) y eventos con fecha (van a
   `events`; si el dueño no tiene perfil, el evento queda como "de comunidad").
-- **ReflectDecideNode** — el núcleo agéntico (T5). Recibe SOUL + fecha + resumen + la
-  **política de posteo** del feed (`conservative`/`balanced`/`active`, cada una un prompt
-  en `prompts/feed_policy_*.md`) + sus propios posts recientes (anti-repetición) + skills +
-  tools scope `feed_reflection` (puede buscar en la web, mirar el calendario, buscar música).
-  Devuelve `FeedDecision {should_post, reason, text, image_query}`. La razón queda logueada.
-- **PostFeedNode**: guardia de duplicados **normalizada** contra `bot_posts` (case, espacios)
-  e imagen autónoma opcional (T12, con guardrail: jamás postea una imagen sin descripción).
+- Esta lectura alimenta tres consumidores: la **memoria** (facts/eventos), la tool
+  **`summarize_feed`** (resumen en vivo, scope reply+feed_reflection) y el **clima de
+  moods** (disparadores temáticos). Los ex nodos de posteo (`ReflectDecideNode`/
+  `PostFeedNode`, con su `posting_policy`) se eliminaron en T28 fase 3d.
 
 ## 6. Persistencia y memoria (db.py)
 
@@ -298,8 +299,8 @@ Tools actuales (por scope predominante): `web_search` (Brave), `get_upcoming_eve
 `get_debug_info` / `get_help` (admin).
 
 **Config por comandos (T30):** el admin ajusta la configuración desde Bluesky con 6 tools
-scope `admin` (`get_bot_config` + `set_{tool,task,feed}_config`, `set_news_enabled`,
-`set_mcp_enabled`). Doble efecto: persisten a settings.json (validado + atómico, releyendo
+scope `admin` (`get_bot_config` + `set_{tool,task,feed}_config`, `set_mcp_enabled`,
+más `set_routine`/`delete_routine`). Doble efecto: persisten a settings.json (validado + atómico, releyendo
 el disco para no pisar a la UI de T22) y aplican **en vivo** sobre los objetos que el loop
 consulta. **Locks** (doble capa: handler + `_delta_guard` en la persistencia) — regla
 general: *por comando solo se reduce exposición, nunca se amplía*: identidad
@@ -369,8 +370,7 @@ Tareas registradas:
 
 | Tarea | Qué hace | Default |
 |---|---|---|
-| `feed` | grafo proactivo por cada feed configurado | on |
-| `news` | RSS de noticias por fuente (`mode: comment\|post`, dedup `posted_news`) | on (pero `NEWS_ENABLED:false` manda) |
+| `feed` | pase de LECTURA por cada feed configurado (aprende, nunca postea) | on |
 | `mentions` | poll + proceso de menciones | on |
 | `routines` | TODA la conducta proactiva con cadencia (rutinas en `routines/*.md`) | on, cada ciclo |
 
@@ -446,8 +446,8 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 ## 15. Operación
 
 - **Entrypoints CLI**: `python -m botata` (loop completo; `--mode open|admin_only`) ·
-  `--proactive [--force-post]` (pase de feed one-shot) · `--news` · `--routines` ·
-  `--fetch-feeds [--backfill]` · `--post-summary <feed>`. Satélites: `mem_admin.py`,
+  `--proactive` (pase de lectura one-shot) · `--routines` ·
+  `--fetch-feeds [--backfill]`. Satélites: `mem_admin.py`,
   `catalog.py`, `scrape_ig.py`, `migrate_maripobot.py`.
 - **Panel de configuración** (`python config_ui.py`, T22): UI web solo-localhost (stdlib,
   cero deps) sobre settings.json/.env/news_sites.json/skills. Credenciales write-only
@@ -477,7 +477,9 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 - **Prompt nuevo**: siempre archivo en `prompts/`, cargado con `load_text` (T23).
 - **Canal nuevo (M7, futuro)**: extraer de `BskyClient` la interfaz `Channel`
   (mentions/post/reply/thread/perfil normalizado); el grafo no debe saber en qué red habla.
-  Alcance decidido (2026-07-19): SOLO Bluesky → Mastodon → Discord (Pleroma/Akkoma
+  Alcance ACTUALIZADO (2026-07-27, fase de lanzamiento): Bluesky (maduro) → Discord →
+  WhatsApp (vía no oficial) → Telegram; Mastodon relegado. Ver ROADMAP M10.
+  ~~Alcance decidido (2026-07-19): SOLO Bluesky → Mastodon → Discord~~ (Pleroma/Akkoma
   gratis vía Mastodon API si sobra tiempo; el resto descartado — ver ROADMAP T28).
 
 ## 17. Límites conocidos y deuda deliberada
@@ -492,8 +494,8 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 - **Ollama fallback sin guided_json**: structured outputs degradados si OpenRouter cae.
 - **`relationships` sin poblar**: el schema del grafo social existe, pero nada escribe en
   él todavía (la decisión Neo4J-vs-SQLite está en CLAUDE.md: diferida).
-- **`FeedProcessor` legacy** convive con el grafo proactivo (lo usan `--fetch-feeds` y
-  `--post-summary`); candidato a borrarse cuando esos caminos se porten.
+- **`FeedProcessor` legacy** convive con el grafo de lectura (lo usa `--fetch-feeds`);
+  candidato a borrarse cuando ese camino se porte.
 - **Validaciones en vivo pendientes**: T10 `/blockme` y T11 `/resetme` nunca se ejecutaron
   contra prod (necesitan cuenta descartable). Toggles apagados esperando al admin:
-  `reddit`, `browser`, `NEWS_ENABLED`.
+  `reddit`, `browser`.

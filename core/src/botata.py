@@ -214,8 +214,44 @@ def _load_news_sources() -> list[dict]:
 
 
 NEWS_SOURCES : list = _load_news_sources()
-# Master toggle del posteo de noticias (outward-facing). OFF por default: el admin lo prende.
-NEWS_ENABLED : bool = bool(settings.get("NEWS_ENABLED", False))
+
+
+def _load_content_sources() -> list[dict]:
+    """T38: carga config/content_sources.json — el registro de QUÉ FUENTE es de QUÉ TEMA
+    para el contenido scrapeado (gemelo de news_sites.json, que hace lo mismo con RSS).
+
+    Forma: [{platform, source, category, description, enabled}]. `source` es el
+    `source_name` con el que Membrilla dejó el contenido (la cuenta/board de origen).
+    El tema NO viene de Membrilla a propósito: 'Membrilla adquiere, el consumidor
+    interpreta' — la relevancia de cada fuente es config del admin de esta comunidad.
+    """
+    try:
+        raw = load_json(CONFIG_DIR / "content_sources.json")
+    except Exception:
+        return []
+    return [e for e in raw if isinstance(e, dict) and (e.get("source") or "").strip()]
+
+
+CONTENT_SOURCES : list = _load_content_sources()
+
+
+def sources_for_topic(topic: str) -> list[str]:
+    """Nombres de fuente (`source_name`) declarados para un tema. [] si no matchea nada.
+
+    Matcheo tolerante (el tema lo escribe un LLM): case-insensitive y por
+    substring contra `category`, `source` y `description`, igual que get_news.
+    """
+    t = (topic or "").strip().lower()
+    if not t:
+        return []
+    out = []
+    for s in CONTENT_SOURCES:
+        if not s.get("enabled", True):
+            continue
+        haystack = " ".join(str(s.get(k, "")) for k in ("category", "source", "description")).lower()
+        if t in haystack:
+            out.append(s["source"])
+    return out
 
 # Leer la media (imágenes/video/GIF) de los posts del hilo: corre el modelo
 # vision (rol image_describe) sobre el frame/thumbnail y suma la descripción al
@@ -779,11 +815,18 @@ def _format_media_piece(kind: str, desc: str, extra: str) -> str:
 
 
 def make_media_describer(vision_llm):
-    """Fábrica: devuelve fn(post_view)->str que anota la media del post con vision.
+    """Fábrica: devuelve fn(x)->str que describe media con vision.
 
-    Best-effort: cualquier pieza que falle se saltea; '' si el post no trae media
+    `x` puede ser un **post_view de Bluesky** (se recorre su embed) o una **URL
+    suelta** (Discord: los attachments traen link directo al CDN). Aceptar las dos
+    formas mantiene un solo describidor inyectado para todos los canales, en vez
+    de un contrato distinto por plataforma.
+
+    Best-effort: cualquier pieza que falle se saltea; '' si no hay media
     describible. `vision_llm` = RoleLLM(router, 'image_describe')."""
     def describe(post_view) -> str:
+        if isinstance(post_view, str):          # URL directa (Discord)
+            return _vision_describe_url(vision_llm, post_view)
         try:
             items = _iter_media_views(getattr(post_view, "embed", None))
         except Exception:
@@ -1525,75 +1568,13 @@ class FeedProcessor:
         else:
             log.info("Feed %s: LLM found nothing notable", feed_name)
 
-    def post_opinion(self, feed_name: str) -> None:
-        """
-        Read the latest summary block from context/feeds/{feed_name}.md,
-        generate a short personal opinion using reflect_feed_prompt.md,
-        and post it as a standalone skeet.
-        """
-        feed_path = FEEDS_DIR / f"{feed_name}.md"
-        if not feed_path.exists():
-            log.error("post_opinion: no feed file found for %s", feed_name)
-            return
-
-        # Extract the most recent summary block (last ## section)
-        content = feed_path.read_text(encoding="utf-8")
-        blocks  = content.split("\n## ")
-        if len(blocks) < 2:
-            log.error("post_opinion: feed file for %s has no summary entries yet", feed_name)
-            return
-        latest_block = blocks[-1].strip()
-
-        prompt = load_text(PROMPTS_DIR / "reflect_feed_prompt.md")
-        if not prompt:
-            log.error("post_opinion: reflect_feed_prompt.md not found")
-            return
-
-        soul   = soul_text()
-        # Reinforce the character limit explicitly — models tend to ignore it otherwise
-        system = (
-            f"{soul}\n\n---\n{current_datetime_line()}\n\n---\n{prompt}\n\n"
-            "IMPORTANT: your reply must be UNDER 250 CHARACTERS in total. "
-            "Count the characters before answering. If you go over, cut it."
-        )
-
-        try:
-            raw = self.router.chat(
-                "feed_opinion",
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": f"Feed: {feed_name}\n\n{latest_block}"},
-                ],
-                max_tokens=200,
-            )
-            if not raw:
-                log.error("post_opinion: LLM returned empty content for %s", feed_name)
-                return
-            opinion = raw.strip()
-        except Exception as e:
-            log.error("post_opinion: LLM failed for %s: %s", feed_name, e)
-            return
-
-        log.info("post_opinion [%s]: %s", feed_name, opinion[:80])
-        uri = self.bsky.post(opinion)
-        log_bot_post(self.db, uri=uri, in_reply_to=None, reply_to_handle=None, text=opinion)
-        log.info("post_opinion: posted %s", uri)
-
 
 # ---------------------------------------------------------------------------
-# T5 · Loop proactivo de feed (grafo langgraph)
-#   fetch → summarize → reflect_decide (tool_calling, scope feed_reflection)
-#         → post (si el agente decide postear y no es duplicado)
-# El agente decide autónomamente si postea, según temática, mood y política.
+# T5 · Pase de LECTURA del feed (grafo langgraph): fetch → learn → summarize
+# Solo lee y aprende — NUNCA postea. Alimenta la memoria (facts/eventos), los
+# resúmenes de feed (summarize_feed) y el clima de moods. La proactividad de
+# posteo vive 100% en las rutinas (routines/*.md).
 # ---------------------------------------------------------------------------
-
-# Guía de comportamiento por política de posteo (configurable por feed en settings.json).
-def feed_policy_guidance(policy: str) -> str:
-    """Guía de decisión de posteo por política (T23: prompt externalizado en
-    prompts/feed_policy_{policy}.md). Cae a `balanced` si la política es desconocida."""
-    return (load_text(PROMPTS_DIR / f"feed_policy_{policy}.md")
-            or load_text(PROMPTS_DIR / "feed_policy_balanced.md"))
-
 
 class FeedDecision(BaseModel):
     """Decisión del agente sobre si postear en el feed (structured output)."""
@@ -1638,22 +1619,14 @@ class FeedState(TypedDict, total=False):
     feed_type: str
     list_uri: str
     interval_hours: int
-    posting_policy: str
-    force_post: bool
     full_backfill: bool
     learn: bool
-    autonomous_images: bool
     # intermedio / salida
     posts: list
     posts_count: int
     summary: str | None
     learned_facts: int
     learned_events: int
-    should_post: bool
-    post_text: str
-    image_query: str
-    reason: str
-    posted_uri: str
 
 
 class FetchFeedNode:
@@ -1666,8 +1639,8 @@ class FetchFeedNode:
     def run(self, state: FeedState) -> dict:
         feed_name = state["feed_name"]
         interval  = state.get("interval_hours", 0)
-        # Respeta la frecuencia salvo force o backfill.
-        if not state.get("force_post") and not state.get("full_backfill") and interval:
+        # Respeta la frecuencia salvo backfill.
+        if not state.get("full_backfill") and interval:
             last_run = get_feed_last_run(self.conn, feed_name)
             if last_run is not None:
                 elapsed = (datetime.now(timezone.utc)
@@ -1778,100 +1751,6 @@ class LearnFromFeedNode:
         return {"learned_facts": n_facts, "learned_events": n_events}
 
 
-class ReflectDecideNode:
-    """
-    Núcleo agéntico de T5. El agente lee el resumen y decide si postear, considerando
-    temática, mood, política de posteo y sus posts recientes (para no repetirse). Puede
-    llamar tools con scope feed_reflection (T1) antes de decidir.
-    """
-
-    def __init__(self, llm: RoleLLM, registry: ToolRegistry, conn: sqlite3.Connection):
-        self.llm      = llm
-        self.registry = registry
-        self.conn     = conn
-
-    def run(self, state: FeedState) -> dict:
-        summary = state.get("summary")
-        if not summary:
-            return {"should_post": False, "reason": "sin resumen"}
-
-        soul     = soul_text()
-        reflect  = load_text(PROMPTS_DIR / "reflect_feed_prompt.md")
-        policy   = state.get("posting_policy", "balanced")
-        guidance = feed_policy_guidance(policy)
-        recientes = recent_bot_posts(self.conn, limit=8)
-
-        parts = [
-            soul,
-            f"\n---\n{current_datetime_line()}",
-            mood_line(self.conn),
-            memory_block(self.conn),
-            prefs_block(self.conn),
-            f"\n---\n{reflect}" if reflect else "",
-            f"\n---\n{guidance}",
-        ]
-        # T26: skills scope feed_reflection (inline + índice on-demand)
-        skills_block = skills_prompt_block(SKILLS_DIR, Scope.FEED_REFLECTION)
-        if skills_block:
-            parts.append(f"\n---\n{skills_block}")
-        if recientes:
-            parts.append(
-                "\n---\nYa posteaste esto recientemente (NO lo repitas ni parafrasees):\n"
-                + "\n".join(f"- {t}" for t in recientes)
-            )
-        if state.get("force_post"):
-            parts.append(
-                "\n---\nIMPORTANTE: esta corrida es FORZADA. Tenés que postear sí o sí: "
-                "poné should_post=true y generá el mejor texto posible."
-            )
-
-        # Fase de tools (scope feed_reflection). Hoy puede no haber ninguna; queda cableado.
-        tools = self.registry.openai_schemas(Scope.FEED_REFLECTION)
-        if tools:
-            tool_system = "\n".join(p for p in parts if p) + (
-                "\n---\nSi necesitás info extra (buscar algo, ver el calendario, etc.) llamá "
-                "a una tool. Si no, no llames ninguna."
-            )
-            try:
-                _, tool_calls = self.llm.call_with_tools(tool_system, summary, tools)
-                for call in tool_calls or []:
-                    name  = call.function.name
-                    cargs = json.loads(call.function.arguments)
-                    outcome = self.registry.execute(name, cargs, ToolContext(state=state, conn=self.conn))
-                    parts.append(f"\n---\nResultado de {name}: {outcome.text}")
-            except Exception as e:
-                log.warning("ReflectDecideNode: fase de tools falló: %s", e)
-
-        # T12: posteo autónomo de imágenes (off por default). Solo se ofrece si el
-        # feed lo habilita Y hay imágenes en el catálogo.
-        images_on = bool(state.get("autonomous_images")) and \
-            dbmod.get_image_catalog_stats(self.conn)["total"] > 0
-        if images_on:
-            parts.append(
-                "\n---\nTenés un catálogo de imágenes. Si —y SOLO si— una imagen pega justo "
-                "con tu post, poné en 'image_query' palabras clave para buscarla. Si no "
-                "corresponde, dejá 'image_query' vacío (la mayoría de las veces va vacío)."
-            )
-
-        parts.append("\n---\n" + load_text(PROMPTS_DIR / "feed_decision_format.md"))
-        system = "\n".join(p for p in parts if p)
-
-        log_llm_context(f"feed_reflection ({state['feed_name']})", system, summary)
-        try:
-            decision = self.llm.complete(system, summary, FeedDecision)
-        except Exception as e:
-            log.error("ReflectDecideNode: %s", e)
-            return {"should_post": False, "reason": f"error: {e}"}
-
-        should = bool(decision.should_post) or bool(state.get("force_post"))
-        image_query = decision.image_query if images_on else ""
-        log.info("Feed %s: decisión should_post=%s (%s)%s",
-                 state["feed_name"], should, decision.reason[:80],
-                 f" +img={image_query!r}" if image_query else "")
-        return {"should_post": should, "post_text": decision.text,
-                "reason": decision.reason, "image_query": image_query}
-
-
 _VALID_IMAGE_CATEGORIES = {"meme", "foto", "arte", "captura", "otro"}
 
 
@@ -1942,81 +1821,38 @@ def resolve_catalog_image(conn: sqlite3.Connection, query: str | None,
     return None
 
 
-class PostFeedNode:
-    """Postea el skeet decidido, con guardia de duplicados contra bot_posts."""
-
-    def __init__(self, bsky: BskyClient, conn: sqlite3.Connection):
-        self.bsky = bsky
-        self.conn = conn
-
-    def run(self, state: FeedState) -> dict:
-        if not state.get("should_post"):
-            return {}
-        text = (state.get("post_text") or "").strip()
-        if not text:
-            log.info("Feed %s: should_post pero sin texto — skip", state.get("feed_name"))
-            return {}
-        norm = _norm_text(text)
-        if any(_norm_text(t) == norm for t in recent_bot_posts(self.conn, limit=20)):
-            log.info("Feed %s: texto duplicado de un post reciente — skip", state.get("feed_name"))
-            return {}
-        # T12: imagen autónoma (opcional). El guardrail vive en resolve_catalog_image.
-        image_path = None
-        if state.get("autonomous_images") and state.get("image_query"):
-            image_path = resolve_catalog_image(self.conn, state["image_query"])
-        uri = self.bsky.post(text, media_path=image_path)
-        log_bot_post(self.conn, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
-        log.info("Feed %s: posteado %s%s", state.get("feed_name"), uri,
-                 " (con imagen)" if image_path else "")
-        return {"posted_uri": uri}
-
-
 def _feed_has_posts(state: FeedState) -> str:
     return "learn" if state.get("posts_count", 0) > 0 else "END"
 
 
-def _feed_has_summary(state: FeedState) -> str:
-    return "reflect" if state.get("summary") else "END"
-
-
-def _feed_should_post(state: FeedState) -> str:
-    return "post" if state.get("should_post") else "END"
-
-
-def build_feed_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection,
-                     registry: ToolRegistry):
+def build_feed_graph(router: ModelRouter, bsky: BskyClient, db: sqlite3.Connection):
     """
-    Grafo proactivo de feed (T5 + T6):
-        START → fetch → learn → summarize → reflect → post → END
-                  ↓sin posts       ↓sin resumen   ↓no postea
-                 END              END            END
-    `learn` (T6) extrae hechos/eventos de los posts crudos; siempre sigue a summarize.
+    Grafo de LECTURA del feed (T5 + T6, solo inward — nunca postea):
+        START → fetch → learn → summarize → END
+                  ↓sin posts
+                 END
+    `learn` (T6) extrae hechos/eventos de los posts crudos; `summarize` alimenta
+    context/feeds/*.md. Postear sobre lo leído es trabajo de las rutinas.
     """
     fetch     = FetchFeedNode(bsky, db)
     learn     = LearnFromFeedNode(RoleLLM(router, "update_profile"), db)
     summarize = SummarizeFeedNode(router, db)
-    reflect   = ReflectDecideNode(RoleLLM(router, "feed_opinion"), registry, db)
-    post      = PostFeedNode(bsky, db)
 
     g = StateGraph(FeedState)
     g.add_node("fetch",     fetch.run)
     g.add_node("learn",     learn.run)
     g.add_node("summarize", summarize.run)
-    g.add_node("reflect",   reflect.run)
-    g.add_node("post",      post.run)
 
     g.add_edge(START, "fetch")
-    g.add_conditional_edges("fetch",     _feed_has_posts,   {"learn": "learn", "END": END})
+    g.add_conditional_edges("fetch", _feed_has_posts, {"learn": "learn", "END": END})
     g.add_edge("learn", "summarize")
-    g.add_conditional_edges("summarize", _feed_has_summary, {"reflect": "reflect", "END": END})
-    g.add_conditional_edges("reflect",   _feed_should_post, {"post": "post", "END": END})
-    g.add_edge("post", END)
+    g.add_edge("summarize", END)
     return g.compile()
 
 
-def _run_feed_pass(graph, *, force_post: bool = False, full_backfill: bool = False,
+def _run_feed_pass(graph, *, full_backfill: bool = False,
                    respect_interval: bool = True) -> None:
-    """Una pasada del grafo proactivo sobre todos los feeds habilitados.
+    """Una pasada del grafo de lectura sobre todos los feeds habilitados.
 
     Reutilizado por `run_feed_loop` (CLI `--proactive`, one-shot, ignora el
     intervalo) y por el loop continuo `run()` (respeta el intervalo por feed).
@@ -2029,29 +1865,24 @@ def _run_feed_pass(graph, *, force_post: bool = False, full_backfill: bool = Fal
             "feed_type":      feed.get("type", "list"),
             "list_uri":       feed.get("uri"),
             "interval_hours": feed.get("interval_hours", 6) if respect_interval else 0,
-            "posting_policy": feed.get("posting_policy", "balanced"),
             "learn":          feed.get("learn", True),
-            "autonomous_images": feed.get("autonomous_images", False),
-            "force_post":     force_post,
             "full_backfill":  full_backfill,
         }
         result = graph.invoke(state)
-        if result.get("posted_uri"):
-            log.info("Feed %s: OK → %s", feed["name"], result["posted_uri"])
-        elif result.get("posts_count"):
-            log.info("Feed %s: sin posteo (%s)", feed["name"], result.get("reason", "n/a"))
+        if result.get("posts_count"):
+            log.info("Feed %s: leído (%d posts, %d hechos, %d eventos)",
+                     feed["name"], result["posts_count"],
+                     result.get("learned_facts", 0), result.get("learned_events", 0))
 
 
-def run_feed_loop(force_post: bool = False, full_backfill: bool = False) -> None:
-    """Loop proactivo (T5/T6) como pase único desde CLI (`--proactive`). Ignora intervalo."""
-    db       = init_db()
-    bsky     = build_channel()
-    router   = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    registry = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
-    graph    = build_feed_graph(router, bsky, db, registry)
-    _run_feed_pass(graph, force_post=force_post, full_backfill=full_backfill,
-                   respect_interval=False)
-    log.info("Loop proactivo completo.")
+def run_feed_loop(full_backfill: bool = False) -> None:
+    """Pase de lectura (T5/T6) como pase único desde CLI (`--proactive`). Ignora intervalo."""
+    db     = init_db()
+    bsky   = build_channel()
+    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
+    graph  = build_feed_graph(router, bsky, db)
+    _run_feed_pass(graph, full_backfill=full_backfill, respect_interval=False)
+    log.info("Pase de lectura completo.")
 
 
 # ---------------------------------------------------------------------------
@@ -2086,79 +1917,6 @@ def fetch_rss(url: str, max_items: int = 15) -> list[dict]:
     return items
 
 
-def _summarize_news(router: ModelRouter, items: list[dict], source: dict) -> str | None:
-    """Comentario en la voz del bot sobre los titulares nuevos (rol feed_summary)."""
-    soul   = soul_text()
-    prompt = load_text(PROMPTS_DIR / "summarize_news_prompt.md")
-    label  = source.get("title") or source["host"]
-    cat    = source.get("category")
-    if cat:
-        label = f"{label} · {cat}"  # el bot sabe la categoría de la fuente
-    body   = "\n\n".join(f"[{label}] {it['title']}\n{it['description']}" for it in items[:15])
-    try:
-        content = router.chat(
-            "feed_summary",
-            messages=[
-                {"role": "system", "content": f"{soul}\n\n{current_datetime_line()}\n\n{prompt}"},
-                {"role": "user", "content": body},
-            ],
-            max_tokens=400,
-        )
-    except Exception as e:
-        log.error("summarize_news: %s", e)
-        return None
-    return (content or "").strip() or None
-
-
-def run_news_pass(bsky: BskyClient, router: ModelRouter, db: sqlite3.Connection, *,
-                  force: bool = False, respect_interval: bool = True,
-                  max_post_items: int = 3) -> None:
-    """T15: por cada fuente RSS habilitada, postea lo NUEVO (dedup por item).
-    `mode` por fuente: 'comment' (un comentario LLM de los items nuevos) o 'post'
-    (cada item nuevo como skeet, capado). Master toggle NEWS_ENABLED (off por default)."""
-    if not NEWS_ENABLED:
-        return
-    for src in NEWS_SOURCES:
-        if not src.get("enabled", True):
-            continue
-        cursor   = "news:" + src["host"]
-        interval = src.get("interval_hours", 6)
-        if respect_interval and not force and interval:
-            last = get_feed_last_run(db, cursor)
-            if last:
-                elapsed = (datetime.now(timezone.utc)
-                           - datetime.fromisoformat(last)).total_seconds() / 3600
-                if elapsed < interval:
-                    log.info("news %s: no toca todavía (%.1fh < %dh)", src["host"], elapsed, interval)
-                    continue
-        try:
-            items = fetch_rss(src["url"])
-        except Exception as e:
-            log.error("news %s: fetch falló: %s", src["host"], e)
-            continue
-        save_feed_last_run(db, cursor)
-        new = [it for it in items if not dbmod.news_item_posted(db, it["id"])]
-        if not new:
-            log.info("news %s: nada nuevo", src["host"])
-            continue
-
-        if src.get("mode", "comment") == "comment":
-            comment = _summarize_news(router, new, src)
-            if comment:
-                uri = bsky.post(comment)
-                log_bot_post(db, uri=uri, in_reply_to=None, reply_to_handle=None, text=comment)
-                log.info("news %s: comentario posteado %s (%d items)", src["host"], uri, len(new))
-            for it in new:  # marcados aunque el comentario falle: no reintentar los mismos
-                dbmod.mark_news_item_posted(db, it["id"], src["host"], it["title"])
-        else:  # mode == 'post'
-            for it in new[:max_post_items]:
-                text = f"{it['title']}\n{it['link']}" if it["link"] else it["title"]
-                uri  = bsky.post(text)
-                log_bot_post(db, uri=uri, in_reply_to=None, reply_to_handle=None, text=text)
-                dbmod.mark_news_item_posted(db, it["id"], src["host"], it["title"])
-                log.info("news %s: item posteado %s", src["host"], uri)
-
-
 # ---------------------------------------------------------------------------
 # Config por comandos de admin (T30)
 # ---------------------------------------------------------------------------
@@ -2179,7 +1937,7 @@ _PROTECTED_SETTINGS = ("BOT_HANDLE", "ADMIN_HANDLE", "ADMIN_HANDLES", "MODELS",
 # Las tools de config no se tocan a sí mismas (anti auto-lockout / escalación).
 _CONFIG_TOOL_NAMES = frozenset({
     "get_bot_config", "set_tool_config", "set_task_config",
-    "set_feed_config", "set_news_enabled", "set_mcp_enabled",
+    "set_feed_config", "set_mcp_enabled",
 })
 
 
@@ -2249,15 +2007,6 @@ def _as_bool(value) -> bool | None:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("true", "1", "sí", "si", "on")
-
-
-def run_news_loop() -> None:
-    """Pase único del pipeline de noticias desde CLI (`--news`). Ignora el intervalo."""
-    db     = init_db()
-    bsky   = build_channel()
-    router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-    run_news_pass(bsky, router, db, force=True, respect_interval=False)
-    log.info("News pass completo.")
 
 
 # ---------------------------------------------------------------------------
@@ -3261,8 +3010,22 @@ def _tool_use_skill(args: dict, ctx: ToolContext) -> ToolResult:
 def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
     query    = args.get("query", "")
     category = args.get("category")
+    topic    = (args.get("topic") or "").strip()
+    # T38: el tema acota la búsqueda a las fuentes que el admin declaró para él
+    # (content_sources.json). Se resuelve en query, así editar el registro aplica
+    # en caliente. Tema desconocido → avisamos en vez de devolver cualquier cosa.
+    sources = None
+    if topic:
+        sources = sources_for_topic(topic)
+        if not sources:
+            conocidos = sorted({(s.get("category") or "").strip()
+                                for s in CONTENT_SOURCES if s.get("enabled", True)} - {""})
+            return ToolResult(text=(
+                f"no tengo fuentes declaradas para '{topic}'. Temas disponibles: "
+                + (", ".join(conocidos) or "ninguno — el admin no cargó fuentes de contenido")))
     results  = dbmod.prefer_fresh_media(
-        dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category, limit=8))
+        dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category,
+                                          sources=sources, limit=8))
     # Primer candidato con path posteable (frame → video padre; ver _postable_media_path)
     # — prefer_fresh_media ya mandó al fondo los usados hace poco (anti-repetición).
     best, best_path = None, None
@@ -3761,13 +3524,15 @@ def _tool_share_video(args: dict, ctx: ToolContext) -> ToolResult:
 
 
 def _tool_get_news(args: dict, ctx: ToolContext) -> ToolResult:
-    """T15 (reply): un usuario pide noticias/links de las fuentes RSS configuradas,
-    opcionalmente filtradas por categoría. Independiente de NEWS_ENABLED (que gobierna
-    solo el posteo autónomo)."""
+    """T15: titulares de las fuentes RSS configuradas, filtrables por categoría.
+    Con `only_new=true` devuelve solo lo que nunca mostró antes y lo marca visto
+    (dedup en db.news_items) — es el modo para rutinas: una rutina de noticias
+    que corre cada X horas no repite titulares entre pases."""
     if not NEWS_SOURCES:
         return ToolResult(text="no tengo fuentes de noticias configuradas")
-    cat     = (args.get("category") or "").strip().lower() or None
-    sources = [s for s in NEWS_SOURCES if s.get("enabled", True)]
+    cat      = (args.get("category") or "").strip().lower() or None
+    only_new = _as_bool(args.get("only_new")) or False
+    sources  = [s for s in NEWS_SOURCES if s.get("enabled", True)]
     if cat:
         sources = [s for s in sources
                    if cat in (s.get("category", "") + " " + s.get("title", "")).lower()]
@@ -3777,16 +3542,21 @@ def _tool_get_news(args: dict, ctx: ToolContext) -> ToolResult:
     lines: list[str] = []
     for s in sources:
         try:
-            items = fetch_rss(s["url"], max_items=3)
+            items = fetch_rss(s["url"], max_items=6 if only_new else 3)
         except Exception as e:
             log.error("get_news %s: %s", s["host"], e)
             continue
+        if only_new:
+            items = [it for it in items if not dbmod.news_item_posted(ctx.conn, it["id"])]
         label = s.get("title") or s["host"]
         for it in items[:3]:
             link = f" {it['link']}" if it.get("link") else ""
             lines.append(f"- [{label}] {it['title']}{link}")
+            if only_new:
+                dbmod.mark_news_item_posted(ctx.conn, it["id"], s["host"], it["title"])
     if not lines:
-        return ToolResult(text="no pude traer noticias ahora")
+        return ToolResult(text="no hay titulares nuevos ahora" if only_new
+                          else "no pude traer noticias ahora")
     return ToolResult(text="\n".join(lines[:8]))
 
 
@@ -4078,7 +3848,8 @@ def build_tool_registry(config: dict | None = None, *,
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query in Spanish, e.g. 'meme de gato', 'perro enojado'."},
-                "category": {"type": "string", "description": "Optional category filter: 'meme', 'foto', 'arte', 'captura', 'otro'."},
+                "category": {"type": "string", "description": "Optional file-type filter: 'meme', 'foto', 'arte', 'captura', 'otro'."},
+                "topic": {"type": "string", "description": "Optional TOPIC filter (e.g. 'futbol', 'politica'): restricts the search to the sources the admin registered for that topic. Use it when the request names a subject that has its own sources."},
             },
             "required": ["query"],
         },
@@ -4260,16 +4031,19 @@ def build_tool_registry(config: dict | None = None, *,
         "get_news",
         "Trae titulares recientes con su link de las fuentes de noticias RSS configuradas "
         "(La Política Online, Página/12, etc.). Usala cuando un usuario pide noticias, "
-        "titulares o links de actualidad. Se puede filtrar por categoría (ej. 'política').",
+        "titulares o links de actualidad, o desde una rutina de noticias. Se puede "
+        "filtrar por categoría (ej. 'política'). Con only_new=true trae SOLO titulares "
+        "que nunca mostraste y los marca vistos (para rutinas: no repetir entre pases).",
         {
             "type": "object",
             "properties": {
-                "category": {"type": "string", "description": "Opcional: filtrar por categoría de la fuente (ej. 'política', 'noticias'). Omitir para todas."}
+                "category": {"type": "string", "description": "Opcional: filtrar por categoría de la fuente (ej. 'política', 'noticias'). Omitir para todas."},
+                "only_new": {"type": "boolean", "description": "Opcional: true = solo titulares nunca vistos, y los marca como vistos. Usalo en rutinas."}
             },
             "required": [],
         },
         _tool_get_news,
-        {Scope.REPLY, Scope.ADMIN},
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     reg.register(
         "use_skill",
@@ -4327,11 +4101,13 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                 f"{t.name}={'on' if t.enabled else 'off'}"
                 + (f" cada {t.interval_hours}h" if t.interval_hours else "")
                 for t in _RUNTIME_TASKS))
-        lines.append("feeds: " + ", ".join(
+        lines.append("feeds (solo lectura): " + (", ".join(
             f"{f['name']}={'on' if f.get('enabled', True) else 'off'} "
-            f"({f.get('posting_policy', 'balanced')}, {f.get('interval_hours', 6)}h)"
-            for f in FEEDS_CONFIG))
-        lines.append(f"noticias (NEWS_ENABLED): {'on' if NEWS_ENABLED else 'off'}")
+            f"({f.get('interval_hours', 6)}h)"
+            for f in FEEDS_CONFIG) or "ninguno"))
+        lines.append("fuentes RSS (get_news): " + (", ".join(
+            (s.get("title") or s.get("host", "?")) + ("" if s.get("enabled", True) else " (off)")
+            for s in NEWS_SOURCES) or "ninguna"))
         if MOODS_CONFIG.get("enabled"):
             try:
                 mode = str(MOODS_CONFIG.get("mode", "manual")).lower()
@@ -4426,7 +4202,7 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
     def _set_task_config(args: dict, ctx: ToolContext) -> ToolResult:
         name = (args.get("task") or "").strip()
         known = ([t.name for t in _RUNTIME_TASKS] or list(TASKS_CONFIG)
-                 or ["feed", "news", "mentions", "routines"])
+                 or ["feed", "mentions", "routines"])
         if name not in known:
             return ToolResult(text=f"tarea desconocida: '{name}'. Válidas: {', '.join(known)}")
         enabled = _as_bool(args.get("enabled"))
@@ -4531,8 +4307,8 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
         if live_feed is None:
             return ToolResult(text=f"feed desconocido: '{name}'. Válidos: "
                               + ", ".join(f.get("name", "?") for f in FEEDS_CONFIG))
-        enabled = _as_bool(args.get("enabled"))
-        interval, policy = args.get("interval_hours"), args.get("posting_policy")
+        enabled  = _as_bool(args.get("enabled"))
+        interval = args.get("interval_hours")
 
         def delta(s: dict) -> None:
             for f in s.get("FEEDS", []):
@@ -4541,8 +4317,6 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                         f["enabled"] = enabled
                     if interval is not None:
                         f["interval_hours"] = float(interval)
-                    if policy is not None:
-                        f["posting_policy"] = policy
         errs = _persist_settings_delta(delta)
         if errs:
             return ToolResult(text="no apliqué nada: " + "; ".join(errs))
@@ -4550,24 +4324,7 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
             live_feed["enabled"] = enabled
         if interval is not None:
             live_feed["interval_hours"] = float(interval)
-        if policy is not None:
-            live_feed["posting_policy"] = policy
         return ToolResult(text=f"feed {name} actualizado — aplicado en vivo y guardado")
-
-    def _set_news_enabled(args: dict, ctx: ToolContext) -> ToolResult:
-        enabled = _as_bool(args.get("enabled"))
-        if enabled is None:
-            return ToolResult(text="falta el argumento enabled (true/false)")
-
-        def delta(s: dict) -> None:
-            s["NEWS_ENABLED"] = enabled
-        errs = _persist_settings_delta(delta)
-        if errs:
-            return ToolResult(text="no apliqué nada: " + "; ".join(errs))
-        global NEWS_ENABLED
-        NEWS_ENABLED = enabled
-        return ToolResult(text=f"noticias {'activadas' if enabled else 'desactivadas'} "
-                          "— aplicado en vivo y guardado")
 
     def _set_mcp_enabled(args: dict, ctx: ToolContext) -> ToolResult:
         name = (args.get("server") or "").strip()
@@ -4589,7 +4346,7 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
 
     _obj = {"type": "object"}
     reg.register("get_bot_config",
-                 "Muestra la configuración actual del bot (tools, tareas, feeds, noticias, MCP).",
+                 "Muestra la configuración actual del bot (tools, tareas, feeds, fuentes RSS, MCP).",
                  {**_obj, "properties": {}}, _get_bot_config, {Scope.ADMIN})
     reg.register("set_tool_config",
                  "Prende/apaga una tool del bot, cambia sus scopes o la restringe a grupos de "
@@ -4605,7 +4362,7 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                                                "restricción donde no había, o achicar la lista)."},
                  }, "required": ["tool"]}, _set_tool_config, {Scope.ADMIN})
     reg.register("set_task_config",
-                 "Prende/apaga una tarea periódica (feed, news, mentions) o cambia su intervalo en horas. "
+                 "Prende/apaga una tarea periódica del motor (feed, mentions, calendar...) o cambia su intervalo en horas. "
                  "Las rutinas individuales no van por acá: usá set_routine.",
                  {**_obj, "properties": {
                      "task": {"type": "string"},
@@ -4634,18 +4391,13 @@ def _register_admin_config_tools(reg: ToolRegistry) -> None:
                      "name": {"type": "string"},
                  }, "required": ["name"]}, _delete_routine, {Scope.ADMIN})
     reg.register("set_feed_config",
-                 "Ajusta un feed proactivo: enabled, intervalo en horas y/o política de posteo.",
+                 "Ajusta un feed de lectura (el bot los lee y aprende, nunca postea desde "
+                 "ellos): enabled y/o intervalo en horas.",
                  {**_obj, "properties": {
                      "name": {"type": "string"},
                      "enabled": {"type": "boolean"},
                      "interval_hours": {"type": "number"},
-                     "posting_policy": {"type": "string",
-                                        "enum": ["conservative", "balanced", "active"]},
                  }, "required": ["name"]}, _set_feed_config, {Scope.ADMIN})
-    reg.register("set_news_enabled",
-                 "Prende/apaga el posteo de noticias RSS (master switch NEWS_ENABLED).",
-                 {**_obj, "properties": {"enabled": {"type": "boolean"}},
-                  "required": ["enabled"]}, _set_news_enabled, {Scope.ADMIN})
     reg.register("set_mcp_enabled",
                  "Habilita/deshabilita un server MCP (reddit, browser). Requiere reiniciar el bot.",
                  {**_obj, "properties": {"server": {"type": "string"},
@@ -5486,7 +5238,7 @@ def run(mode: str) -> None:
 
     graph      = build_graph(router, bsky, db)
     registry   = build_tool_registry(TOOLS_CONFIG, bsky=bsky, router=router, mcp_config=MCP_CONFIG)
-    feed_graph = build_feed_graph(router, bsky, db, registry)
+    feed_graph = build_feed_graph(router, bsky, db)
 
     log.info("Graph compiled. Polling every %ds. Admin: %s", POLL_INTERVAL, ADMIN_HANDLE)
     if bot_paused(db):
@@ -5501,7 +5253,6 @@ def run(mode: str) -> None:
     # `task:{name}`. Agregar una tarea nueva = una entrada acá + TASKS en settings.
     tasks = [
         PeriodicTask("feed",      lambda: _run_feed_pass(feed_graph, respect_interval=True)),
-        PeriodicTask("news",      lambda: run_news_pass(bsky, router, db, respect_interval=True)),
         PeriodicTask("mentions",  lambda: _poll_mentions(graph, db, bsky, mode)),
         # calendar: el calendario ACTÚA SIEMPRE — corre cada ciclo y anuncia
         # determinísticamente los eventos vencidos (gate por CALENDAR_ANNOUNCE).
@@ -5663,25 +5414,9 @@ if __name__ == "__main__":
         help="Use with --fetch-feeds: ignore last_run and fetch everything up to the pagination cap.",
     )
     parser.add_argument(
-        "--post-summary",
-        metavar="FEED_NAME",
-        help="Generate and post an opinion about the latest summary of a feed, then exit.",
-    )
-    parser.add_argument(
         "--proactive",
         action="store_true",
-        help="T5: run the autonomous feed loop (fetch→summarize→agent decides→maybe post) and exit.",
-    )
-    parser.add_argument(
-        "--force-post",
-        action="store_true",
-        help="Use with --proactive: force a post per feed even if the agent would abstain.",
-    )
-    parser.add_argument(
-        "--news",
-        action="store_true",
-        help="T15: run the RSS news pass once (post what's new per source) and exit. "
-             "Requires NEWS_ENABLED=true in settings.json.",
+        help="T5: run the feed reading pass (fetch→learn→summarize, never posts) and exit.",
     )
     parser.add_argument(
         "--routines",
@@ -5704,10 +5439,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.proactive:
-        run_feed_loop(force_post=args.force_post, full_backfill=args.backfill)
-
-    elif args.news:
-        run_news_loop()
+        run_feed_loop(full_backfill=args.backfill)
 
     elif args.routines:
         run_routines_loop()
@@ -5731,13 +5463,6 @@ if __name__ == "__main__":
                 full_backfill  = args.backfill,
             )
         log.info("Feed fetch complete.")
-
-    elif args.post_summary:
-        db        = init_db()
-        bsky      = build_channel()
-        router    = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
-        processor = FeedProcessor(bsky, router, db)
-        processor.post_opinion(feed_name=args.post_summary)
 
     else:
         run(mode=args.mode)

@@ -4,17 +4,13 @@
     "title": "La Política Online",
     "description": "últimas noticias de política argentina",
     "category": "política",
-    "mode": "comment",
-    "enabled": true,
-    "interval_hours": 6
+    "enabled": true
   },
   {
     "url": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/edicion-impresa/",
     "title": "Página/12",
     "description": "edición impresa",
     "category": "noticias",
-    "mode": "comment",
-    "enabled": true,
-    "interval_hours": 6
+    "enabled": true
   }
 ]

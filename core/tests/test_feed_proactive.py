@@ -1,4 +1,6 @@
-"""Tests del loop proactivo de feed (T5). Mockea LLM y Bluesky; DB y grafo reales."""
+"""Tests del pase de LECTURA del feed (T5/T6): fetch → learn → summarize.
+Desde 2026-07-27 el pase es solo inward — NUNCA postea (la proactividad de
+posteo vive en las rutinas). Mockea LLM y Bluesky; DB y grafo reales."""
 from __future__ import annotations
 
 import os
@@ -38,16 +40,13 @@ class FakeRouter:
 
 
 class FakeRoleLLM:
-    """Interfaz mínima de RoleLLM: no llama tools, devuelve una decisión fija."""
+    """Interfaz mínima de RoleLLM para el nodo learn (structured output)."""
 
-    def __init__(self, decision: dict):
-        self._decision = decision
-
-    def call_with_tools(self, system, user, tools):
-        return (None, [])
+    def __init__(self, learnings: dict | None = None):
+        self._learnings = learnings or {}
 
     def complete(self, system, user, model):
-        return model(**self._decision)
+        return model(**self._learnings)
 
 
 @pytest.fixture()
@@ -55,49 +54,52 @@ def env(tmp_path, monkeypatch):
     conn = d.init_db(tmp_path / "feed_test.db")
     monkeypatch.setattr(b, "FEEDS_DIR", tmp_path)  # no tocar el context/feeds real
     bsky = FakeBsky()
-    reg = b.build_tool_registry(b.TOOLS_CONFIG)
 
-    def make_graph(decision: dict):
-        monkeypatch.setattr(b, "RoleLLM", lambda router, role: FakeRoleLLM(decision))
-        return b.build_feed_graph(FakeRouter(), bsky, conn, reg)
+    def make_graph(learnings: dict | None = None):
+        monkeypatch.setattr(b, "RoleLLM", lambda router, role: FakeRoleLLM(learnings))
+        return b.build_feed_graph(FakeRouter(), bsky, conn)
 
     return conn, bsky, make_graph
 
 
 def _state(**over):
-    base = {
-        "feed_name": "polcifeed", "list_uri": "at://x", "interval_hours": 0,
-        "posting_policy": "balanced", "force_post": False, "full_backfill": False,
-    }
+    base = {"feed_name": "polcifeed", "list_uri": "at://x", "interval_hours": 0,
+            "full_backfill": False}
     base.update(over)
     return base
 
 
-def test_agent_decides_to_post(env):
-    _, bsky, make_graph = env
-    g = make_graph({"should_post": True, "reason": "tema del día", "text": "El dólar fue EL tema, ¿no?"})
+def test_lee_y_resume_sin_postear(env):
+    conn, bsky, make_graph = env
+    g = make_graph()
     res = g.invoke(_state())
-    assert res.get("posted_uri") and len(bsky.posted) == 1
+    assert res.get("posts_count") == 2
+    assert res.get("summary")            # el resumen se generó...
+    assert bsky.posted == []             # ...y NO hubo ningún posteo
+    assert (Path(b.FEEDS_DIR) / "polcifeed.md").exists()  # memoria del feed
 
 
-def test_dedup_skips_repeat(env):
-    _, bsky, make_graph = env
-    g = make_graph({"should_post": True, "reason": "x", "text": "texto repetido"})
-    g.invoke(_state())
-    assert len(bsky.posted) == 1
-    g.invoke(_state())  # mismo texto → duplicado
-    assert len(bsky.posted) == 1  # no reposteó
-
-
-def test_agent_abstains(env):
-    _, bsky, make_graph = env
-    g = make_graph({"should_post": False, "reason": "feed flojo", "text": ""})
+def test_aprende_hechos_de_usuarios_conocidos(env):
+    conn, bsky, make_graph = env
+    conn.execute("INSERT OR IGNORE INTO users (handle) VALUES ('user1')")
+    g = make_graph({"facts": [{"handle": "user1", "fact": "le interesa el dólar"}],
+                    "events": []})
     res = g.invoke(_state())
-    assert not res.get("posted_uri") and bsky.posted == []
+    assert res.get("learned_facts") == 1
+    assert bsky.posted == []
 
 
-def test_force_post_overrides_abstention(env):
-    _, bsky, make_graph = env
-    g = make_graph({"should_post": False, "reason": "flojo", "text": "posteo forzado"})
-    res = g.invoke(_state(force_post=True))
-    assert res.get("posted_uri") and bsky.posted == ["posteo forzado"]
+def test_learn_off_no_extrae(env):
+    conn, bsky, make_graph = env
+    conn.execute("INSERT OR IGNORE INTO users (handle) VALUES ('user1')")
+    g = make_graph({"facts": [{"handle": "user1", "fact": "x"}], "events": []})
+    res = g.invoke(_state(learn=False))
+    assert not res.get("learned_facts")
+
+
+def test_sin_posts_corta_temprano(env):
+    conn, bsky, make_graph = env
+    bsky.get_list_feed = lambda uri, since=None, limit=50: []
+    g = make_graph()
+    res = g.invoke(_state())
+    assert res.get("posts_count") == 0 and res.get("summary") is None

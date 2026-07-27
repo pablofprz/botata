@@ -56,8 +56,6 @@ ENV_KEYS = [
 _CHANNELS = {"bluesky", "mastodon", "discord"}
 # `local` = timeline local (Mastodon); `channel` = mensajes de un canal (Discord)
 _FEED_TYPES = {"list", "feed", "following", "local", "channel"}
-_POLICIES = {"conservative", "balanced", "active"}
-_NEWS_MODES = {"comment", "post"}
 _MCP_TRANSPORTS = {"stdio", "http"}
 _MOOD_MODES = {"manual", "auto"}
 _WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
@@ -123,8 +121,6 @@ def validate_settings(s: dict) -> list[str]:
             errs.append(f"{tag}: type inválido '{feed.get('type')}' (usar {sorted(_FEED_TYPES)})")
         if feed.get("type", "list") not in ("following", "local") and not feed.get("uri"):
             errs.append(f"{tag}: falta uri (obligatoria salvo type=following/local)")
-        if feed.get("posting_policy", "balanced") not in _POLICIES:
-            errs.append(f"{tag}: posting_policy inválida '{feed.get('posting_policy')}'")
 
     groups = s.get("USER_GROUPS", {})
     if not isinstance(groups, dict):
@@ -264,8 +260,18 @@ def validate_news(news: list) -> list[str]:
             errs.append(f"{tag}: url inválida")
         if not src.get("title"):
             errs.append(f"{tag}: falta title")
-        if src.get("mode", "post") not in _NEWS_MODES:
-            errs.append(f"{tag}: mode inválido '{src.get('mode')}' (comment|post)")
+    return errs
+
+
+def validate_content_sources(sources: list) -> list[str]:
+    """T38: registro tema→fuente del contenido scrapeado (config/content_sources.json)."""
+    errs = []
+    for i, src in enumerate(sources or []):
+        tag = f"content_sources[{i}]"
+        if not (src.get("source") or "").strip():
+            errs.append(f"{tag}: falta source (el nombre de la cuenta/board como lo dejó Membrilla)")
+        if not (src.get("category") or "").strip():
+            errs.append(f"{tag}: falta category (el tema: 'futbol', 'politica', ...)")
     return errs
 
 
@@ -339,6 +345,7 @@ class ConfigStore:
         self.base = Path(base_dir)
         self.settings_path = self.base / "config" / "settings.json"
         self.news_path = self.base / "config" / "news_sites.json"
+        self.content_sources_path = self.base / "config" / "content_sources.json"
         self.env_path = self.base / ".env"
         self.skills_dir = self.base / "skills"
         self.moods_dir = self.base / "moods"
@@ -371,15 +378,36 @@ class ConfigStore:
         settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
         news = (json.loads(self.news_path.read_text(encoding="utf-8"))
                 if self.news_path.exists() else [])
+        content_sources = (json.loads(self.content_sources_path.read_text(encoding="utf-8"))
+                           if self.content_sources_path.exists() else [])
         soul_path = self.base / "context" / "SOUL.md"
         scrape = self.base / "scrape"
         try:  # indicador de Membrilla: cuántos sidecars dejó en la carpeta
             scrape_items = sum(1 for _ in scrape.rglob("*.json")) if scrape.is_dir() else 0
         except OSError:
             scrape_items = 0
+        # Cuánto de eso ya está indexado en el catálogo (best-effort, DB readonly).
+        catalog_items = 0
+        catalog_sources: list[str] = []
+        db_path = self.base / "posted" / "botata.db"
+        if db_path.exists():
+            try:
+                import sqlite3
+                with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                    catalog_items = conn.execute(
+                        "SELECT COUNT(*) FROM image_catalog").fetchone()[0]
+                    # Fuentes ya indexadas: el admin necesita el nombre EXACTO para
+                    # registrarlas por tema (T38) — la UI las ofrece para copiar.
+                    catalog_sources = [r[0] for r in conn.execute(
+                        "SELECT DISTINCT source_name FROM image_catalog "
+                        "WHERE source_name <> '' ORDER BY source_name").fetchall()]
+            except Exception:
+                pass
         return {
             "settings": settings,
             "news": news,
+            "content_sources": content_sources,
+            "catalog_sources": catalog_sources,
             "env_keys": self._env_status(),
             "skills": self._skills_info(),
             "routines": self._routines_info(),
@@ -388,7 +416,8 @@ class ConfigStore:
             "soul": soul_path.read_text(encoding="utf-8") if soul_path.exists() else "",
             "tools_catalog": tool_catalog(settings),
             "instance": {"path": str(self.base), "name": self.base.name,
-                         "scrape_dir": str(scrape), "scrape_items": scrape_items},
+                         "scrape_dir": str(scrape), "scrape_items": scrape_items,
+                         "catalog_items": catalog_items},
         }
 
     def _routines_info(self) -> list[dict]:
@@ -527,6 +556,8 @@ class ConfigStore:
 
     def run_action(self, action: str) -> dict:
         """Corre un script de mantenimiento del motor sobre esta instancia."""
+        if action == "membrilla_scrape":
+            return self._run_membrilla()
         src = Path(__file__).resolve().parent
         cmds = {
             "parse_memory": [sys.executable, str(src / "parse_memory.py"),
@@ -544,6 +575,43 @@ class ConfigStore:
                     "errors": [] if r.returncode == 0 else [f"exit {r.returncode}"]}
         except subprocess.TimeoutExpired:
             return {"ok": False, "errors": ["timeout (10 min)"]}
+
+    def _run_membrilla(self) -> dict:
+        """Lanza el scraper Membrilla (suite hermana) según settings.MEMBRILLA:
+        {"repo": ruta del repo membrilla, "commands": ["python scrape_ig.py api-run", ...]}.
+        Cada comando corre con cwd=repo y MEMBRILLA_OUTPUT_DIR apuntando al scrape/
+        de ESTA instancia, así el crudo cae donde el indexador lo espera."""
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {"ok": False, "errors": [f"no pude leer settings.json: {e}"]}
+        cfg = settings.get("MEMBRILLA") or {}
+        repo = Path(str(cfg.get("repo") or "")).expanduser()
+        commands = [c for c in (cfg.get("commands") or []) if str(c).strip()]
+        if not cfg.get("repo") or not commands:
+            return {"ok": False, "errors": [
+                "MEMBRILLA sin configurar: en settings.json poné "
+                '{"MEMBRILLA": {"repo": "ruta al repo membrilla", '
+                '"commands": ["python scrape_ig.py api-run"]}}']}
+        if not repo.is_dir():
+            return {"ok": False, "errors": [f"repo de Membrilla no existe: {repo}"]}
+        env = {**os.environ, "MEMBRILLA_OUTPUT_DIR": str(self.base / "scrape")}
+        chunks, ok = [], True
+        for cmd in commands:
+            chunks.append(f"$ {cmd}")
+            try:
+                r = subprocess.run(str(cmd), shell=True, cwd=str(repo), env=env,
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=1800)
+                chunks.append(((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip())
+                if r.returncode != 0:
+                    ok = False
+                    chunks.append(f"✗ exit {r.returncode}")
+            except subprocess.TimeoutExpired:
+                ok = False
+                chunks.append("✗ timeout (30 min) — comando cortado")
+        return {"ok": ok, "output": "\n\n".join(chunks)[-8000:],
+                "errors": [] if ok else ["algún comando falló — mirá el output"]}
 
     def debug_chat(self, text: str, author: str | None = None) -> dict:
         """Mensaje al pipeline REAL del bot (como mención del admin), sin red
@@ -967,6 +1035,14 @@ class ConfigStore:
                            json.dumps(news, ensure_ascii=False, indent=2) + "\n")
         return []
 
+    def write_content_sources(self, sources: list) -> list[str]:
+        errs = validate_content_sources(sources)
+        if errs:
+            return errs
+        self._atomic_write(self.content_sources_path,
+                           json.dumps(sources, ensure_ascii=False, indent=2) + "\n")
+        return []
+
     def update_env(self, updates: dict[str, str]) -> list[str]:
         """Actualiza SOLO las claves con valor no vacío; preserva el resto tal cual."""
         updates = {k: v for k, v in updates.items() if k in ENV_KEYS and (v or "").strip()}
@@ -1221,6 +1297,9 @@ def make_handler(store: ConfigStore):
                     errs = store.write_settings(body)
                 elif self.path == "/api/news":
                     errs = store.write_news(body if isinstance(body, list) else body.get("news", []))
+                elif self.path == "/api/content-sources":
+                    errs = store.write_content_sources(
+                        body if isinstance(body, list) else body.get("sources", []))
                 elif self.path == "/api/env":
                     errs = store.update_env(body)
                 elif self.path == "/api/skills":

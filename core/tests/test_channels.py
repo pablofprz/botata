@@ -334,3 +334,108 @@ def test_discord_media_note_en_attachments():
     ]
     *_, media = ch.get_thread_info("111/21", "21")
     assert media == "[image: gato.png] [file: audio.ogg]"
+
+
+# ─── T39: vision sobre attachments (antes el bot solo veía el nombre) ────────
+def test_discord_vision_describe_la_imagen_del_mensaje():
+    ch, http = make_discord()
+    http.messages["21"]["attachments"] = [
+        {"content_type": "image/png", "filename": "gato.png",
+         "url": "https://cdn.discordapp.com/gato.png"},
+    ]
+    vistos = []
+    ch.set_media_describer(lambda url: vistos.append(url) or "un gato con anteojos")
+    *_, media = ch.get_thread_info("111/21", "21")
+    assert vistos == ["https://cdn.discordapp.com/gato.png"]   # se llamó con la URL del CDN
+    assert media == "[image: un gato con anteojos]"            # y entra la descripción
+
+
+def test_discord_vision_no_corre_en_la_lectura_del_feed():
+    """Costo: una llamada de vision por imagen y por mensaje leído sería carísimo."""
+    ch, http = make_discord()
+    http.messages["22"]["attachments"] = [
+        {"content_type": "image/png", "filename": "x.png", "url": "https://cdn/x.png"},
+    ]
+    llamadas = []
+    ch.set_media_describer(lambda url: llamadas.append(url) or "algo")
+    ch.get_feed_posts("channel", "111", since=None)
+    assert llamadas == []
+
+
+def test_discord_vision_falla_sin_romper():
+    ch, http = make_discord()
+    http.messages["21"]["attachments"] = [
+        {"content_type": "image/png", "filename": "gato.png", "url": "https://cdn/g.png"},
+    ]
+    def _boom(url):
+        raise RuntimeError("vision caída")
+    ch.set_media_describer(_boom)
+    *_, media = ch.get_thread_info("111/21", "21")
+    assert media == "[image: gato.png]"      # cae a la anotación barata
+
+
+# ─── T39: el poll no puede perder menciones ─────────────────────────────────
+class CatchupHttp(FakeDiscordHttp):
+    """Fake que respeta `after` y puede simular un canal con mucho movimiento."""
+
+    def __init__(self, extra_ids=()):
+        super().__init__()
+        self.pages = []                       # (after, limit) de cada request
+        for i in extra_ids:
+            self.messages[str(i)] = _msg(i, f"<@1> mensaje {i}", mentions=[_BOT])
+
+    def request(self, method, path, params=None, json=None, files=None, data=None):
+        if method == "GET" and path == "/channels/111/messages":
+            params = params or {}
+            self.pages.append((params.get("after"), params.get("limit")))
+            limit = params.get("limit", 50)
+            after = params.get("after")
+            if after is None:
+                # sin cursor: los MÁS NUEVOS del canal (ventana inicial)
+                ids = sorted((int(i) for i in self.messages), reverse=True)[:limit]
+            else:
+                # con `after`: los inmediatamente SIGUIENTES al cursor — es lo que
+                # hace de `after` la primitiva de paginado hacia adelante (si
+                # devolviera los más nuevos, el medio se perdería).
+                ids = sorted(i for i in map(int, self.messages) if i > int(after))[:limit]
+                ids.reverse()   # la respuesta viene igual en orden reverso-cronológico
+            return FakeResp([self.messages[str(i)] for i in ids])
+        return super().request(method, path, params, json, files, data)
+
+
+def test_discord_segundo_poll_solo_trae_lo_nuevo():
+    http = CatchupHttp()
+    ch = DiscordChannel("tok", ["111"], http=http)
+    assert len(ch.get_mentions()) == 2          # 20 (mención) y 21 (reply al bot)
+    assert ch.get_mentions() == []              # nada nuevo → no relee lo mismo
+    assert http.pages[-1][0] == "24"            # y usó el cursor del último visto
+
+    # llega una mención nueva: aparece sin releer todo el historial
+    http.messages["30"] = _msg(30, "<@1> y ahora?", mentions=[_BOT])
+    nuevas = ch.get_mentions()
+    assert [m["uri"] for m in nuevas] == ["111/30"]
+
+
+def test_discord_canal_activo_no_pierde_menciones():
+    """El bug: con un lote fijo de 25, un canal movido dejaba menciones sin leer."""
+    http = CatchupHttp()
+    ch = DiscordChannel("tok", ["111"], http=http)
+    ch.get_mentions()                                   # fija el cursor
+    for i in range(100, 400):                           # 300 mensajes de un saque
+        http.messages[str(i)] = _msg(i, f"<@1> hola {i}", mentions=[_BOT])
+    assert len(ch.get_mentions()) == 300                 # las ve TODAS (paginó)
+    assert len(http.pages) > 3                           # y necesitó varias páginas
+
+
+def test_discord_tope_de_paginas_por_ciclo(caplog):
+    """Pero con un tope: un canal desbocado no se come el ciclo — y avisa."""
+    http = CatchupHttp()
+    ch = DiscordChannel("tok", ["111"], http=http)
+    ch.CATCHUP_PAGE, ch.MAX_CATCHUP_PAGES = 10, 3        # tope chico para el test
+    ch.get_mentions()
+    for i in range(100, 200):
+        http.messages[str(i)] = _msg(i, f"<@1> hola {i}", mentions=[_BOT])
+    with caplog.at_level("WARNING"):
+        vistas = ch.get_mentions()
+    assert len(vistas) == 30                             # 3 páginas × 10
+    assert "menciones sin leer" in caplog.text           # el admin se entera

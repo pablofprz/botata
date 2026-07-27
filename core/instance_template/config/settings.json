@@ -14,7 +14,10 @@
 	"LITE_MODEL": "deepseek/deepseek-v4-flash",
 	"IMAGE_MODEL": "google/gemini-2.5-flash",
 	"POLL_INTERVAL_SECONDS": 60,
-	"NEWS_ENABLED": false,
+	"MEMBRILLA": {
+		"repo": "",
+		"commands": []
+	},
 	"CALENDAR_ANNOUNCE": {
 		"from": "admin",
 		"groups": [],
@@ -55,9 +58,6 @@
 		},
 		"routines": {
 			"enabled": true
-		},
-		"news": {
-			"enabled": false
 		},
 		"mentions": {
 			"enabled": true

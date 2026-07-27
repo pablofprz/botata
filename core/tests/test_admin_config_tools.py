@@ -24,9 +24,8 @@ def env(tmp_path, monkeypatch):
     (tmp_path / "config").mkdir()
     settings = {
         "BOT_HANDLE": "bot.test", "ADMIN_HANDLE": "ppolci.com",
-        "NEWS_ENABLED": False,
         "FEEDS": [{"name": "polcifeed", "type": "list", "uri": "at://x/l/1",
-                   "interval_hours": 6, "enabled": True, "posting_policy": "active"}],
+                   "interval_hours": 6, "enabled": True}],
         "TOOLS": {},
         "USER_GROUPS": {"music_users": ["fulano.bsky.social"], "vip": ["mengano.com"]},
         "TASKS": {"reflection": {"enabled": False, "interval_hours": 12}},
@@ -37,7 +36,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "BASE_DIR", tmp_path)
     monkeypatch.setattr(b, "FEEDS_CONFIG", json.loads(json.dumps(settings["FEEDS"])))
     monkeypatch.setattr(b, "MCP_CONFIG", json.loads(json.dumps(settings["MCP"])))
-    monkeypatch.setattr(b, "NEWS_ENABLED", False)
     monkeypatch.setattr(b, "USER_GROUPS", json.loads(json.dumps(settings["USER_GROUPS"])))
     tasks = [PeriodicTask("feed", lambda: None),
              PeriodicTask("mentions", lambda: None),
@@ -141,30 +139,26 @@ def test_set_task_desconocida(env):
     assert "desconocida" in out.text
 
 
-# ─── set_feed_config / set_news_enabled ──────────────────────────────────────
+# ─── set_feed_config (feeds de LECTURA: sin posting_policy desde 2026-07-27) ─
 def test_set_feed(env):
     tmp, reg, _ = env
     out = reg.execute("set_feed_config",
-                      {"name": "polcifeed", "posting_policy": "conservative",
-                       "interval_hours": 12}, _CTX)
+                      {"name": "polcifeed", "interval_hours": 12}, _CTX)
     assert "aplicado en vivo" in out.text
-    assert b.FEEDS_CONFIG[0]["posting_policy"] == "conservative"     # vivo
+    assert b.FEEDS_CONFIG[0]["interval_hours"] == 12.0               # vivo
     assert _disk(tmp)["FEEDS"][0]["interval_hours"] == 12.0          # disco
 
 
-def test_set_feed_politica_invalida(env):
-    tmp, reg, _ = env
-    out = reg.execute("set_feed_config", {"name": "polcifeed", "posting_policy": "yolo"}, _CTX)
-    assert "no apliqué nada" in out.text
-    assert b.FEEDS_CONFIG[0]["posting_policy"] == "active"           # intacto
+def test_set_feed_desconocido(env):
+    _, reg, _ = env
+    out = reg.execute("set_feed_config", {"name": "yolo", "enabled": False}, _CTX)
+    assert "desconocido" in out.text
 
 
-def test_set_news(env):
-    tmp, reg, _ = env
-    out = reg.execute("set_news_enabled", {"enabled": "true"}, _CTX)  # string del LLM
-    assert "activadas" in out.text
-    assert b.NEWS_ENABLED is True
-    assert _disk(tmp)["NEWS_ENABLED"] is True
+def test_set_news_enabled_ya_no_existe(env):
+    """El posteo autónomo de noticias es una rutina; la tool master se eliminó."""
+    _, reg, _ = env
+    assert reg.get("set_news_enabled") is None
 
 
 # ─── rutinas por comando (set_routine / delete_routine, solo admin) ──────────
@@ -320,7 +314,7 @@ def test_get_refleja_estado_vivo(env):
 def test_config_tools_son_solo_admin(env):
     _, reg, _ = env
     for name in ("get_bot_config", "set_tool_config", "set_task_config",
-                 "set_feed_config", "set_news_enabled", "set_mcp_enabled"):
+                 "set_feed_config", "set_mcp_enabled"):
         assert reg.get(name).scopes == frozenset({"admin"}), name
 
 

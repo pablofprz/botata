@@ -15,7 +15,7 @@ _SETTINGS = {
     "BOT_HANDLE": "bot.test", "ADMIN_HANDLE": "admin.test",
     "POLL_INTERVAL_SECONDS": 60,
     "FEEDS": [{"name": "f1", "type": "list", "uri": "at://x/lista/1",
-               "posting_policy": "balanced", "enabled": True}],
+               "enabled": True}],
     "TOOLS": {"web_search": {"enabled": True, "scopes": ["reply", "admin"]}},
     "TASKS": {"heartbeat": {"enabled": False, "interval_hours": 12}},
     "MCP": {"reddit": {"transport": "stdio", "command": "python", "enabled": False}},
@@ -52,7 +52,6 @@ def test_settings_valido_pasa():
 @pytest.mark.parametrize("mutacion,fragmento", [
     (lambda s: s.pop("BOT_HANDLE"), "BOT_HANDLE"),
     (lambda s: s["FEEDS"][0].update(type="banana"), "type inválido"),
-    (lambda s: s["FEEDS"][0].update(posting_policy="yolo"), "posting_policy"),
     (lambda s: s["TOOLS"]["web_search"].update(scopes=["reply", "banana"]), "scope"),
     (lambda s: s["MCP"]["reddit"].pop("command"), "requiere command"),
     (lambda s: s["MODELS"]["roles"].update(reply="inexistente"), "alias desconocido"),
@@ -84,9 +83,9 @@ def test_user_groups_validos_pasan():
 
 
 def test_news_valida():
-    assert cu.validate_news([{"url": "https://x/rss", "title": "X", "mode": "comment"}]) == []
-    errs = cu.validate_news([{"url": "ftp://no", "title": "", "mode": "yolo"}])
-    assert len(errs) == 3
+    assert cu.validate_news([{"url": "https://x/rss", "title": "X"}]) == []
+    errs = cu.validate_news([{"url": "ftp://no", "title": ""}])
+    assert len(errs) == 2
 
 
 # ─── Store ───────────────────────────────────────────────────────────────────
@@ -105,6 +104,52 @@ def test_write_settings_invalido_no_toca_el_archivo(store):
     roto = json.loads(json.dumps(_SETTINGS)); roto.pop("BOT_HANDLE")
     assert store.write_settings(roto)                                 # errores
     assert store.settings_path.read_text(encoding="utf-8") == antes
+
+
+def test_content_sources_valida():
+    assert cu.validate_content_sources([{"source": "cuenta", "category": "futbol"}]) == []
+    errs = cu.validate_content_sources([{"source": "", "category": ""}])
+    assert len(errs) == 2
+
+
+def test_content_sources_roundtrip(store):
+    assert store.write_content_sources(
+        [{"source": "futbol_memes", "category": "futbol", "enabled": True}]) == []
+    assert store.read_all()["content_sources"][0]["source"] == "futbol_memes"
+
+
+def test_content_sources_invalido_no_escribe(store):
+    store.write_content_sources([{"source": "ok", "category": "futbol"}])
+    assert store.write_content_sources([{"source": "sin_tema"}])          # error
+    assert store.read_all()["content_sources"][0]["source"] == "ok"       # intacto
+
+
+# ─── Membrilla: lanzador del scraper (settings.MEMBRILLA) ────────────────────
+def test_membrilla_sin_config_da_instrucciones(store):
+    out = store.run_action("membrilla_scrape")
+    assert out["ok"] is False
+    assert any("MEMBRILLA sin configurar" in e for e in out["errors"])
+
+
+def test_membrilla_repo_inexistente(store):
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    s["MEMBRILLA"] = {"repo": str(store.base / "no-existe"), "commands": ["echo hola"]}
+    store.settings_path.write_text(json.dumps(s), encoding="utf-8")
+    out = store.run_action("membrilla_scrape")
+    assert out["ok"] is False
+    assert any("no existe" in e for e in out["errors"])
+
+
+def test_membrilla_corre_comandos_con_output_dir(store, tmp_path):
+    repo = tmp_path / "membrilla"; repo.mkdir()
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    # el comando imprime la env var que le inyectamos (portátil vía python)
+    s["MEMBRILLA"] = {"repo": str(repo), "commands": [
+        f'"{sys.executable}" -c "import os; print(os.environ[\'MEMBRILLA_OUTPUT_DIR\'])"']}
+    store.settings_path.write_text(json.dumps(s), encoding="utf-8")
+    out = store.run_action("membrilla_scrape")
+    assert out["ok"] is True
+    assert "scrape" in out["output"]          # apunta al scrape/ de la instancia
 
 
 def test_env_status_sin_valores(store):

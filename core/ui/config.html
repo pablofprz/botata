@@ -103,17 +103,18 @@
   <a href="#prefs">👍 Gustos</a>
   <a href="#bio">🪪 Bio</a>
   <div class="navsep">Proactividad</div>
-  <a href="#feeds">📡 Feeds proactivos</a>
   <a href="#rutinas">⏰ Rutinas</a>
   <a href="#calendario">📅 Calendario</a>
-  <a href="#noticias">📰 RSS</a>
-  <a href="#tareas">⚙️ Tareas</a>
+  <a href="#feeds">📖 Lectura del feed</a>
+  <a href="#tareas">⚙️ Motor</a>
   <div class="navsep">Datos y motor</div>
   <a href="#memoria">🧠 Memoria</a>
   <a href="#memoria-usuarios">🗂️ Memoria por usuario</a>
   <a href="#modelos">🤖 Modelos</a>
   <a href="#presupuesto">🪙 Presupuesto</a>
   <a href="#integraciones">🧩 Integraciones</a>
+  <a href="#noticias">📰 Fuentes RSS</a>
+  <a href="#fuentes">🏷️ Fuentes por tema</a>
   <a href="#mcp">🔌 MCP</a>
   <a href="#membrilla">🍐 Membrilla</a>
   <div class="navsep">Operación</div>
@@ -198,8 +199,8 @@
       <br>· <b>solo admins</b> = solo el admin y los co-admins por mención.
       <br>· <b>columnas de grupo</b> = solo los miembros de esos grupos (los admins siempre pueden).
       <br>· <b>todos</b> ⚠️ = la puede disparar <b>cualquier usuario</b> que le hable al bot.
-      <br>· <b>proactividad</b> = disponible en los pases proactivos (feeds/rutinas), sin
-      que nadie la pida.</p>
+      <br>· <b>proactividad</b> = disponible en las ⏰ Rutinas (los pases donde el bot
+      postea solo), sin que nadie la pida.</p>
     <div class="card" id="c-tools"></div></section>
 
   <section id="skills"><h2>Skills (saberes temáticos)</h2>
@@ -285,36 +286,28 @@
       <textarea id="routine-text" style="min-height:180px;display:none" spellcheck="false"></textarea>
     </div></section>
 
-  <section id="feeds"><h2>Feeds proactivos</h2>
-    <p class="hint">La <b>proactividad</b> del bot: además de contestar menciones, cada
-      tantas horas lee un feed de tu comunidad (una lista de cuentas, un feed algorítmico,
-      su timeline de seguidos, o la timeline local en Mastodon), lo resume y <b>decide solo
-      si tiene algo para opinar</b> — puede quedarse callado. También aprende de lo que lee
-      (datos que la gente cuenta de sí misma, cumpleaños, eventos). La <b>política</b>
-      regula cuán charlatán es: conservative (casi nunca postea) → active. Todo arranca
-      apagado: prendelo cuando el bot ya funcione bien reactivo.</p>
+  <section id="feeds"><h2>Lectura del feed</h2>
+    <p class="hint">De dónde <b>lee</b> el bot: cada tantas horas mira un feed de tu
+      comunidad (una lista de cuentas, un feed algorítmico, su timeline de seguidos, la
+      timeline local en Mastodon, o un canal de Discord), lo resume y <b>aprende</b> de lo
+      que lee (datos que la gente cuenta de sí misma, cumpleaños, eventos). Esa lectura
+      alimenta su memoria, la tool <code>summarize_feed</code> y los disparadores de moods.
+      <b>Leer acá NUNCA postea nada</b>: si querés que el bot opine o postee sobre lo que
+      pasa en el feed, eso se pide en una <b>⏰ Rutina</b> (ej.: "cada 6 horas leé el feed
+      con summarize_feed y si hay un tema que te pinta, opiná").</p>
     <div id="c-feeds"></div>
     <button class="ghost" onclick="addFeed()">+ feed</button></section>
 
   <section id="tareas"><h2>Motor (deberes fijos del bot)</h2>
     <p class="hint">Estos son los <b>deberes</b> del motor, no su personalidad: responder
-      menciones, anunciar el calendario, ejecutar órdenes, leer feeds/noticias, aprender
-      lecciones, elegir el humor, regenerar la bio. <b>Lo que el bot hace por iniciativa
-      propia vive en ⏰ Rutinas</b> (ahí es prompteable); acá solo está el interruptor
-      maestro + la frecuencia de cada deber. Intervalo <code>0</code> = corre en cada
-      ciclo del loop y el deber decide solo si hay algo que hacer (menciones, feeds,
-      noticias y rutinas se auto-regulan con sus propios intervalos por fuente/archivo).
+      menciones, anunciar el calendario, ejecutar órdenes, leer el feed y aprender,
+      destilar lecciones, elegir el humor, regenerar la bio. <b>Todo lo que el bot hace
+      por iniciativa propia vive en ⏰ Rutinas</b> (ahí es prompteable); acá solo está el
+      interruptor maestro + la frecuencia de cada deber. Intervalo <code>0</code> = corre
+      en cada ciclo del loop y el deber decide solo si hay algo que hacer (menciones,
+      feeds y rutinas se auto-regulan con sus propios intervalos por fuente/archivo).
       En general no hace falta tocar nada acá.</p>
     <div class="card" id="c-tasks"></div></section>
-
-  <section id="noticias"><h2>Noticias RSS</h2>
-    <p class="hint">Fuentes RSS que el bot sigue: puede postear cada nota nueva
-      (<code>post</code>) o un comentario propio sobre lo nuevo (<code>comment</code>).
-      Los usuarios también pueden pedirle noticias por mención. Sin el master prendido no
-      se postea nada solo.</p>
-    <div class="card" id="c-newsmaster"></div>
-    <div id="c-news"></div>
-    <button class="ghost" onclick="addNews()">+ fuente</button></section>
 
   <section id="calendario"><h2>Calendario</h2>
     <p class="hint"><b>Cómo funciona:</b> un evento se anuncia con <b>un post automático a la
@@ -406,6 +399,28 @@
         YouTube Data API v3). No hay playlist: busca libre o trae lo popular de tu región.</p>
     </div></section>
 
+  <section id="noticias"><h2>Fuentes RSS</h2>
+    <p class="hint">Fuentes de noticias que alimentan la tool <code>get_news</code>: los
+      usuarios pueden pedirle noticias por mención, y una <b>⏰ Rutina</b> puede postearlas
+      sola (ej.: "cada 8 horas llamá get_news con only_new y si hay un titular jugoso,
+      comentalo" — la plantilla trae la rutina <code>noticias</code> apagada, lista para
+      prender). Con <code>only_new</code> el bot no repite titulares entre pases. Acá no
+      hay ningún posteo automático: sin una rutina que la llame, esto es solo una fuente.</p>
+    <div id="c-news"></div>
+    <button class="ghost" onclick="addNews()">+ fuente</button></section>
+
+  <section id="fuentes"><h2>Fuentes de contenido por tema</h2>
+    <p class="hint">El gemelo de las fuentes RSS, pero para el <b>contenido scrapeado</b>
+      (🍐 Membrilla): acá declarás <b>qué cuenta o board es de qué tema</b>. Cuando alguien
+      pide "un meme de fútbol", el bot busca <b>solo</b> dentro de las fuentes que vos
+      registraste con ese tema — en vez de confiar en que el modelo de visión haya escrito
+      "fútbol" en la descripción. <b>Fuente</b> = el nombre con el que Membrilla dejó el
+      contenido (la cuenta de Instagram, el board de Pinterest, el blog de Tumblr).
+      <b>Tema</b> es texto libre: usá la misma palabra que usarías al pedirlo.
+      Se aplica en caliente — editar acá no requiere reindexar nada.</p>
+    <div id="c-content-sources"></div>
+    <button class="ghost" onclick="addContentSource()">+ fuente</button></section>
+
   <section id="mcp"><h2>Servers MCP</h2>
     <p class="hint">Conectores externos que suman tools al bot (ej. Reddit por RSS, un
       navegador). Cada server es un proceso aparte declarado acá. Por seguridad sus tools
@@ -417,14 +432,27 @@
       <a href="https://github.com/pablofprz/membrilla" style="color:var(--accent)">Membrilla</a>
       es la suite hermana que junta contenido de otras redes (Instagram, etc.) y lo deja en
       la carpeta <code id="scrape-dir">scrape/</code> de esta instancia. La configuración de
-      QUÉ scrapear vive en Membrilla (repo aparte); acá está el lado botata: <b>indexar</b>
-      lo que llegó — cada imagen nueva se describe con el modelo de visión (gasta LLM) y
-      entra al catálogo, para que el bot pueda buscarla y postearla cuando venga al caso.</p>
+      QUÉ scrapear vive en Membrilla (repo aparte); acá el flujo es en dos pasos:
+      <b>1) scrapear</b> (traer contenido nuevo) y <b>2) indexar</b> (cada imagen nueva se
+      describe con el modelo de visión — gasta LLM — y entra al catálogo, para que el bot
+      pueda buscarla y postearla cuando venga al caso).</p>
     <div class="card">
       <b>Estado</b> <span id="membrilla-badge" class="badge off">sin detectar</span>
       <p class="hint" id="membrilla-hint"></p>
     </div>
     <div class="card">
+      <b>1 · Scrapear contenido nuevo</b>
+      <p class="hint">Corre los comandos de Membrilla definidos en el settings
+        (<code>MEMBRILLA.repo</code> + <code>MEMBRILLA.commands</code>) y deja el crudo en
+        <code>scrape/</code>. Puede tardar varios minutos. A futuro este botón va a abrir
+        la página propia de Membrilla.</p>
+      <button onclick="runAction('membrilla_scrape', this)">🕷️ Lanzar scraper</button>
+      <pre class="out" id="out-membrilla_scrape" style="display:none"></pre>
+    </div>
+    <div class="card">
+      <b>2 · Indexar lo scrapeado</b>
+      <p class="hint">Describe e indexa lo que llegó a <code>scrape/</code> y todavía no
+        está en el catálogo.</p>
       <button onclick="runAction('catalog_sync', this)">🖼️ Indexar contenido nuevo</button>
       <pre class="out" id="out-catalog_sync" style="display:none"></pre>
     </div></section>
@@ -494,7 +522,7 @@
 <div id="toast"></div>
 
 <script>
-let S = null, NEWS = [], ENV_KEYS = {}, SKILLS = [], MOODS = [], CATALOG = [], INSTANCE = {};
+let S = null, NEWS = [], CONTENT_SOURCES = [], CATALOG_SOURCES = [], ENV_KEYS = {}, SKILLS = [], MOODS = [], CATALOG = [], INSTANCE = {};
 let ROUTINES = [];
 let PROMPTS = [];
 let SOUL = "", soulDirty = false, dirty = false;
@@ -566,11 +594,17 @@ function render() {
     textInput(S, "SPOTIFY_PLAYLIST_ID", "ID de la playlist (solo el id, no la URL)");
 
   const items = INSTANCE.scrape_items ?? 0;
+  const inCatalog = INSTANCE.catalog_items ?? 0;
+  const pending = Math.max(0, items - inCatalog);
   const hasScrape = items > 0;
-  $("membrilla-badge").textContent = hasScrape ? `detectado · ${items} items` : "sin contenido todavía";
+  $("membrilla-badge").textContent = hasScrape
+    ? `${items} scrapeados · ${inCatalog} en catálogo · ~${pending} sin indexar`
+    : "sin contenido todavía";
   $("membrilla-badge").className = "badge " + (hasScrape ? "on" : "off");
   $("membrilla-hint").textContent = hasScrape
-    ? "Membrilla dejó contenido en la carpeta scrape/ — indexalo abajo para que el bot lo pueda usar."
+    ? (pending > 0
+        ? "Hay contenido scrapeado que el bot todavía no puede usar — indexalo abajo (paso 2)."
+        : "Todo lo scrapeado está indexado en el catálogo. Lanzá el scraper (paso 1) para traer más.")
     : "Cuando Membrilla corra y deje contenido en scrape/, acá lo vas a ver. Si no usás Membrilla, ignorá esta sección.";
 
   const isMasto = (S.CHANNEL || "bluesky") === "mastodon";
@@ -626,7 +660,7 @@ function render() {
   $("rt-discord-hint").style.display = isDiscord ? "" : "none";
 
   renderBudget(); renderModels(); renderFeeds(); renderTools(); renderGroups();
-  renderTasks(); renderMcp(); renderNews(); renderSkills(); renderMoods();
+  renderTasks(); renderMcp(); renderNews(); renderContentSources(); renderSkills(); renderMoods();
   renderPrefsMode(); renderData(); renderUserMem(); renderBio(); renderRoutines(); renderAdvFlags();
   $("prompt-file").innerHTML = PROMPTS.map(f => `<option>${esc(f)}</option>`).join("");
   navStatus();
@@ -1119,14 +1153,12 @@ function renderFeeds() {
       <div>${textInput(f, "name", "nombre")}</div>
       <div>${selectInput(f, "type", "tipo", types.includes(f.type ?? "list") ? types : [f.type, ...types], types[0])}</div>
       <div>${textInput(f, "interval_hours", "cada cuántas horas", "number")}</div>
-      <div>${selectInput(f, "posting_policy", "política", ["conservative", "balanced", "active"], "balanced")}</div>
     </div>
     ${textInput(f, "uri", chan === "discord" ? "id del canal fuente" : "URI / id de la fuente (no aplica a following/local)")}
     <p class="hint">${FEED_TYPES_HINT[chan] ?? ""}</p>
     <div style="margin-top:8px">${check(f, "enabled", "activo", true)}${check(f, "learn", "aprender de lo que lee", true)}
-      ${check(f, "autonomous_images", "puede adjuntar imágenes del catálogo")}
       <button class="danger" onclick="S.FEEDS.splice(${i},1);markDirty();render()">borrar</button></div>
-  </div>`).join("") || `<p class="hint">sin feeds configurados — el bot es puramente reactivo (solo responde menciones)</p>`;
+  </div>`).join("") || `<p class="hint">sin feeds configurados — el bot no lee a la comunidad (summarize_feed y los disparadores de moods se quedan sin fuente)</p>`;
 }
 
 function renderTools() {
@@ -1242,7 +1274,7 @@ const TASK_DESC = {
   calendar: "anunciar eventos vencidos del calendario (determinístico: actúa siempre)",
   actions: "ejecutar órdenes agendadas (bot_action) apenas llega su hora",
   routines: "correr las rutinas (routines/*.md — cadencia propia de cada archivo)",
-  feed: "correr los feeds proactivos", news: "correr las fuentes RSS",
+  feed: "leer los feeds de la comunidad y aprender (nunca postea)",
   reflection: "aprender lecciones de sus conversaciones (no postea)",
   mood: "elegir el humor del día (si moods está en auto)",
   bio: "regenerar la bio del perfil según prompts/bio.md",
@@ -1251,7 +1283,7 @@ const TASK_DESC = {
 // la instancia no lista una tarea, igual existe — se materializa acá para que
 // la UI siempre muestre el set completo (instancias con settings viejos incluidas).
 const TASK_DEFAULTS = {
-  feed: {enabled: true, interval_hours: 0}, news: {enabled: true, interval_hours: 0},
+  feed: {enabled: true, interval_hours: 0},
   mentions: {enabled: true, interval_hours: 0}, calendar: {enabled: true, interval_hours: 0},
   actions: {enabled: true, interval_hours: 0}, routines: {enabled: true, interval_hours: 0},
   reflection: {enabled: true, interval_hours: 24}, mood: {enabled: true, interval_hours: 6},
@@ -1263,7 +1295,7 @@ function renderTasks() {
   let html = `<table><tr><th>tarea</th><th>qué hace</th><th>on</th><th>intervalo (h; 0 = cada ciclo)</th></tr>`;
   for (const [name, cfg] of Object.entries(tasks)) {
     // tareas viejas absorbidas por rutinas (settings legados pueden traerlas)
-    if (["heartbeat", "rooms", "public_reflection", "playlist_share"].includes(name)) continue;
+    if (["heartbeat", "rooms", "public_reflection", "playlist_share", "news"].includes(name)) continue;
     cfg.interval_hours ??= 0;  // editable siempre (antes decía "auto-regulada" sin más)
     html += `<tr><td><code>${esc(name)}</code></td><td class="hint">${esc(TASK_DESC[name] ?? "")}</td>
              <td>${check(cfg, "enabled", "", true)}</td>
@@ -1348,19 +1380,41 @@ function renderMcp() {
 }
 
 function renderNews() {
-  $("c-newsmaster").innerHTML = check(S, "NEWS_ENABLED", "master de noticias (sin esto no se postea nada solo)", false);
   $("c-news").innerHTML = NEWS.map((src, i) => `<div class="card">
     ${textInput(src, "url", "URL del RSS")}
     <div class="row">
       <div>${textInput(src, "title", "título")}</div>
-      <div>${textInput(src, "category", "categoría")}</div>
-      <div>${selectInput(src, "mode", "modo", ["comment", "post"], "comment")}</div>
-      <div>${textInput(src, "interval_hours", "cada cuántas horas", "number")}</div>
+      <div>${textInput(src, "category", "categoría (para filtrar en get_news)")}</div>
     </div>
     ${textInput(src, "description", "descripción (el bot la usa como contexto)")}
     <div style="margin-top:8px">${check(src, "enabled", "activa", true)}
       <button class="danger" onclick="NEWS.splice(${i},1);markDirty();render()">borrar</button></div>
-  </div>`).join("") || `<p class="hint">sin fuentes</p>`;
+  </div>`).join("") || `<p class="hint">sin fuentes — get_news no tiene de dónde leer</p>`;
+}
+
+// ─── Fuentes de contenido por tema (T38: content_sources.json) ───────────
+function renderContentSources() {
+  const known = [...new Set(CATALOG_SOURCES)].sort();
+  $("c-content-sources").innerHTML = CONTENT_SOURCES.map((s, i) => `<div class="card">
+    <div class="row">
+      <div>${textInput(s, "source", "fuente (source_name de Membrilla)")}</div>
+      <div>${textInput(s, "category", "tema (futbol, politica, humor...)")}</div>
+      <div>${textInput(s, "platform", "plataforma (opcional: instagram, pinterest...)")}</div>
+    </div>
+    ${textInput(s, "description", "nota para vos (opcional)")}
+    <div style="margin-top:8px">${check(s, "enabled", "activa", true)}
+      <button class="danger" onclick="CONTENT_SOURCES.splice(${i},1);markDirty();render()">borrar</button></div>
+  </div>`).join("") || `<p class="hint">sin fuentes por tema — los pedidos temáticos ("un meme de fútbol")
+    van a buscar en TODO el catálogo, a ciegas de qué cuenta es de qué.</p>`;
+  if (known.length) {
+    $("c-content-sources").insertAdjacentHTML("beforeend",
+      `<p class="hint">Fuentes que ya hay en tu catálogo indexado (copiá el nombre exacto):
+       ${known.map(n => `<code>${esc(n)}</code>`).join(" · ")}</p>`);
+  }
+}
+function addContentSource() {
+  CONTENT_SOURCES.push({source: "", category: "", platform: "", description: "", enabled: true});
+  markDirty(); render();
 }
 
 function renderSkills() {
@@ -1411,7 +1465,7 @@ function renderRoutines() {
       <div class="hint">${esc((rt.body || "").slice(0, 80))}${(rt.body || "").length > 80 ? "…" : ""}</div>
       <div style="max-width:90px"><button class="ghost" onclick="editBehavior('routine','${esc(rt.file)}')">✏️ ver</button></div>
     </div>`).join("") ||
-    `<p class="hint">sin rutinas — el bot solo reacciona (menciones, feeds, calendario).
+    `<p class="hint">sin rutinas — el bot solo reacciona (menciones, calendario).
      Creá una acá abajo (ej. <code>memes.md</code> con "posteá un meme" cada 4h) para darle
      iniciativa propia.</p>`;
 }
@@ -1522,14 +1576,15 @@ function initScrollspy() {
 
 // ─── Guardado global ─────────────────────────────────────────────────────
 function addFeed() { (S.FEEDS ??= []).push({name: "", type: "list", uri: "", interval_hours: 6,
-  enabled: false, posting_policy: "balanced", learn: true, autonomous_images: false}); markDirty(); render(); }
+  enabled: false, learn: true}); markDirty(); render(); }
 function addNews() { NEWS.push({url: "", title: "", description: "", category: "",
-  mode: "comment", enabled: false, interval_hours: 6}); markDirty(); render(); }
+  enabled: false}); markDirty(); render(); }
 
 function pruneForSave() {
   // Tarjetas a medio llenar no bloquean el guardado global: se descartan.
   if (S.FEEDS) S.FEEDS = S.FEEDS.filter(f => (f.name || "").trim() || (f.uri || "").trim());
   NEWS = NEWS.filter(n => (n.url || "").trim() || (n.title || "").trim());
+  CONTENT_SOURCES = CONTENT_SOURCES.filter(s => (s.source || "").trim() || (s.category || "").trim());
   // La UI crea S.MODELS vacío al renderizar; guardarlo vacío rompería el
   // router (sección presente pero sin endpoints). Sin contenido → fuera.
   const m = S.MODELS;
@@ -1542,6 +1597,7 @@ async function saveAll() {
   try {
     await api("/api/settings", S);
     await api("/api/news", NEWS);
+    await api("/api/content-sources", CONTENT_SOURCES);
     if (soulDirty) {
       await api("/api/soul", {text: $("soul-text").value});
       SOUL = $("soul-text").value; soulDirty = false;
@@ -1615,16 +1671,18 @@ async function refreshLog() {
 
 // ─── Acciones de mantenimiento / membrilla ───────────────────────────────
 async function runAction(action, btn) {
+  const label = btn.textContent;
   btn.disabled = true; btn.textContent = "corriendo…";
   const pre = $("out-" + action);
   try {
     const r = await api("/api/run", {action});
     pre.style.display = "";
-    pre.textContent = (r.output || "") + (r.ok ? "\n\n✓ listo" : "\n\n✗ falló");
+    pre.textContent = (r.output || "") + "\n\n" +
+      (r.ok ? "✓ listo" : "✗ falló: " + (r.errors || []).join("; "));
     toast(r.ok ? "listo ✓" : "falló", r.ok);
   } catch (e) { toast(e.message, false); }
   btn.disabled = false;
-  btn.textContent = action === "parse_memory" ? "📖 Parsear memoria" : "🖼️ Indexar contenido nuevo";
+  btn.textContent = label;
 }
 
 // ─── Debug chat ──────────────────────────────────────────────────────────
@@ -1694,6 +1752,7 @@ async function dangerAction(action) {
 async function load() {
   const data = await api("/api/config");
   S = data.settings; NEWS = data.news; ENV_KEYS = data.env_keys; SKILLS = data.skills;
+  CONTENT_SOURCES = data.content_sources ?? []; CATALOG_SOURCES = data.catalog_sources ?? [];
   MOODS = data.moods ?? []; CATALOG = data.tools_catalog ?? []; INSTANCE = data.instance ?? {};
   PROMPTS = data.prompts ?? []; ROUTINES = data.routines ?? [];
   SOUL = data.soul ?? ""; soulDirty = false;
