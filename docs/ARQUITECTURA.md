@@ -90,6 +90,7 @@ las fuentes que le correspondan, y un `type` que dice por dónde entra cada una:
 | `rss` | URLs de feeds | tool `get_news` |
 | `scrape` | `source_name` de Membrilla | tool `search_images` (parámetro `topic`) |
 | `spotify` | ids de playlist | tool `get_playlist_track` (parámetro `topic`) |
+| `youtube` | canales (`@handle`, `UC…`) o listas (`PL…`) | tool `share_video` (parámetro `topic`) |
 
 Todo se resuelve **en query** (el tema se matchea contra category/name/description/fuentes),
 así editar el registro aplica en caliente sin reindexar. Permite varias playlists por tema,

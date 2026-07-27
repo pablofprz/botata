@@ -382,7 +382,8 @@
       las fuentes que le correspondan</b>. El <b>tipo</b> dice por dónde entra —
       <code>rss</code> (feeds de noticias → tool <code>get_news</code>),
       <code>scrape</code> (cuentas/boards que trae 🍐 Membrilla → <code>search_images</code>) o
-      <code>spotify</code> (playlists → <code>get_playlist_track</code>).
+      <code>spotify</code> (playlists → <code>get_playlist_track</code>) o
+      <code>youtube</code> (canales y listas → <code>share_video</code>).
       Podés tener <b>varias playlists</b> (rock, cumbia), varios grupos de cuentas por tema y
       varios diarios por sección: cuando alguien pide "un meme de fútbol" o la rutina pide
       música de rock, el bot resuelve el tema contra este registro en vez de adivinar.
@@ -394,14 +395,19 @@
     <div style="margin-top:8px">
       <button class="ghost" onclick="addSource('scrape')">+ contenido scrapeado</button>
       <button class="ghost" onclick="addSource('rss')">+ feed RSS</button>
-      <button class="ghost" onclick="addSource('spotify')">+ playlist</button>
+      <button class="ghost" onclick="addSource('spotify')">+ playlist de Spotify</button>
+      <button class="ghost" onclick="addSource('youtube')">+ canal de YouTube</button>
     </div>
-    <p class="hint" style="margin-top:10px">📺 <b>YouTube</b>: <code>share_video</code> no usa
-      registro — busca libre o trae lo popular de tu región; solo necesita
-      <code>YOUTUBE_API_KEY</code> en Credenciales. 🎵 <b>Spotify</b> necesita además una
-      autorización única del admin: <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code>.
-      Las recomendaciones de usuarios (<code>add_music_recommendation</code>) se agregan
-      siempre a la <b>primera playlist habilitada</b> de la lista.</p></section>
+    <p class="hint" style="margin-top:10px">
+      📺 <b>YouTube</b>: registrá canales (<code>@handle</code> o <code>UC…</code>) y listas
+      (<code>PL…</code>) por tema. Si registrás alguno, <code>share_video</code> saca de ahí
+      por default; con un tema, solo de los de ese tema; y <b>siempre conserva la búsqueda
+      abierta</b> cuando el pedido no encaja con lo registrado (o si no registrás nada, cae
+      en lo más popular de tu región). Solo necesita <code>YOUTUBE_API_KEY</code> en Credenciales.
+      <br>🎵 <b>Spotify</b> necesita además una autorización única del admin:
+      <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code>. Las recomendaciones
+      de usuarios (<code>add_music_recommendation</code>) se agregan siempre a la
+      <b>primera playlist habilitada</b> de la lista.</p></section>
 
   <section id="mcp"><h2>Servers MCP</h2>
     <p class="hint">Conectores externos que suman tools al bot (ej. Reddit por RSS, un
@@ -1365,6 +1371,7 @@ const SOURCE_TYPE_INFO = {
   scrape:  {label: "contenido scrapeado (Membrilla)", ph: "cuenta_una, board_dos", tool: "search_images"},
   rss:     {label: "feed RSS", ph: "https://diario.com/rss.xml", tool: "get_news"},
   spotify: {label: "playlist de Spotify", ph: "37i9dQZF1DX... (id de la playlist)", tool: "get_playlist_track"},
+  youtube: {label: "canal o lista de YouTube", ph: "@canal, UCxxxx (canal) o PLxxxx (lista)", tool: "share_video"},
 };
 
 function sourceList(entry) {

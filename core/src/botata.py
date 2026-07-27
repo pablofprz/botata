@@ -208,8 +208,9 @@ MODELS_CONFIG      : dict | None = settings.get("MODELS")
 #     type "rss"     → sources = URLs de feeds        (tool get_news)
 #     type "scrape"  → sources = source_name de Membrilla (tool search_images)
 #     type "spotify" → sources = ids de playlist      (tool get_playlist_track)
+#     type "youtube" → sources = canales/listas       (tool share_video)
 # ---------------------------------------------------------------------------
-SOURCE_TYPES = ("rss", "scrape", "spotify")
+SOURCE_TYPES = ("rss", "scrape", "spotify", "youtube")
 
 
 def _normalize_source_entry(e: dict) -> dict | None:
@@ -3529,11 +3530,78 @@ def youtube_top_videos(query: str | None = None, region: str = "AR",
     ]
 
 
+_YT_HANDLE_CACHE: dict[str, str] = {}
+
+
+def _youtube_uploads_playlist(source: str) -> str | None:
+    """Traduce una fuente de YouTube registrada a un id de playlist consultable.
+
+    Acepta: id de playlist (`PL…`, `UU…`), id de canal (`UC…` → su playlist de
+    subidas, que es el mismo id con prefijo `UU` — evita gastar cuota de search)
+    y handle (`@nombre`, resuelto por la API y cacheado en memoria)."""
+    s = (source or "").strip()
+    if not s:
+        return None
+    if s.startswith("UC"):
+        return "UU" + s[2:]
+    if s.startswith("@"):
+        if s not in _YT_HANDLE_CACHE:
+            try:
+                data = _youtube_get("channels", {"part": "id", "forHandle": s})
+                items = data.get("items") or []
+                if not items:
+                    return None
+                _YT_HANDLE_CACHE[s] = "UU" + str(items[0]["id"])[2:]
+            except Exception as e:
+                log.warning("youtube: no pude resolver el handle %s: %s", s, e)
+                return None
+        return _YT_HANDLE_CACHE[s]
+    return s                      # ya es un id de playlist
+
+
+def youtube_source_videos(sources: list[str], limit: int = 10) -> list[dict]:
+    """Videos recientes de los canales/listas registrados (T38b, type=youtube).
+
+    Una llamada a `playlistItems` por fuente: sin costo de search y devuelve lo
+    último publicado. Una fuente rota no tumba a las demás."""
+    out: list[dict] = []
+    for src in sources:
+        pl = _youtube_uploads_playlist(src)
+        if not pl:
+            continue
+        try:
+            data = _youtube_get("playlistItems", {"part": "snippet", "playlistId": pl,
+                                                  "maxResults": limit})
+        except Exception as e:
+            log.warning("youtube: no pude leer la fuente %s (%s): %s", src, pl, e)
+            continue
+        for it in data.get("items", []):
+            sn  = it.get("snippet") or {}
+            vid = (sn.get("resourceId") or {}).get("videoId")
+            if vid:
+                out.append({"title": sn.get("title", ""),
+                            "url": f"https://www.youtube.com/watch?v={vid}",
+                            "channel": sn.get("videoOwnerChannelTitle")
+                                       or sn.get("channelTitle", "")})
+    return out
+
+
 def fetch_top_video(conn: sqlite3.Connection | None = None,
-                    query: str | None = None) -> dict | None:
-    """Trae un video (mostPopular AR o búsqueda por `query`) que el bot no haya compartido
-    todavía (dedup contra bot_posts). None si no hay key o nada nuevo."""
-    videos = youtube_top_videos(query)
+                    query: str | None = None,
+                    topic: str | None = None) -> dict | None:
+    """Trae un video que el bot no haya compartido todavía (dedup contra bot_posts).
+
+    Prioridad: `query` → búsqueda abierta en YouTube · `topic` → solo los canales
+    y listas que el admin registró para ese tema · sin nada → los canales
+    registrados si hay alguno, y si no, el mostPopular de la región. Así el
+    registro manda cuando existe, sin perder la búsqueda libre.
+    """
+    if query:
+        videos = youtube_top_videos(query)
+    else:
+        registradas = sources_of_type("youtube", topic or "")
+        videos = (youtube_source_videos(registradas) if registradas
+                  else (None if topic else youtube_top_videos(None)))
     if not videos:
         return None
     ya_posteados = " ".join(recent_bot_posts(conn, limit=30)) if conn is not None else ""
@@ -3571,13 +3639,22 @@ def get_youtube_transcript(video_url: str, languages: tuple[str, ...] = ("es", "
 
 
 def _tool_share_video(args: dict, ctx: ToolContext) -> ToolResult:
-    """T14: trae un video de YouTube (mostPopular AR, o búsqueda si viene `query`) +
-    transcript best-effort. La opinión la compone el LLM del nodo (reply/feed)."""
+    """T14: trae un video de YouTube + transcript best-effort. Puede venir de una
+    búsqueda abierta (`query`), de los canales/listas registrados para un tema
+    (`topic`, T38b) o del mostPopular. La opinión la compone el LLM del nodo."""
     if not os.environ.get("YOUTUBE_API_KEY"):
         return ToolResult(text="los videos no están configurados")
     query = (args.get("query") or "").strip() or None
+    topic = (args.get("topic") or "").strip() or None
+    if topic and not sources_of_type("youtube", topic):
+        conocidos = ", ".join(e.get("category") or e.get("name") or "?"
+                              for e in source_entries("youtube"))
+        return ToolResult(text=(
+            f"no tengo canales de YouTube para '{topic}'. "
+            + (f"Temas con canales: {conocidos}" if conocidos
+               else "El admin no registró ninguno; puedo buscar libremente si me das un tema.")))
     try:
-        video = fetch_top_video(ctx.conn, query)
+        video = fetch_top_video(ctx.conn, query, topic)
     except Exception as e:
         log.error("share_video: %s", e)
         return ToolResult(text="no pude traer un video ahora")
@@ -4094,7 +4171,8 @@ def build_tool_registry(config: dict | None = None, *,
         {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Opcional: tema/artista/palabras a buscar. Omitir para lo más popular del momento."}
+                "query": {"type": "string", "description": "Opcional: búsqueda ABIERTA en YouTube (tema/artista/palabras). Usala cuando el pedido no corresponde a los canales registrados."},
+                "topic": {"type": "string", "description": "Opcional: tema de los canales/listas de YouTube que registró el admin (ej. 'rock', 'cocina'). Sin query ni topic, sale de los canales registrados (o de lo popular si no hay ninguno)."}
             },
             "required": [],
         },

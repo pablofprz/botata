@@ -252,7 +252,7 @@ def validate_mcp(mcp: dict) -> list[str]:
     return errs
 
 
-SOURCE_TYPES = ("rss", "scrape", "spotify")
+SOURCE_TYPES = ("rss", "scrape", "spotify", "youtube")
 
 
 def validate_sources(sources: list) -> list[str]:
