@@ -267,3 +267,44 @@ def test_get_profile_da_el_nombre_pero_no_bio():
 
 def test_block_user_es_no_op_declarado():
     assert _canal(BridgeFalso()).block_user(OTRO) is False
+
+
+# ─── Panel de vinculación en la UI ──────────────────────────────────────────
+# Vincular es el único paso de config que no es escribir en un campo: hay que
+# escanear un QR. Si no se ve en la UI, el admin tiene que ir a leer la terminal
+# del bridge — el muro que este proyecto no le quiere poner a nadie.
+@pytest.fixture()
+def store(tmp_path):
+    import config_ui
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "settings.json").write_text(
+        json.dumps({"CHANNEL": "whatsapp", "WHATSAPP_BRIDGE_URL": "http://127.0.0.1:9",
+                    "WHATSAPP_CHAT_IDS": [GRUPO]}), encoding="utf-8")
+    return config_ui.ConfigStore(tmp_path)
+
+
+def test_si_el_bridge_no_esta_levantado_lo_dice_en_criollo(store):
+    out = store.run_action("whatsapp_status")
+    assert out["ok"] is False
+    assert "proceso aparte" in out["errors"][0]
+
+
+def test_devuelve_el_qr_para_mostrarlo(store, monkeypatch):
+    import urllib.request
+
+    class _R:
+        def read(self): return json.dumps(
+            {"connected": False, "qr": "2@abc...", "me": None}).encode()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _R())
+    out = store.run_action("whatsapp_status")
+    assert out["ok"] and out["status"]["qr"] == "2@abc..."
+    assert out["chats"] == [GRUPO]
+
+
+def test_sin_bridge_url_avisa_que_falta(store, tmp_path):
+    (tmp_path / "config" / "settings.json").write_text(
+        json.dumps({"CHANNEL": "whatsapp"}), encoding="utf-8")
+    assert "WHATSAPP_BRIDGE_URL" in store.run_action("whatsapp_status")["errors"][0]

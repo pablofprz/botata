@@ -685,6 +685,8 @@ class ConfigStore:
         """Corre un script de mantenimiento del motor sobre esta instancia."""
         if action == "membrilla_scrape":
             return self._run_membrilla()
+        if action == "whatsapp_status":
+            return self._whatsapp_status()
         src = Path(__file__).resolve().parent
         cmds = {
             "parse_memory": [sys.executable, str(src / "parse_memory.py"),
@@ -702,6 +704,34 @@ class ConfigStore:
                     "errors": [] if r.returncode == 0 else [f"exit {r.returncode}"]}
         except subprocess.TimeoutExpired:
             return {"ok": False, "errors": ["timeout (10 min)"]}
+
+    def _whatsapp_status(self) -> dict:
+        """Estado del bridge de WhatsApp, para el panel de vinculación.
+
+        Vincular es el único paso de configuración de Botata que NO es escribir
+        en un campo: hay que escanear un QR desde el teléfono. Si eso no se ve
+        en la UI, el admin tiene que ir a mirar la terminal del bridge — que es
+        exactamente el muro que este proyecto no quiere ponerle a nadie.
+        """
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {"ok": False, "errors": [f"no pude leer settings.json: {e}"]}
+        url = str(settings.get("WHATSAPP_BRIDGE_URL") or "").strip()
+        if not url:
+            return {"ok": False, "errors": [
+                "falta WHATSAPP_BRIDGE_URL en settings.json (dónde escucha el bridge, "
+                "por ejemplo http://127.0.0.1:8787)"]}
+        try:
+            import urllib.request
+            with urllib.request.urlopen(url.rstrip("/") + "/status", timeout=10) as r:
+                estado = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception as e:
+            return {"ok": False, "errors": [
+                f"el bridge no responde en {url} ({type(e).__name__}). ¿Está levantado? "
+                "Es un proceso aparte: sin él, el canal de WhatsApp no arranca."]}
+        return {"ok": True, "status": estado,
+                "chats": [str(c) for c in (settings.get("WHATSAPP_CHAT_IDS") or [])]}
 
     def _run_membrilla(self) -> dict:
         """Lanza el scraper Membrilla (suite hermana) según settings.MEMBRILLA:
