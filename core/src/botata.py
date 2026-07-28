@@ -48,7 +48,7 @@ if "--init" in sys.argv:
 
 import instance  # resolución del directorio de instancia (T28c)
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
-from channels import truncate_post  # corte en frontera de oración (compartido entre canales)
+from channels import strip_fake_media, truncate_post  # helpers de salida compartidos
 import budget as budgetmod  # guard de presupuesto diario de tokens
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
 from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope, ALL_SCOPES  # framework de tools
@@ -1380,8 +1380,10 @@ class BskyClient:
         """
         Post a reply, optionally with an attached image OR video.
         parent = immediate post being replied to.
+        El texto pasa por strip_fake_media: el LLM no puede fingir un adjunto.
         root   = original post that started the thread.
         """
+        text = strip_fake_media(text)
         text = text[:300]
         reply_to = {
             "root"  : {"uri": root_uri,   "cid": root_cid},
@@ -1406,6 +1408,7 @@ class BskyClient:
         punctuation before `limit` to avoid cutting mid-word.
         `target` (rutinas) se ignora: Bluesky es un solo timeline.
         """
+        text = strip_fake_media(text)
         if len(text) > limit:
             cut = text[:limit]
             # Walk back to the last sentence boundary
@@ -4244,7 +4247,11 @@ def build_tool_registry(config: dict | None = None, *,
             "required": ["query"],
         },
         _tool_search_images,
-        {Scope.ADMIN},
+        # REPLY incluido a propósito (2026-07-27): sin esto, pedirle "poneme una
+        # foto de un mapache" por mención no tenía cómo resolverse — el LLM caía
+        # en web_search y terminaba FINGIENDO el adjunto. El catálogo lo curó el
+        # admin y `resolve_catalog_image` ya filtra lo que no está descripto.
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     reg.register(
         "search_videos",
@@ -4260,7 +4267,7 @@ def build_tool_registry(config: dict | None = None, *,
             "required": ["query"],
         },
         _tool_search_videos,
-        {Scope.ADMIN},
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     reg.register(
         "get_latest_media",

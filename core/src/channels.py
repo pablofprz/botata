@@ -62,6 +62,30 @@ def strip_html(html: str) -> str:
     return unescape(text).strip()
 
 
+# El contexto del bot anota la media que VE con corchetes: "[imagen: un gato]",
+# "[video, primer frame: …]", "[GIF: …]", "[image: foto.jpg]" (Discord). El LLM
+# aprende ese formato de tanto verlo y termina ESCRIBIÉNDOLO en sus posts, o sea
+# fingiendo un adjunto que no existe — el usuario ve "[imagen: un mapache]" en vez
+# de un mapache. Se limpia acá, en la salida, porque es el único lugar por donde
+# pasa todo lo que el bot publica en cualquier canal.
+_MEDIA_FAKE_RE = re.compile(
+    r"\[\s*(?:imagen|image|img|foto|video|vídeo|gif|adjunto|attachment)\b[^\]]*\]",
+    re.I)
+
+
+def strip_fake_media(text: str) -> str:
+    """Saca las anotaciones de media que el LLM haya escrito en el texto.
+
+    Las anotaciones son ENTRADA (lo que el bot ve), nunca salida. Adjuntar de
+    verdad es cosa del pipeline (`media_path`), no del texto.
+    """
+    limpio = _MEDIA_FAKE_RE.sub("", text or "")
+    # Puede quedar el renglón vacío o espacios dobles donde estaba la anotación.
+    limpio = re.sub(r"[ \t]{2,}", " ", limpio)
+    limpio = re.sub(r"\n{3,}", "\n\n", limpio)
+    return limpio.strip()
+
+
 def truncate_post(text: str, limit: int) -> str:
     """Corte en frontera de oración (o último espacio) — mismo criterio que
     BskyClient.post, extraído para compartirlo entre canales."""
@@ -185,7 +209,7 @@ class MastodonChannel:
 
     def reply(self, text: str, parent_uri: str, parent_cid: str,
               root_uri: str, root_cid: str, media_path: str | None = None) -> str:
-        text = text[:490]
+        text = strip_fake_media(text)[:490]
         try:
             parent = self._api.status(parent_uri)
             author = parent["account"]["acct"]
@@ -202,7 +226,7 @@ class MastodonChannel:
              target: str | None = None) -> str:
         if target:
             log.debug("post: Mastodon no tiene canales — target %r ignorado", target)
-        text = truncate_post(text, limit)
+        text = truncate_post(strip_fake_media(text), limit)
         media_ids = self._upload_media(media_path) if media_path else None
         status = self._api.status_post(text, media_ids=media_ids)
         return str(status["id"])
@@ -218,6 +242,7 @@ class MastodonChannel:
 
     def set_bio(self, text: str) -> bool:
         """Actualiza la bio (note) de la cuenta del bot. True si OK."""
+        text = strip_fake_media(text)
         try:
             self._api.account_update_credentials(note=text)
             return True
@@ -562,7 +587,7 @@ class DiscordChannel:
               root_uri: str, root_cid: str, media_path: str | None = None) -> str:
         channel_id, _, message_id = parent_uri.partition("/")
         payload = {
-            "content": text[:2000],
+            "content": strip_fake_media(text)[:2000],
             "message_reference": {"message_id": message_id,
                                   "fail_if_not_exists": False},
         }
@@ -572,6 +597,7 @@ class DiscordChannel:
     def post(self, text: str, limit: int = 295, media_path: str | None = None,
              target: str | None = None) -> str:
         """Sin target → canal principal (el primero); con target (rutinas) → ese canal."""
+        text = strip_fake_media(text)
         channel_id = str(target) if target else \
             (self._channel_ids[0] if self._channel_ids else None)
         if not channel_id:
