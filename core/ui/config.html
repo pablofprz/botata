@@ -496,8 +496,10 @@
     </div>
     <div class="card">
       <b>Log del bot</b>
-      <p class="hint">Últimas líneas del bot lanzado desde esta UI (<code>bot.log</code>).</p>
-      <button class="ghost" onclick="refreshLog()">↻ Actualizar log</button>
+      <p class="hint">Últimas líneas del bot lanzado desde esta UI. Sale también por la
+        <b>consola donde corriste este panel</b>, y queda guardado en <code>bot.log</code>
+        de la instancia. Con el log abierto y el bot corriendo se refresca solo.</p>
+      <button class="ghost" onclick="toggleLog()" id="log-btn">▶ Ver log en vivo</button>
       <pre class="out" id="bot-log" style="display:none"></pre>
     </div></section>
 
@@ -1735,7 +1737,7 @@ async function botToggle() {
   }
   try {
     await api("/api/bot", {action, mode});
-    toast(action === "start" ? `bot arrancado (${mode}) — mirá el log en Mantenimiento` : "bot detenido");
+    toast(action === "start" ? `bot arrancado (${mode}) — el log sale por la consola y en Mantenimiento` : "bot detenido");
   } catch (e) { toast(e.message, false); }
   setTimeout(refreshBot, 800);
 }
@@ -1748,11 +1750,26 @@ async function botRelaunch() {
   } catch (e) { toast(e.message, false); }
   setTimeout(refreshBot, 800);
 }
+let LOG_TIMER = null;
 async function refreshLog() {
   await refreshBot();
   const pre = $("bot-log");
-  pre.style.display = "";
+  const pegadoAbajo = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
   pre.textContent = BOT.log_tail || "(sin log todavía — arrancá el bot desde la barra de arriba)";
+  if (pegadoAbajo) pre.scrollTop = pre.scrollHeight;   // seguir la cola sin pelear con el scroll
+}
+async function toggleLog() {
+  const pre = $("bot-log"), abierto = pre.style.display !== "none";
+  if (abierto) {
+    pre.style.display = "none";
+    clearInterval(LOG_TIMER); LOG_TIMER = null;
+    $("log-btn").textContent = "▶ Ver log en vivo";
+    return;
+  }
+  pre.style.display = "";
+  $("log-btn").textContent = "⏸ Cerrar log";
+  await refreshLog();
+  LOG_TIMER = setInterval(refreshLog, 3000);          // en vivo mientras esté abierto
 }
 
 // ─── Acciones de mantenimiento / membrilla ───────────────────────────────

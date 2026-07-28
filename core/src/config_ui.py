@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import webbrowser
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -322,7 +323,20 @@ def tool_catalog(settings: dict) -> list[dict]:
 _BOT: dict = {"proc": None, "log": None}
 
 
-def bot_status(base_dir: Path) -> dict:
+def _bomba_de_log(proc: subprocess.Popen, log_path: Path) -> None:
+    """Vuelca la salida del bot al archivo y a la consola, línea por línea."""
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            for linea in proc.stdout:            # type: ignore[union-attr]
+                f.write(linea)
+                f.flush()
+                sys.stdout.write(linea)
+                sys.stdout.flush()
+    except Exception as e:                        # el bot no depende de su propio log
+        log.debug("bomba de log cortada: %s", e)
+
+
+def bot_status(base_dir: Path, lineas: int = 200) -> dict:
     proc = _BOT.get("proc")
     running = proc is not None and proc.poll() is None
     log_path = base_dir / "bot.log"
@@ -330,7 +344,7 @@ def bot_status(base_dir: Path) -> dict:
     if log_path.exists():
         try:
             tail = "\n".join(
-                log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:])
+                log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-lineas:])
         except Exception:
             pass
     return {"running": running, "pid": proc.pid if running else None, "log_tail": tail}
@@ -344,17 +358,31 @@ def bot_control(base_dir: Path, action: str, mode: str = "open") -> list[str]:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()      # corta la bomba de log
+            except Exception:
+                pass
         _BOT["proc"] = None
     if action in ("start", "restart"):
         if _BOT.get("proc") is not None and _BOT["proc"].poll() is None:
             return ["el bot ya está corriendo (pará primero)"]
         if mode not in ("open", "admin_only"):
             return ["mode inválido (open|admin_only)"]
-        logf = open(base_dir / "bot.log", "a", encoding="utf-8")
-        _BOT["log"] = logf
+        # `-u`: sin esto Python bufferea stdout al no ser una terminal (bloques de
+        # 8 KB), así que las primeras líneas del arranque quedaban retenidas y el
+        # log parecía vacío justo cuando uno lo mira.
         _BOT["proc"] = subprocess.Popen(
-            [sys.executable, "-m", "botata", "--instance", str(base_dir), "--mode", mode],
-            stdout=logf, stderr=subprocess.STDOUT)
+            [sys.executable, "-u", "-m", "botata",
+             "--instance", str(base_dir), "--mode", mode],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1)
+        # Se lee en un hilo y se escribe a los DOS lados: al archivo (lo que lee el
+        # panel de la UI) y a la consola donde corre este panel, que es donde uno
+        # naturalmente mira cuando arranca el bot desde acá.
+        threading.Thread(target=_bomba_de_log,
+                         args=(_BOT["proc"], base_dir / "bot.log"),
+                         daemon=True, name="bot-log").start()
     elif action == "stop":
         pass
     elif action != "restart":

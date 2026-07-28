@@ -554,3 +554,31 @@ def test_ui_ve_los_plugins_de_la_instancia(store):
     # y al borrar el archivo, el conector desaparece del catálogo (recarga)
     (d / "lemmy.py").unlink()
     assert "lemmy" not in {c["id"] for c in store.read_all()["connectors"]}
+
+
+# ─── Log del bot: sale por la consola Y al archivo ──────────────────────────
+def test_bomba_de_log_escribe_en_los_dos_lados(tmp_path, capsys):
+    """Antes el log del bot solo iba a bot.log: quien lanzaba el panel desde una
+    terminal no veía nada."""
+    class _Proc:
+        stdout = iter(["arranque\n", "segunda linea\n"])
+
+    destino = tmp_path / "bot.log"
+    cu._bomba_de_log(_Proc(), destino)
+    assert destino.read_text(encoding="utf-8") == "arranque\nsegunda linea\n"
+    assert "arranque" in capsys.readouterr().out          # y también por consola
+
+
+def test_bomba_de_log_no_propaga_errores(tmp_path):
+    class _Proc:
+        @property
+        def stdout(self):
+            raise RuntimeError("pipe roto")
+    cu._bomba_de_log(_Proc(), tmp_path / "bot.log")        # no debe lanzar
+
+
+def test_bot_status_devuelve_la_cola_pedida(tmp_path):
+    (tmp_path / "bot.log").write_text("\n".join(f"linea {i}" for i in range(500)),
+                                      encoding="utf-8")
+    assert len(cu.bot_status(tmp_path)["log_tail"].splitlines()) == 200   # default
+    assert len(cu.bot_status(tmp_path, lineas=5)["log_tail"].splitlines()) == 5
