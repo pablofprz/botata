@@ -315,6 +315,18 @@ usuario (esa charla puede seguir, y resumirla a mitad de camino perdería lo má
 Las últimas 5 pasan a ser cinco *días* de relación en vez de cinco ángulos de la misma
 mañana.
 
+El día es la unidad de **compresión**; el grupo es el **usuario** (T49b). El schema ya
+devolvía una lista de días, así que pedir un día por llamada desperdiciaba llamadas: sobre
+los grupos que quedaban en producción, 9 pasaron a 4. Dos cuidados que trae ese cambio:
+
+* **Un resumen no puede mezclar días.** Viendo varios juntos el modelo tiende a fundirlos,
+  y eso es lo contrario de lo que busca el pase: la ventana son las 5 últimas notas, así
+  que tres días colapsados en uno la *vacían* en vez de llenarla de días distintos. Los
+  días le llegan separados y rotulados, y el código rechaza el plan que los mezcle.
+* **Cada nota nueva se fecha con la última de las que reemplaza**, no con la última del
+  usuario: si no, todos sus días colapsarían al mismo timestamp y la ventana por recencia
+  perdería el orden.
+
 Dos decisiones de costo, ambas porque esto corre **dentro del loop del bot**:
 * **Modelo liviano**, no el de razonamiento. Resumir las notas de un día es resumir; no hay
   contradicciones que dirimir ni identidad en juego. Con el grande, una corrida de 40
@@ -338,9 +350,12 @@ más barato que pelearla.
 **Cómo se mide si esto sirvió.** No por cantidad de filas: 8 notas en 8 días distintos es
 una ventana sana. Lo que se cuenta son **días distintos dentro de las 5 que ve el bot**, y
 el "antes" tiene que excluir las filas que generó la propia compactación
-(`source_uri='compact'`) o se está comparando contra sí mismo. Resultado real del backfill
-de botata-arg: **1,6 → 2,9 días** de promedio, y los usuarios cuya ventana era un solo día
-pasaron de **14 a 7**.
+(`source_uri='compact'`) o se está comparando contra sí mismo. Y la **población tiene que
+ser la misma** en el antes y el después: solo los usuarios con la ventana efectivamente
+llena (≥5 notas), porque quien tiene dos notas vigentes tiene un solo día por definición y
+mete ruido a favor del "antes". Resultado real del backfill de botata-arg: **1,6 → 2,9
+días** de promedio (3,04 tras T49b), y los usuarios cuya ventana era un solo día pasaron de
+**14 a 7**.
 
 ### Compactación de los hechos de cada persona (T49)
 

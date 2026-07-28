@@ -259,6 +259,10 @@ def compactar(conn, llm, *, prompt: str, dbmod, dry_run: bool = False) -> Result
 # y 27 de 64 usuarios con la ventana tapada. Comprimir por día la libera —
 # las últimas 5 pasan a ser cinco DÍAS de relación en vez de cinco ángulos de
 # la misma mañana.
+#
+# El día es la unidad de COMPRESIÓN; el grupo es el USUARIO. El schema devuelve
+# una lista de días, así que pedir un día por llamada desperdiciaba llamadas: en
+# el backfill, 38 donde alcanzaban ~15.
 
 class ResumenDia(BaseModel):
     ids: list[int] = Field(description="Ids de las notas de ese día que resume esta línea.")
@@ -281,8 +285,9 @@ def _dias_utiles(plan: PlanInteracciones) -> list[ResumenDia]:
 
 
 def verificar_interacciones(plan: PlanInteracciones, filas: list[dict]) -> list[str]:
-    """Mismas reglas duras que en bot_memory, sobre el grupo del día."""
+    """Mismas reglas duras que en bot_memory, sobre las notas de una persona."""
     largo = {f["id"]: len(f["summary"]) for f in filas}
+    fecha = {f["id"]: f.get("dia") for f in filas}
     errores: list[str] = []
     vistos: set[int] = set()
     for dia in plan.dias:
@@ -292,6 +297,14 @@ def verificar_interacciones(plan: PlanInteracciones, filas: list[dict]) -> list[
             if i in vistos:
                 errores.append(f"id {i} en dos resúmenes")
             vistos.add(i)
+        # Un resumen por DÍA: mezclar días distintos en una nota es exactamente
+        # lo contrario de lo que se busca. La ventana son las 5 últimas notas —
+        # colapsar tres días en uno la vacía en vez de llenarla de días
+        # distintos, que es la mejora que justifica todo el pase.
+        dias_tocados = {fecha.get(i) for i in dia.ids if i in fecha}
+        if len(dias_tocados) > 1:
+            errores.append(f"un resumen mezcla {len(dias_tocados)} días distintos "
+                           f"({', '.join(sorted(str(x) for x in dias_tocados))})")
         if not dia.resumen.strip():
             errores.append(f"resumen vacío para {dia.ids}")
             continue
@@ -311,18 +324,20 @@ def verificar_interacciones(plan: PlanInteracciones, filas: list[dict]) -> list[
 def compactar_interacciones(conn, llm, *, prompt: str, dbmod,
                             min_por_dia: int = 3, max_grupos: int = 40,
                             dry_run: bool = False) -> Resultado:
-    """Comprime a UNA nota por (usuario, día) los días con varias notas.
+    """Comprime a UNA nota por día los días con varias notas, un USUARIO por llamada.
 
-    Una llamada al modelo por grupo. `max_grupos` acota el gasto de una corrida:
-    lo que queda afuera se toma en la siguiente, y se avisa en el log — un tope
-    silencioso se leería como "ya está todo compactado"."""
+    El día sigue siendo la unidad de compresión, pero el grupo es la persona: el
+    schema devuelve una lista de días, así que pedir uno por vez era desperdiciar
+    llamadas (38 donde alcanzaban ~15). `max_grupos` acota el gasto de una
+    corrida: lo que queda afuera se toma en la siguiente, y se avisa en el log —
+    un tope silencioso se leería como "ya está todo compactado"."""
     grupos = dbmod.interacciones_compactables(conn, min_por_dia=min_por_dia)
     res = Resultado()
     if not grupos:
         log.info("interacciones: no hay días con notas repetidas")
         return res
     if len(grupos) > max_grupos:
-        log.info("interacciones: %d grupos compactables, hago %d en esta corrida "
+        log.info("interacciones: %d usuarios compactables, hago %d en esta corrida "
                  "(el resto queda para la próxima)", len(grupos), max_grupos)
         grupos = grupos[:max_grupos]
 
@@ -330,20 +345,24 @@ def compactar_interacciones(conn, llm, *, prompt: str, dbmod,
     res.chars_antes = sum(len(f["summary"]) for g in grupos for f in g["filas"])
     hechos = 0
     for g in grupos:
-        bloque = "\n".join(f"[{f['id']}] {f['created_at'][11:16]} {f['summary']}"
-                           for f in g["filas"])
-        usuario = (f"Notas del día {g['dia']} con @{g['handle']} "
-                   f"({len(g['filas'])} notas):\n{bloque}")
+        # Con los días separados y rotulados: el modelo tiene que devolver UNA
+        # nota por día, y sin el corte visible los mezcla.
+        bloque = "\n\n".join(
+            f"— {d['dia']} ({len(d['filas'])} notas) —\n" + "\n".join(
+                f"[{f['id']}] {f['created_at'][11:16]} {f['summary']}" for f in d["filas"])
+            for d in g["dias"])
+        usuario = (f"Notas de @{g['handle']} en {len(g['dias'])} día(s) "
+                   f"({len(g['filas'])} notas en total):\n\n{bloque}")
         try:
             plan = llm.complete(prompt, usuario, PlanInteracciones)
         except Exception as e:
-            log.warning("interacciones: falló @%s %s (%s)", g["handle"], g["dia"], e)
+            log.warning("interacciones: falló @%s (%s)", g["handle"], e)
             continue
         utiles = _dias_utiles(plan)
         errs = verificar_interacciones(PlanInteracciones(dias=utiles), g["filas"])
         if errs:
-            log.warning("interacciones: plan rechazado para @%s %s: %s",
-                        g["handle"], g["dia"], "; ".join(errs))
+            log.warning("interacciones: plan rechazado para @%s: %s",
+                        g["handle"], "; ".join(errs))
             res.rechazos += errs
             continue
         if not utiles:
@@ -352,18 +371,23 @@ def compactar_interacciones(conn, llm, *, prompt: str, dbmod,
                      for d in utiles]
         if dry_run:
             continue
+        cuando = {f["id"]: f["created_at"] for f in g["filas"]}
         try:
             with conn:
                 for d in utiles:
+                    # La nota nueva se fecha con la ÚLTIMA de las que reemplaza,
+                    # no con la última del usuario: si no, todos los días de una
+                    # persona colapsarían al mismo timestamp y la ventana por
+                    # recencia quedaría sin orden.
                     cur = conn.execute(
                         "INSERT INTO interactions (handle, summary, source_uri, created_at) "
                         "VALUES (?, ?, ?, ?)",
                         (g["handle"], d.resumen.strip(), "compact",
-                         g["filas"][-1]["created_at"]))
+                         max(cuando[i] for i in d.ids)))
                     dbmod.supersede_interactions(conn, d.ids, int(cur.lastrowid))
             hechos += 1
         except Exception as e:
-            log.error("interacciones: falló al aplicar @%s %s (%s)", g["handle"], g["dia"], e)
+            log.error("interacciones: falló al aplicar @%s (%s)", g["handle"], e)
             res.rechazos.append(str(e))
 
     res.aplicado = hechos > 0

@@ -241,32 +241,50 @@ def charlas(conn):
         d.log_interaction(conn, "panchi.test", f"lo de hoy {i}",
                           created_at=f"2026-07-28 10:{i:02d}")
     d.log_interaction(conn, "otro.test", "una sola nota", created_at="2026-07-21 10:00")
+    conn.execute("INSERT INTO users(handle) VALUES ('tercero.test')")
+    conn.commit()
+    for i in range(3):
+        d.log_interaction(conn, "tercero.test", f"otra charla {i}",
+                          created_at=f"2026-07-22 09:0{i}")
+    d.log_interaction(conn, "tercero.test", "lo de hoy", created_at="2026-07-28 09:00")
     return conn
 
 
-def test_agrupa_por_usuario_y_dia_salvo_el_dia_en_curso(charlas):
+def test_agrupa_por_usuario_con_sus_dias_adentro(charlas):
+    """Un grupo por PERSONA: el día sigue siendo la unidad de compresión, pero
+    el schema devuelve una lista de días, así que pedir uno por vez
+    desperdiciaba llamadas (38 donde alcanzaban ~15)."""
     grupos = d.interacciones_compactables(charlas, min_por_dia=3)
-    assert {(g["handle"], g["dia"]) for g in grupos} == {
-        ("panchi.test", "2026-07-21"), ("panchi.test", "2026-07-23")}
+    assert [g["handle"] for g in grupos] == ["panchi.test", "tercero.test"]
+    panchi = grupos[0]
+    assert [x["dia"] for x in panchi["dias"]] == ["2026-07-21", "2026-07-23"]
+    assert len(panchi["filas"]) == 10          # 6 + 4, los dos días juntos
     # el día más reciente del usuario queda afuera (la charla puede seguir)
-    assert all(g["dia"] != "2026-07-28" for g in grupos)
+    assert all(x["dia"] != "2026-07-28" for g in grupos for x in g["dias"])
 
 
 def test_un_dia_con_pocas_notas_no_se_toca(charlas):
-    assert all(len(g["filas"]) >= 3 for g in d.interacciones_compactables(charlas))
-    assert not any(g["handle"] == "otro.test"
-                   for g in d.interacciones_compactables(charlas))
+    grupos = d.interacciones_compactables(charlas)
+    assert all(len(x["filas"]) >= 3 for g in grupos for x in g["dias"])
+    assert not any(g["handle"] == "otro.test" for g in grupos)
+
+
+def _ids_por_dia(user: str) -> list[list[int]]:
+    """Lee el bloque que arma el pase: los días vienen separados y rotulados."""
+    import re
+    return [[int(x) for x in re.findall(r"\[(\d+)\]", tramo)]
+            for tramo in user.split("\n\n") if re.search(r"^— \d{4}-", tramo)]
 
 
 class _LLMDias:
-    """Devuelve un resumen por grupo, usando los ids que recibió."""
+    """Devuelve UN resumen por día, usando los ids de ese día."""
     def __init__(self): self.vistos = []
+
     def complete(self, system, user, schema):
-        import re
-        ids = [int(x) for x in re.findall(r"\[(\d+)\]", user)]
         self.vistos.append(user)
-        return PlanInteracciones(dias=[ResumenDia(
-            ids=ids, resumen="charlamos de fútbol y de los redondos, tono cariñoso")])
+        return PlanInteracciones(dias=[
+            ResumenDia(ids=ids, resumen="charlamos de fútbol y de los redondos, tono cariñoso")
+            for ids in _ids_por_dia(user)])
 
 
 from memory_compact import PlanInteracciones, ResumenDia  # noqa: E402
@@ -318,10 +336,14 @@ def test_un_grupo_que_falla_no_frena_a_los_demas(charlas):
             self.n += 1
             if self.n == 1:
                 raise RuntimeError("timeout")
-            ids = [int(x) for x in re.findall(r"\[(\d+)\]", u)]
-            return PlanInteracciones(dias=[ResumenDia(ids=ids, resumen="ok")])
+            return PlanInteracciones(dias=[
+                ResumenDia(ids=ids, resumen="ok") for ids in _ids_por_dia(u)])
     res = mc.compactar_interacciones(charlas, _MedioRoto(), prompt="P", dbmod=d)
-    assert res.aplicado                       # el segundo grupo sí se aplicó
+    assert res.aplicado                       # el segundo usuario sí se aplicó
+    vivas = [r["summary"] for r in d.recent_interactions(charlas, "tercero.test", limit=9)]
+    assert "ok" in vivas
+    # el que falló quedó intacto, no a medio compactar
+    assert len(d.recent_interactions(charlas, "panchi.test", limit=99)) == 13
 
 
 def test_dry_run_no_escribe(charlas):
@@ -370,8 +392,8 @@ def test_una_entrada_de_un_solo_id_se_ignora_sin_tumbar_el_grupo(charlas):
     """El modelo a veces devuelve una nota suelta junto a resúmenes válidos.
     Rechazar el grupo entero por eso perdía los buenos (visto en el dry-run
     contra producción)."""
-    filas = d.interacciones_compactables(charlas)[0]["filas"]
-    ids = [f["id"] for f in filas]
+    dia = d.interacciones_compactables(charlas)[0]["dias"][0]
+    ids = [f["id"] for f in dia["filas"]]
 
     class _Mixto:
         def complete(self, s, u, schema):
@@ -384,6 +406,43 @@ def test_una_entrada_de_un_solo_id_se_ignora_sin_tumbar_el_grupo(charlas):
     vivas = [r["summary"] for r in d.recent_interactions(charlas, "panchi.test", limit=99)]
     assert "charla de la mañana, tono cariñoso" in vivas
     assert "una nota sola" not in vivas          # la suelta quedó como estaba
+
+
+def test_rechaza_un_resumen_que_mezcla_dos_dias(charlas):
+    """Con el grupo por usuario, el modelo ve varios días juntos y la tentación
+    es fundirlos. Sería lo contrario de lo que busca el pase: la ventana son las
+    5 últimas notas, así que tres días colapsados en uno la VACÍAN en vez de
+    llenarla de días distintos."""
+    todos = [f["id"] for f in d.interacciones_compactables(charlas)[0]["filas"]]
+
+    class _Fusionador:
+        def complete(self, s, u, schema):
+            return PlanInteracciones(dias=[ResumenDia(ids=todos, resumen="todo junto")])
+
+    antes = charlas.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+    res = mc.compactar_interacciones(charlas, _Fusionador(), prompt="P", dbmod=d,
+                                     max_grupos=1)
+    assert not res.aplicado and any("mezcla" in r for r in res.rechazos)
+    assert charlas.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == antes
+
+
+def test_cada_nota_nueva_se_fecha_con_su_propio_dia(charlas):
+    """Si todas las notas de una persona heredaran la fecha de la última, los
+    días colapsarían al mismo timestamp y la ventana por recencia perdería el
+    orden — justo lo que el pase viene a arreglar."""
+    mc.compactar_interacciones(charlas, _LLMDias(), prompt="P", dbmod=d, max_grupos=1)
+    fechas = [r[0][:10] for r in charlas.execute(
+        "SELECT created_at FROM interactions WHERE handle = 'panchi.test' "
+        "AND source_uri = 'compact' ORDER BY created_at")]
+    assert fechas == ["2026-07-21", "2026-07-23"]
+
+
+def test_una_llamada_por_persona_no_por_dia(charlas):
+    """La razón de ser del cambio: dos días de una persona salían dos llamadas."""
+    llm = _LLMDias()
+    mc.compactar_interacciones(charlas, llm, prompt="P", dbmod=d)
+    assert len(llm.vistos) == 2                      # dos personas, no tres días
+    assert "2026-07-21" in llm.vistos[0] and "2026-07-23" in llm.vistos[0]
 
 
 def test_el_schema_acepta_la_lista_pelada(charlas):

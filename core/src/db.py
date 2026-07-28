@@ -1451,7 +1451,12 @@ def recent_interactions_all(conn: sqlite3.Connection, limit: int = 20) -> list[d
 
 def interacciones_compactables(conn: sqlite3.Connection, *,
                                min_por_dia: int = 3) -> list[dict]:
-    """Grupos (usuario, día) que valen la pena compactar.
+    """Un grupo por USUARIO, con todos sus días compactables adentro.
+
+    El día sigue siendo la unidad de compresión (una nota por día), pero el
+    grupo es la persona: el schema devuelve una lista de días, así que una sola
+    llamada resuelve todos los días de un usuario. Medido en el backfill: 38
+    llamadas pasan a ~15, y en régimen es menos tiempo del loop del bot ocupado.
 
     Excluye el día MÁS RECIENTE de cada usuario: esa charla puede seguir, y
     resumirla a mitad de camino perdería lo más fresco justo cuando más importa.
@@ -1461,14 +1466,17 @@ def interacciones_compactables(conn: sqlite3.Connection, *,
         "SELECT id, handle, summary, created_at, date(created_at) AS dia "
         "FROM interactions WHERE superseded_by IS NULL ORDER BY handle, id"
     ).fetchall()
-    por_grupo: dict[tuple[str, str], list[dict]] = {}
+    por_dia: dict[tuple[str, str], list[dict]] = {}
     ultimo_dia: dict[str, str] = {}
     for r in filas:
-        por_grupo.setdefault((r["handle"], r["dia"]), []).append(dict(r))
+        por_dia.setdefault((r["handle"], r["dia"]), []).append(dict(r))
         ultimo_dia[r["handle"]] = max(ultimo_dia.get(r["handle"], ""), r["dia"])
-    return [{"handle": h, "dia": d, "filas": fs}
-            for (h, d), fs in sorted(por_grupo.items())
-            if len(fs) >= min_por_dia and d != ultimo_dia[h]]
+    por_handle: dict[str, list[dict]] = {}
+    for (h, dia), fs in sorted(por_dia.items()):
+        if len(fs) >= min_por_dia and dia != ultimo_dia[h]:
+            por_handle.setdefault(h, []).append({"dia": dia, "filas": fs})
+    return [{"handle": h, "dias": ds, "filas": [f for d in ds for f in d["filas"]]}
+            for h, ds in sorted(por_handle.items())]
 
 
 def supersede_interactions(conn: sqlite3.Connection, viejas: list[int],

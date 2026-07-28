@@ -1665,13 +1665,14 @@ function renderAdvFlags() {
        una nota, así que un rato de ida y vuelta deja varias casi iguales y tapan las
        <b>5 últimas</b> que el bot ve de esa persona — que era el problema real: no ocupaban
        contexto de más, ocupaban la ventana. Se comprimen a una nota por día, dejando
-       intacto el día en curso. Usa el modelo liviano (son muchas llamadas) y va de a pocos
-       grupos por pase para no frenar al bot.</p>`
+       intacto el día en curso, y se repasa a <b>una persona por llamada</b> (todos sus días
+       juntos). Usa el modelo liviano y va de a pocas personas por pase para no frenar al
+       bot.</p>`
     + check(mc, "interactions", "comprimir las notas de conversación por día", true)
     + `<div class="row"><div style="max-width:220px">`
     + textInput(mc, "min_por_dia", "comprimir desde … notas en el día", "number")
     + `</div><div style="max-width:220px">`
-    + textInput(mc, "max_grupos", "grupos por pase (costo/tiempo)", "number")
+    + textInput(mc, "max_grupos", "personas por pase (costo/tiempo)", "number")
     + `</div></div>
        <p class="hint">🗂️ <b>Hechos de cada persona.</b> Esta memoria no entra entera: el bot
        busca los <b>5 hechos más relevantes</b> para lo que se está hablando. El problema no
