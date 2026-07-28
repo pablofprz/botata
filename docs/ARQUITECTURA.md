@@ -502,6 +502,11 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 - **Skill nueva**: crear `skills/nombre.md` con frontmatter. Nada más — se carga sola.
 - **Tarea periódica nueva**: función del pase + `PeriodicTask` en la lista de `run()` +
   entrada en `TASKS`. Si se auto-gatea, interval 0; si no, interval del scheduler.
+- **Conector de contenido nuevo** (una plataforma más de donde sacar cosas): una entrada en
+  `connectors.py` (id, label, color, placeholder, tool que lo consume, credenciales que
+  necesita) + su función de fetch registrada con `register_fetcher` + engancharla a la tool
+  que corresponda. La UI (botones, selector, sección 🧩 Plugins), el validador y el toggle
+  on/off salen **solos** de esa declaración — no hay que tocar nada más.
 - **Conector externo**: si existe un MCP server (oficial o de terceros), es una entrada en
   `settings.json → MCP`. Si no existe, escribirlo con FastMCP en `mcp_servers/` (~50-150
   líneas; plantillas: `tests/mcp_echo_server.py` y `mcp_servers/reddit_server.py`).

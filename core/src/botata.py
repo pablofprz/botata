@@ -213,7 +213,9 @@ MODELS_CONFIG      : dict | None = settings.get("MODELS")
 #     type "pinterest" → sources = "usuario/tablero"  (tool get_latest_media)
 #     type "tumblr"  → sources = blogs                (tool get_latest_media)
 # ---------------------------------------------------------------------------
-SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube", "pinterest", "tumblr")
+import connectors as connectorsmod
+
+SOURCE_TYPES = connectorsmod.all_ids()
 
 
 def _normalize_source_entry(e: dict) -> dict | None:
@@ -286,6 +288,8 @@ def sources_of_type(kind: str, topic: str = "") -> list[str]:
     (lo escribe un LLM): case-insensitive y por substring contra `category`,
     `name`, `description` y los nombres de las fuentes.
     """
+    if not connectorsmod.is_enabled(kind, settings):
+        return []          # conector desactivado por el admin (sección Plugins)
     t = (topic or "").strip().lower()
     out: list[str] = []
     for entry in SOURCES:
@@ -3238,28 +3242,37 @@ def _descargar_media(url: str) -> str | None:
         return None
 
 
+# Resolución TARDÍA a propósito (se busca el nombre en el módulo al llamar, no al
+# importar): así el fetcher sigue al módulo si se reemplaza —tests, o un futuro
+# conector que se cargue en caliente— en vez de quedar congelado en el registro.
+connectorsmod.register_fetcher("pinterest", lambda ref, limit=15: _pinterest_board_items(ref, limit))
+connectorsmod.register_fetcher("tumblr", lambda ref, limit=15: _tumblr_blog_items(ref, limit))
+
+
 def _tool_get_latest_media(args: dict, ctx: ToolContext) -> ToolResult:
     """Trae lo ÚLTIMO de un tablero de Pinterest o un blog de Tumblr registrado.
 
     Complementa a search_images: aquello busca por significado en el catálogo
     indexado; esto trae lo nuevo de una fuente conocida, sin indexar."""
     topic = (args.get("topic") or "").strip()
+    vivos = [c.id for c in connectorsmod.CONNECTORS if c.live]
     fuentes: list[tuple[str, str]] = []
-    for kind in ("pinterest", "tumblr"):
+    for kind in vivos:
         fuentes += [(kind, s) for s in sources_of_type(kind, topic)]
     if not fuentes:
         disponibles = ", ".join(
             e.get("category") or e.get("name") or "?"
             for e in SOURCES
-            if e["type"] in ("pinterest", "tumblr") and e.get("enabled", True))
+            if e["type"] in vivos and e.get("enabled", True))
         return ToolResult(text=(
             f"no tengo tableros ni blogs para '{topic}'. Temas disponibles: {disponibles}"
             if topic else
             "no hay fuentes de Pinterest ni Tumblr configuradas"))
     items = []
     for kind, ref in fuentes:
-        items += (_pinterest_board_items(ref) if kind == "pinterest"
-                  else _tumblr_blog_items(ref))
+        fn = connectorsmod.fetcher(kind)
+        if fn:
+            items += fn(ref)
     if not items:
         return ToolResult(text="no pude traer nada de esas fuentes ahora")
     # Anti-repetición contra lo que ya posteó (por link del post original).

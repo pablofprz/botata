@@ -113,6 +113,16 @@ def validate_settings(s: dict) -> list[str]:
     if not isinstance(s.get("POLL_INTERVAL_SECONDS", 60), (int, float)):
         errs.append("POLL_INTERVAL_SECONDS debe ser numérico")
 
+    conns = s.get("CONNECTORS", {})
+    if not isinstance(conns, dict):
+        errs.append("CONNECTORS debe ser un objeto {conector: {enabled: bool}}")
+    else:
+        for cid, cfg in conns.items():
+            if cid not in SOURCE_TYPES:
+                errs.append(f"CONNECTORS.{cid}: conector desconocido (usar {list(SOURCE_TYPES)})")
+            elif not isinstance((cfg or {}).get("enabled", True), bool):
+                errs.append(f"CONNECTORS.{cid}.enabled debe ser booleano")
+
     for i, feed in enumerate(s.get("FEEDS", [])):
         tag = f"FEEDS[{i}]"
         if not feed.get("name"):
@@ -252,7 +262,9 @@ def validate_mcp(mcp: dict) -> list[str]:
     return errs
 
 
-SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube", "pinterest", "tumblr")
+import connectors as connectorsmod
+
+SOURCE_TYPES = connectorsmod.all_ids()
 
 
 def validate_sources(sources: list) -> list[str]:
@@ -418,6 +430,7 @@ class ConfigStore:
             "settings": settings,
             "sources": sources,
             "catalog_sources": catalog_sources,
+            "connectors": connectorsmod.catalog(settings),
             "env_keys": self._env_status(),
             "skills": self._skills_info(),
             "routines": self._routines_info(),

@@ -83,6 +83,15 @@
   pre.out { background: #2b0f2c; border: 1px solid var(--line); border-radius: 8px;
             padding: 10px; max-height: 300px; overflow: auto; font-size: 12px;
             white-space: pre-wrap; }
+  .clogo{display:inline-block;border-radius:5px;color:#fff;text-align:center;
+    font-weight:700;vertical-align:middle;flex:none}
+  .cbtn{display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;width:auto}
+  .typerow{display:flex;align-items:center;gap:7px}
+  .typerow select{flex:1}
+  .plugin .prow{display:flex;align-items:flex-start;gap:11px}
+  .plugin .pinfo{flex:1;min-width:0}
+  .plugin .pstate{display:flex;flex-direction:column;align-items:flex-end;gap:5px;white-space:nowrap}
+  .switch{display:inline-flex;align-items:center;gap:5px;font-size:13px}
 </style>
 </head>
 <body>
@@ -113,6 +122,7 @@
   <a href="#modelos">🤖 Modelos</a>
   <a href="#presupuesto">🪙 Presupuesto</a>
   <a href="#fuentes">🏷️ Fuentes de contenido</a>
+  <a href="#plugins">🧩 Plugins</a>
   <a href="#mcp">🔌 MCP</a>
   <a href="#membrilla">🍐 Membrilla</a>
   <div class="navsep">Operación</div>
@@ -395,14 +405,7 @@
       el tipo); para las scrapeadas el desplegable lista lo que ya está en tu catálogo.
       Se aplica en caliente. Las API keys siguen en Credenciales.</p>
     <div id="c-sources"></div>
-    <div style="margin-top:8px">
-      <button class="ghost" onclick="addSource('membrilla')">+ Membrilla</button>
-      <button class="ghost" onclick="addSource('rss')">+ feed RSS</button>
-      <button class="ghost" onclick="addSource('spotify')">+ playlist de Spotify</button>
-      <button class="ghost" onclick="addSource('youtube')">+ canal de YouTube</button>
-      <button class="ghost" onclick="addSource('pinterest')">+ tablero de Pinterest</button>
-      <button class="ghost" onclick="addSource('tumblr')">+ blog de Tumblr</button>
-    </div>
+    <div style="margin-top:8px" id="c-source-buttons"></div>
     <p class="hint" style="margin-top:10px">
       📺 <b>YouTube</b>: registrá canales (<code>@handle</code> o <code>UC…</code>) y listas
       (<code>PL…</code>) por tema. Si registrás alguno, <code>share_video</code> saca de ahí
@@ -422,6 +425,15 @@
       <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code>. Las recomendaciones
       de usuarios (<code>add_music_recommendation</code>) se agregan siempre a la
       <b>primera playlist habilitada</b> de la lista.</p></section>
+
+  <section id="plugins"><h2>🧩 Plugins (conectores)</h2>
+    <p class="hint">De dónde <b>puede</b> sacar contenido el bot. Cada conector se prende o
+      apaga acá; apagado, sus fuentes quedan inertes (no se borran) y desaparece de los
+      botones de 🏷️ Fuentes. Los conectores viven en <code>core/src/connectors.py</code>:
+      sumar uno nuevo es una entrada ahí más su función de traer contenido — la UI, el
+      validador y estos toggles salen solos de esa declaración. Si un conector necesita una
+      credencial que falta, te avisa acá.</p>
+    <div id="c-plugins"></div></section>
 
   <section id="mcp"><h2>Servers MCP</h2>
     <p class="hint">Conectores externos que suman tools al bot (ej. Reddit por RSS, un
@@ -524,7 +536,7 @@
 <div id="toast"></div>
 
 <script>
-let S = null, SOURCES = [], CATALOG_SOURCES = [], ENV_KEYS = {}, SKILLS = [], MOODS = [], CATALOG = [], INSTANCE = {};
+let S = null, SOURCES = [], CATALOG_SOURCES = [], CONNECTORS = [], ENV_KEYS = {}, SKILLS = [], MOODS = [], CATALOG = [], INSTANCE = {};
 let ROUTINES = [];
 let PROMPTS = [];
 let SOUL = "", soulDirty = false, dirty = false;
@@ -659,7 +671,7 @@ function render() {
   $("rt-discord-hint").style.display = isDiscord ? "" : "none";
 
   renderBudget(); renderModels(); renderFeeds(); renderTools(); renderGroups();
-  renderTasks(); renderMcp(); renderSources(); renderSkills(); renderMoods();
+  renderTasks(); renderMcp(); renderSources(); renderPlugins(); renderSkills(); renderMoods();
   renderPrefsMode(); renderData(); renderUserMem(); renderBio(); renderRoutines(); renderAdvFlags();
   $("prompt-file").innerHTML = PROMPTS.map(f => `<option>${esc(f)}</option>`).join("");
   navStatus();
@@ -1378,18 +1390,18 @@ function renderMcp() {
     }));
 }
 
-// ─── Fuentes de contenido (T38b: registro único, sources.json) ───────────
-// Un TEMA con sus fuentes, y un TIPO que dice por dónde entran. RSS es un tipo
-// más: antes eran tres secciones distintas (Integraciones / RSS / por tema).
-const SOURCE_TYPE_INFO = {
-  membrilla: {label: "Membrilla (contenido scrapeado)", ph: "cuenta_una, board_dos", tool: "search_images / search_videos"},
-  rss:     {label: "feed RSS", ph: "https://diario.com/rss.xml", tool: "get_news"},
-  spotify: {label: "playlist de Spotify", ph: "37i9dQZF1DX... (id de la playlist)", tool: "get_playlist_track"},
-  youtube: {label: "canal o lista de YouTube", ph: "@canal, UCxxxx (canal) o PLxxxx (lista)", tool: "share_video"},
-  pinterest: {label: "tablero de Pinterest (en vivo)", ph: "usuario/tablero — o pegá la URL del tablero", tool: "get_latest_media"},
-  tumblr: {label: "blog de Tumblr (en vivo)", ph: "unblog, otro#tag", tool: "get_latest_media"},
-};
-
+// ─── Fuentes de contenido (T38b + T44) ───────────────────────────────────
+// La metadata de cada conector (label, logo, ejemplo, tool) YA NO vive acá: la
+// sirve el motor desde connectors.py, así sumar un conector es un solo lugar.
+function conn(id) {
+  return CONNECTORS.find(c => c.id === id) ?? CONNECTORS[0] ?? {};
+}
+function connLogo(c, size) {
+  const s = size || 18;
+  return `<span class="clogo" style="background:${esc(c.color || "#555")};
+    width:${s}px;height:${s}px;line-height:${s}px;font-size:${Math.round(s * 0.58)}px"
+    >${esc(c.initial || "?")}</span>`;
+}
 function sourceList(entry) {
   const s = entry.sources;
   return Array.isArray(s) ? s.join(", ") : (s || entry.source || "");
@@ -1409,23 +1421,37 @@ function addSource(kind) {
   SOURCES.push({type: kind, name: "", category: "", sources: [], description: "", enabled: true});
   markDirty(); render();
 }
+function renderSourceButtons() {
+  $("c-source-buttons").innerHTML = CONNECTORS.filter(c => c.enabled).map(c =>
+    `<button class="ghost cbtn" onclick="addSource('${esc(c.id)}')" title="${esc(c.help)}">
+       ${connLogo(c, 16)} ${esc(c.label)}</button>`).join("");
+}
 function renderSources() {
+  renderSourceButtons();
   const usadas = new Set(SOURCES.filter(e => e.type === "membrilla").flatMap(e => e.sources ?? []));
+  const activos = CONNECTORS.filter(c => c.enabled).map(c => c.id);
   $("c-sources").innerHTML = SOURCES.map((entry, i) => {
     const kind = entry.type === "scrape" ? "membrilla" : (entry.type || "membrilla");
-    const info = SOURCE_TYPE_INFO[kind] ?? SOURCE_TYPE_INFO.membrilla;
+    const c = conn(kind);
     const libres = kind === "membrilla"
       ? CATALOG_SOURCES.filter(n => !(entry.sources ?? []).includes(n)) : [];
+    const apagado = !activos.includes(kind);
     return `<div class="card">
+    ${apagado ? `<p class="warn">⚠️ el conector <b>${esc(c.label || kind)}</b> está desactivado
+       en 🧩 Plugins — esta fuente no se usa</p>` : ""}
     <div class="row">
-      <div style="max-width:210px">${selectInput(entry, "type", "tipo", Object.keys(SOURCE_TYPE_INFO), "membrilla")}</div>
+      <div style="max-width:210px"><label>tipo</label>
+        <div class="typerow">${connLogo(c, 20)}
+          <select onchange="SOURCES[${i}].type=this.value;markDirty();render()">
+            ${CONNECTORS.map(o => `<option value="${esc(o.id)}"${o.id === kind ? " selected" : ""}>${esc(o.label)}</option>`).join("")}
+          </select></div></div>
       <div style="max-width:230px">${textInput(entry, "category", "tema (futbol, rock...)")}</div>
       <div>${textInput(entry, "name", "nombre (opcional: Página/12)")}</div>
     </div>
     <div class="row" style="margin-top:6px">
       <div><label>fuentes (separadas por coma)</label>
         <input type="text" value="${esc(sourceList(entry))}"
-               oninput="setSourceList(${i}, this.value)" placeholder="${esc(info.ph)}"></div>
+               oninput="setSourceList(${i}, this.value)" placeholder="${esc(c.placeholder || "")}"></div>
       ${kind === "membrilla" ? `<div style="max-width:230px"><label>agregar del catálogo</label>
         <select onchange="addFromCatalog(${i}, this.value); this.value=''">
           <option value="">${libres.length ? "elegí una…" : "(todas agregadas)"}</option>
@@ -1434,7 +1460,7 @@ function renderSources() {
     </div>
     ${textInput(entry, "description", "descripción (el bot la usa como contexto; también sirve para matchear el tema)")}
     <div style="margin-top:8px">${check(entry, "enabled", "activa", true)}
-      <span class="hint">la usa <code>${esc(info.tool)}</code></span>
+      <span class="hint">la usa <code>${esc(c.tool || "")}</code></span>
       <button class="danger" onclick="SOURCES.splice(${i},1);markDirty();render()">borrar</button></div>
   </div>`;
   }).join("") || `<p class="hint">sin fuentes — los pedidos temáticos van a buscar a ciegas
@@ -1446,6 +1472,39 @@ function renderSources() {
       `<p class="hint">Fuentes de tu catálogo indexado <b>todavía sin tema</b>:
        ${huerfanas.map(n => `<code>${esc(n)}</code>`).join(" · ")}</p>`);
   }
+}
+
+// ─── Plugins: conectores on/off + servers MCP (T44) ──────────────────────
+function toggleConnector(id, on) {
+  const cfg = (S.CONNECTORS ??= {});
+  (cfg[id] ??= {}).enabled = on;
+  const c = CONNECTORS.find(x => x.id === id);
+  if (c) c.enabled = on;
+  markDirty(); render();
+}
+function renderPlugins() {
+  const usoPorTipo = {};
+  for (const e of SOURCES) usoPorTipo[e.type] = (usoPorTipo[e.type] ?? 0) + 1;
+  $("c-plugins").innerHTML = CONNECTORS.map(c => {
+    const faltan = (c.needs_env ?? []).filter(k => ENV_KEYS[k] === false);
+    const usos = usoPorTipo[c.id] ?? 0;
+    return `<div class="card plugin">
+      <div class="prow">
+        ${connLogo(c, 26)}
+        <div class="pinfo"><b>${esc(c.label)}</b>${c.live ? ` <span class="badge">en vivo</span>` : ""}
+          <div class="hint">${esc(c.help)} · la usa <code>${esc(c.tool)}</code></div>
+          ${faltan.length ? `<div class="warn">falta ${faltan.map(k => `<code>${esc(k)}</code>`).join(", ")} en Credenciales</div>` : ""}
+        </div>
+        <div class="pstate">
+          <span class="hint">${usos} fuente${usos === 1 ? "" : "s"}</span>
+          ${c.core
+            ? `<span class="badge on">siempre activo</span>`
+            : `<label class="switch"><input type="checkbox" ${c.enabled ? "checked" : ""}
+                 onchange="toggleConnector('${esc(c.id)}', this.checked)"> activo</label>`}
+        </div>
+      </div>
+    </div>`;
+  }).join("");
 }
 
 function renderSkills() {
@@ -1780,6 +1839,7 @@ async function load() {
   const data = await api("/api/config");
   S = data.settings; ENV_KEYS = data.env_keys; SKILLS = data.skills;
   SOURCES = data.sources ?? []; CATALOG_SOURCES = data.catalog_sources ?? [];
+  CONNECTORS = data.connectors ?? [];
   MOODS = data.moods ?? []; CATALOG = data.tools_catalog ?? []; INSTANCE = data.instance ?? {};
   PROMPTS = data.prompts ?? []; ROUTINES = data.routines ?? [];
   SOUL = data.soul ?? ""; soulDirty = false;
