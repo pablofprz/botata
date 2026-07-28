@@ -169,6 +169,11 @@ MASTODON_BASE_URL  : str  = settings.get("MASTODON_BASE_URL", "")
 # Discord: canales que el bot escucha (ids de canal, strings). El primero es
 # el canal principal (destino de posts proactivos).
 DISCORD_CHANNEL_IDS: list = settings.get("DISCORD_CHANNEL_IDS", [])
+# WhatsApp: chats que el bot escucha (jids). El primero es el principal. El
+# allowlist es lo que permite compartir el número con otro cliente vinculado:
+# todos los dispositivos reciben todo, así que la partición la hace cada bot.
+WHATSAPP_CHAT_IDS  : list = settings.get("WHATSAPP_CHAT_IDS", [])
+WHATSAPP_BRIDGE_URL: str  = settings.get("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:8787")
 BSKY_PASSWORD      : str  = os.environ.get("BSKY_PASSWORD", "")
 # API key del LLM: LLM_API_KEY (genérica, cualquier proveedor OpenAI-compatible)
 # u OPENROUTER_API_KEY (alias back-compat). Puede ser '' si MODELS.endpoints
@@ -1608,9 +1613,22 @@ def build_channel():
             if r.channel and str(r.channel) not in ids:
                 ids.append(str(r.channel))
         return DiscordChannel(token, ids)
+    if CHANNEL == "whatsapp":
+        from channels import WhatsAppChannel
+        if not WHATSAPP_CHAT_IDS:
+            raise SystemExit(
+                "CHANNEL=whatsapp requiere WHATSAPP_CHAT_IDS en settings.json (los "
+                "chats donde el bot actúa; el primero es el principal). No es "
+                "opcional: sin esa lista el bot contestaría en TODOS los chats del "
+                "número, incluidas las conversaciones personales.")
+        ids = [str(c) for c in WHATSAPP_CHAT_IDS]
+        for r in routinesmod.load_routines(ROUTINES_DIR):
+            if r.channel and str(r.channel) not in ids:
+                ids.append(str(r.channel))
+        return WhatsAppChannel(WHATSAPP_BRIDGE_URL, ids)
     if CHANNEL != "bluesky":
         raise SystemExit(f"CHANNEL desconocido: '{CHANNEL}' "
-                         "(soportados: bluesky, mastodon, discord)")
+                         "(soportados: bluesky, mastodon, discord, whatsapp)")
     if not BSKY_PASSWORD:
         raise SystemExit("falta BSKY_PASSWORD en el .env de la instancia")
     return BskyClient(handle=BSKY_HANDLE, password=BSKY_PASSWORD)

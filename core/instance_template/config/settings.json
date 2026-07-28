@@ -6,6 +6,8 @@
 	"CHANNEL": "bluesky",
 	"MASTODON_BASE_URL": "",
 	"DISCORD_CHANNEL_IDS": [],
+	"WHATSAPP_CHAT_IDS": [],
+	"WHATSAPP_BRIDGE_URL": "http://127.0.0.1:8787",
 	"BOT_HANDLE": "",
 	"ADMIN_HANDLE": "",
 	"ADMIN_HANDLES": [],

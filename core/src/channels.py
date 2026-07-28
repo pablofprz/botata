@@ -725,3 +725,280 @@ class DiscordChannel:
     def get_follows(self) -> list[str]:
         log.warning("get_follows: Discord no tiene follows (usar USER_GROUPS)")
         return []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WhatsApp (T41)
+# ═══════════════════════════════════════════════════════════════════════════
+# WhatsApp no tiene API usable para un bot comunitario (la Groups API oficial
+# topea en 8 participantes), así que se entra por el mismo camino que WhatsApp
+# Web: el número se agrega como DISPOSITIVO VINCULADO. Eso lo hace una librería
+# que no es Python —Baileys (Node) o whatsmeow (Go)—, así que a diferencia de
+# Mastodon y Discord acá hay un proceso aparte: el **bridge**.
+#
+# Este módulo NO habla el protocolo de WhatsApp: habla HTTP contra el bridge,
+# que corre en localhost. Fijar ese contrato acá es lo que permite escribir y
+# testear el canal entero contra un bridge falso, sin vincular un número y sin
+# haber elegido todavía el motor.
+#
+# ── Contrato del bridge ────────────────────────────────────────────────────
+#   GET  /status              → {"connected": bool, "qr": str|null,
+#                                "me": {"id": "<jid>", "name": str}}
+#   GET  /messages?after=<c>  → {"cursor": str, "messages": [msg, ...]}
+#   GET  /messages/<id>       → msg (para releer una cita)
+#   POST /send                → {"chat_id","text","reply_to"?,"media_path"?}
+#                               → {"id": "<message_id>"}
+#   POST /profile             → {"status": str}     (opcional)
+#
+#   msg = {"id","chat_id","chat_name","author_id","author_name","text",
+#          "quoted_id": str|null, "quoted_author_id": str|null,
+#          "mentions": [jid,...], "media": [{"url"?,"path"?,"mime","filename"}],
+#          "from_me": bool, "ts": <epoch>}
+#
+# El cursor lo define el bridge (es su cola); acá solo se guarda y se devuelve.
+
+class WhatsAppChannel:
+    """Canal WhatsApp a través de un bridge local (T41).
+
+    Modelo: el bot escucha una lista fija de chats (`chat_ids`, settings
+    `WHATSAPP_CHAT_IDS`) — normalmente UN grupo. "Mención" = mensaje que
+    @menciona al bot o que cita un mensaje del bot.
+
+    Ese allowlist no es cosmético: es lo que permite compartir el número con
+    otro bot ya vinculado. Todos los dispositivos vinculados reciben TODOS los
+    mensajes, así que la partición la hace cada cliente decidiendo en qué chats
+    actúa — el protocolo no la ofrece.
+
+    Diferencias absorbidas acá (el grafo no se entera):
+    - uri = "chat_id/message_id"; cid = message_id (igual que Discord).
+    - Hilo: WhatsApp solo tiene citas de un nivel, no hilos. Se reconstruye
+      subiendo por `quoted_id` mientras el bridge pueda resolverlo.
+    - Sin feed: `get_feed_posts` devuelve vacío. Lo que el bot sabe del grupo es
+      lo que fue acumulando en su propia DB.
+    - `author_handle` es el JID (el teléfono), no un @handle: es un id opaco
+      para la DB, como el user id de Discord.
+    - Sin bios de terceros: `get_profile` devuelve description vacía.
+    """
+
+    THREAD_HOPS = 12       # tope al subir por citas
+    POLL_LIMIT = 100       # mensajes por request al bridge
+
+    def __init__(self, bridge_url: str, chat_ids: list[str], http=None):
+        if http is None:
+            import httpx  # lazy: simetría con los otros canales
+            http = httpx.Client(base_url=bridge_url.rstrip("/"), timeout=30)
+        self._http = http
+        self._chat_ids = [str(c) for c in chat_ids]
+        self._cursor: str | None = None
+        self._media_describer = None
+        self._msgs: dict[str, dict] = {}      # id → msg visto (citas y re-lectura)
+        estado = self._get("/status") or {}
+        if not estado.get("connected"):
+            raise SystemExit(
+                "el bridge de WhatsApp está levantado pero el número no está "
+                "vinculado. Escaneá el QR desde WhatsApp → Ajustes → Dispositivos "
+                "vinculados (el bridge lo publica en /status)."
+            )
+        me = estado.get("me") or {}
+        self._me_id = str(me.get("id") or "")
+        self.handle = me.get("name") or self._me_id
+        log.info("WhatsApp vinculado como %s (escuchando %d chat(s))",
+                 self.handle, len(self._chat_ids))
+
+    # ── HTTP contra el bridge ────────────────────────────────────────────
+    def _request(self, method: str, path: str, **kw):
+        resp = self._http.request(method, path, **kw)
+        resp.raise_for_status()
+        return resp.json() if resp.status_code != 204 else None
+
+    def _get(self, path: str, **params):
+        return self._request("GET", path, params=params or None)
+
+    # ── mapeo mensaje → dict del grafo ───────────────────────────────────
+    def _msg_text(self, msg: dict) -> str:
+        """El texto con las menciones legibles: el bridge las manda como JIDs."""
+        text = msg.get("text") or ""
+        for jid in msg.get("mentions") or []:
+            text = text.replace(f"@{jid}", f"@{str(jid).split('@')[0]}")
+        return text.strip()
+
+    def _media_note(self, msg: dict, *, describe: bool = False) -> str:
+        """Igual que en Discord: se describe SOLO el mensaje que se va a
+        contestar, nunca en lectura masiva — sería una llamada de vision por
+        imagen y por mensaje leído."""
+        pieces = []
+        for att in msg.get("media") or []:
+            kind = str(att.get("mime") or "file").split("/")[0]
+            fuente = att.get("url") or att.get("path")
+            desc = ""
+            if describe and kind == "image" and self._media_describer and fuente:
+                try:
+                    desc = self._media_describer(fuente) or ""
+                except Exception:
+                    log.debug("vision sobre media de WhatsApp falló", exc_info=True)
+            if desc:
+                pieces.append(f"[{kind}: {desc}]")
+            else:
+                nombre = att.get("filename") or ""
+                pieces.append(f"[{kind}: {nombre}]" if nombre else f"[{kind}]")
+        return " ".join(pieces)
+
+    def _full_text(self, msg: dict, *, describe: bool = False) -> str:
+        text = self._msg_text(msg)
+        media = self._media_note(msg, describe=describe)
+        return f"{text} {media}".strip() if media else text
+
+    def _is_for_me(self, msg: dict) -> bool:
+        if msg.get("from_me") or str(msg.get("author_id") or "") == self._me_id:
+            return False
+        if self._me_id and self._me_id in {str(j) for j in msg.get("mentions") or []}:
+            return True
+        return bool(msg.get("quoted_id")
+                    and str(msg.get("quoted_author_id") or "") == self._me_id)
+
+    def _to_mention(self, msg: dict) -> dict:
+        return {
+            "uri"           : f"{msg['chat_id']}/{msg['id']}",
+            "cid"           : str(msg["id"]),
+            "author_handle" : str(msg.get("author_id") or ""),
+            "text"          : self._msg_text(msg),
+        }
+
+    # ── lectura ──────────────────────────────────────────────────────────
+    def get_mentions(self) -> list[dict]:
+        try:
+            data = self._get("/messages", after=self._cursor or "",
+                             limit=self.POLL_LIMIT) or {}
+        except Exception as e:
+            log.error("WhatsApp: el bridge no respondió: %s", e)
+            return []
+        if data.get("cursor"):
+            self._cursor = str(data["cursor"])
+        menciones = []
+        for msg in data.get("messages") or []:
+            self._msgs[str(msg.get("id"))] = msg
+            # El allowlist: acá vive la partición con cualquier otro cliente
+            # vinculado al mismo número.
+            if str(msg.get("chat_id")) not in self._chat_ids:
+                continue
+            if self._is_for_me(msg):
+                menciones.append(self._to_mention(msg))
+        return menciones
+
+    def mark_all_read(self) -> None:
+        pass  # no existe el concepto; dedup por DB
+
+    def _fetch_message(self, message_id: str) -> dict | None:
+        if message_id in self._msgs:
+            return self._msgs[message_id]
+        try:
+            msg = self._get(f"/messages/{message_id}")
+        except Exception:
+            log.debug("WhatsApp: no pude releer el mensaje %s", message_id, exc_info=True)
+            return None
+        if msg:
+            self._msgs[str(msg.get("id"))] = msg
+        return msg or None
+
+    def get_thread_info(self, uri: str, cid: str) -> tuple[str, str, str, str]:
+        """Contexto subiendo por las citas.
+
+        WhatsApp no tiene hilos: la cadena se corta apenas alguien contesta sin
+        citar, que en un grupo es lo normal. Es límite del medio, no de la
+        implementación — por eso el bot se apoya más en su memoria que en el
+        contexto del hilo."""
+        _, _, message_id = uri.partition("/")
+        cadena: list[dict] = []
+        actual = self._fetch_message(message_id)
+        saltos = 0
+        while actual and saltos < self.THREAD_HOPS:
+            cadena.append(actual)
+            quoted = actual.get("quoted_id")
+            if not quoted:
+                break
+            actual = self._fetch_message(str(quoted))
+            saltos += 1
+        cadena.reverse()
+        lineas = [f"{m.get('author_name') or m.get('author_id')}: {self._full_text(m)}"
+                  for m in cadena]
+        raiz = cadena[0] if cadena else None
+        root_uri = f"{raiz['chat_id']}/{raiz['id']}" if raiz else uri
+        root_cid = str(raiz["id"]) if raiz else cid
+        return "\n".join(lineas), root_uri, root_cid, ""
+
+    def get_mention_by_uri(self, uri: str) -> dict | None:
+        _, _, message_id = uri.partition("/")
+        msg = self._fetch_message(message_id)
+        if msg is None:
+            return None
+        context, root_uri, root_cid, _ = self.get_thread_info(uri, str(msg["id"]))
+        out = self._to_mention(msg)
+        out["text"] = self._full_text(msg, describe=True)
+        out.update(thread_context=context, thread_root_uri=root_uri,
+                   thread_root_cid=root_cid)
+        return out
+
+    # ── escritura ────────────────────────────────────────────────────────
+    def _send(self, chat_id: str, text: str, *, reply_to: str | None = None,
+              media_path: str | None = None) -> str:
+        payload: dict = {"chat_id": str(chat_id), "text": text}
+        if reply_to:
+            payload["reply_to"] = str(reply_to)
+        if media_path:
+            payload["media_path"] = str(media_path)
+        out = self._request("POST", "/send", json=payload) or {}
+        return f"{chat_id}/{out.get('id', '')}"
+
+    def reply(self, text: str, parent_uri: str, parent_cid: str,
+              root_uri: str, root_cid: str, media_path: str | None = None) -> str:
+        chat_id, _, message_id = parent_uri.partition("/")
+        return self._send(chat_id, strip_fake_media(text),
+                          reply_to=message_id, media_path=media_path)
+
+    def post(self, text: str, limit: int = 295, media_path: str | None = None,
+             target: str | None = None) -> str:
+        """Sin target → el primer chat; con target (rutinas) → ese chat."""
+        chat_id = str(target) if target else (self._chat_ids[0] if self._chat_ids else None)
+        if not chat_id:
+            raise RuntimeError("WHATSAPP_CHAT_IDS vacío: no hay chat donde postear")
+        return self._send(chat_id, truncate_post(strip_fake_media(text), limit),
+                          media_path=media_path)
+
+    # ── lo que WhatsApp no tiene ─────────────────────────────────────────
+    def set_bio(self, text: str) -> bool:
+        try:
+            self._request("POST", "/profile", json={"status": text[:139]})
+            return True
+        except Exception as e:
+            log.warning("set_bio en WhatsApp falló (¿el bridge no lo soporta?): %s", e)
+            return False
+
+    def get_profile(self, handle: str):
+        """Sin bio: WhatsApp no expone el 'info' de terceros de forma confiable.
+        El nombre sale del pushName de algún mensaje ya visto."""
+        visto = next((m for m in self._msgs.values()
+                      if str(m.get("author_id")) == str(handle)), None)
+        nombre = (visto or {}).get("author_name") or str(handle)
+        return SimpleNamespace(handle=str(handle), display_name=nombre, description="")
+
+    def resolve_did(self, handle: str) -> str | None:
+        return str(handle) or None     # el JID ya ES el id estable
+
+    def block_user(self, handle: str) -> bool:
+        log.warning("block_user: no implementado en WhatsApp (no-op)")
+        return False
+
+    def set_media_describer(self, fn) -> None:
+        self._media_describer = fn
+
+    def get_feed_posts(self, source_type: str, identifier: str | None,
+                       limit: int = 40) -> list[dict]:
+        log.warning("get_feed_posts: WhatsApp no tiene feed — el bot se sirve de su DB")
+        return []
+
+    def get_list_members(self, list_id: str) -> list[str]:
+        return []
+
+    def get_follows(self) -> list[str]:
+        log.warning("get_follows: WhatsApp no tiene follows (usar USER_GROUPS)")
+        return []
