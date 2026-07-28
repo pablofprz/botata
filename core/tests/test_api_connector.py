@@ -210,3 +210,41 @@ def test_api_esta_en_el_catalogo_y_lo_consume_get_latest_media():
     con = c.by_id("api")
     assert con is not None and con.live and con.tool == "get_latest_media"
     assert not con.core                       # se puede apagar desde Plugins
+
+
+# ─── El botón "probar ahora" tiene que ENSEÑAR, no solo fallar ──────────────
+# Caso real del admin: puso la fuente "pokemon" con la URL del LISTADO
+# (/api/v2/{source}/) y "dónde está la lista" vacío. El error decía qué faltaba
+# pero no qué había, así que configurar la API era adivinar la forma de un JSON
+# que no se ve.
+def test_apuntar_al_listado_con_la_lista_vacia_dice_donde_esta(monkeypatch):
+    _stub(monkeypatch, {"count": 1302, "next": "...", "results": [{"name": "bulbasaur"}]})
+    with pytest.raises(c.ApiSourceError) as e:
+        c.api_items("pokemon", 5, {"url": "https://api.test/{source}/", "items_path": "",
+                                   "map": {"image_url": "sprites.front_default"}})
+    assert "'results'" in str(e.value) and "dónde está la lista" in str(e.value)
+
+
+def test_un_item_legitimo_con_listas_adentro_NO_se_confunde(monkeypatch):
+    """La guarda de arriba no puede dispararse con cualquier lista: un pokémon
+    trae `abilities`, `forms`, `game_indices`… y ninguna es la de resultados."""
+    _stub(monkeypatch, {**_POKEAPI, "abilities": [{"x": 1}], "forms": [{"y": 2}]})
+    items = c.api_items("pikachu", 5, _ENTRY_POKE)
+    assert items[0]["title"] == "pikachu"
+
+
+def test_el_campo_de_imagen_equivocado_sugiere_los_que_existen(monkeypatch):
+    _stub(monkeypatch, {"sprites": {"front_default": "https://x/a.png",
+                                    "back_default": "https://x/b.png",
+                                    "nada": None}})
+    with pytest.raises(c.ApiSourceError) as e:
+        c.api_items("x", 5, {"url": "https://api.test/x", "items_path": "",
+                             "map": {"image_url": "sprites.mal"}})
+    assert "sprites.front_default" in str(e.value)
+
+
+def test_si_no_hay_ninguna_imagen_lo_dice_en_criollo(monkeypatch):
+    _stub(monkeypatch, {"nombre": "algo", "url": "https://x/pagina.html"})
+    with pytest.raises(c.ApiSourceError, match="no hay ningún campo que sea una URL"):
+        c.api_items("x", 5, {"url": "https://api.test/x", "items_path": "",
+                             "map": {"image_url": "img"}})

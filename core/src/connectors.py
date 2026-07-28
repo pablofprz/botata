@@ -27,6 +27,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
+from typing import Any
 from dataclasses import dataclass, fields, replace
 from typing import Callable
 
@@ -291,8 +292,18 @@ def api_items(source: str, limit: int = 15, entry: dict | None = None) -> list[d
     nodo = dig(data, items_path)
     if nodo is None:
         raise ApiSourceError(
-            f"no encontré '{items_path}' en la respuesta" if items_path
-            else "la respuesta vino vacía")
+            (f"no encontré '{items_path}' en la respuesta. " + _listas_visibles(data))
+            if items_path else "la respuesta vino vacía")
+    if not items_path and (envoltorio := _clave_envoltorio(data)):
+        # Solo con una clave que es envoltorio RECONOCIBLE. Chequear "¿hay
+        # alguna lista?" a secas da falso positivo con cualquier item legítimo:
+        # un pokémon trae `abilities`, `forms`, `game_indices`… y ninguna es la
+        # lista de resultados.
+        raise ApiSourceError(
+            "dejaste vacío 'dónde está la lista', así que tomo la respuesta entera como "
+            f"UN solo item, pero esta API devuelve una lista en '{envoltorio}'. "
+            f"Poné '{envoltorio}' en 'dónde está la lista', o apuntá la URL a un item "
+            "concreto en vez de al listado.")
     crudos = nodo if isinstance(nodo, list) else [nodo]
 
     mapa = dict(entry.get("map") or {})
@@ -314,8 +325,61 @@ def api_items(source: str, limit: int = 15, entry: dict | None = None) -> list[d
             break
     if not out:
         raise ApiSourceError(
-            f"traje {len(crudos)} resultado(s) pero ninguno tiene una imagen en '{img_path}'")
+            f"traje {len(crudos)} resultado(s) pero ninguno tiene una imagen en "
+            f"'{img_path}'. " + _campos_de_imagen(crudos[0]))
     return out
+
+
+# ─── Pistas para el admin (el botón "probar ahora" tiene que ENSEÑAR) ────────
+# Sin esto, configurar una API es adivinar la forma de un JSON que no ves: el
+# error decía qué faltaba pero no qué había. Estas dos funciones miran la
+# respuesta REAL y sugieren los paths que existen — que es la diferencia entre
+# "no anda" y "poné esto acá".
+_CLAVES_LISTA = ("results", "items", "data", "posts", "photos", "entries", "hits", "docs")
+
+
+def _clave_envoltorio(data: Any) -> str:
+    """La clave donde esta API pone sus resultados, si es una de las conocidas."""
+    if not isinstance(data, dict):
+        return ""
+    for k in _CLAVES_LISTA:
+        v = data.get(k)
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return k
+    return ""
+
+
+def _listas_visibles(data: Any, tope: int = 3) -> str:
+    """Dónde hay listas en la respuesta, para llenar 'dónde está la lista'."""
+    if not isinstance(data, dict):
+        return ""
+    hallados = [k for k, v in data.items() if isinstance(v, list) and v]
+    hallados.sort(key=lambda k: k not in _CLAVES_LISTA)   # las conocidas primero
+    if not hallados:
+        return ""
+    return ("Poné en 'dónde está la lista': " +
+            " o ".join(f"'{k}'" for k in hallados[:tope]))
+
+
+def _campos_de_imagen(item: Any, tope: int = 4) -> str:
+    """Paths del item que parecen una imagen, para llenar 'campo de la imagen'."""
+    encontrados: list[str] = []
+
+    def recorrer(nodo: Any, prefijo: str, hondo: int) -> None:
+        if len(encontrados) >= tope or hondo > 4:
+            return
+        if isinstance(nodo, dict):
+            for k, v in nodo.items():
+                recorrer(v, f"{prefijo}.{k}" if prefijo else str(k), hondo + 1)
+        elif isinstance(nodo, str) and nodo.startswith("http") and any(
+                nodo.lower().split("?")[0].endswith(e)
+                for e in (".jpg", ".jpeg", ".png", ".gif", ".webp")):
+            encontrados.append(prefijo)
+
+    recorrer(item, "", 0)
+    if not encontrados:
+        return "En este resultado no hay ningún campo que sea una URL de imagen."
+    return "Campos con pinta de imagen: " + ", ".join(encontrados)
 
 
 def _api_fetch(source: str, limit: int = 15, entry: dict | None = None) -> list[dict]:

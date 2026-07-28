@@ -1495,11 +1495,20 @@ async function testSource(i) {
 function apiFields(entry, i) {
   const mapa = (entry.map ??= {});
   return `<div class="card" style="margin-top:8px">
-    <p class="hint" style="margin-top:0">Describí la API una vez y el bot la usa como
-      cualquier otra fuente. En la URL podés poner <code>{source}</code> (cada fuente de
-      arriba, una por una), <code>{limit}</code> y <code>{env:MI_API_KEY}</code> para una
-      credencial guardada en 🔑 credenciales. Los campos se escriben con puntos:
-      <code>sprites.other.official-artwork.front_default</code>.</p>
+    <p class="hint" style="margin-top:0"><b>El bot no improvisa la llamada: la hace el
+      motor, exactamente como la describas acá.</b> El bot solo elige el <i>tema</i>; el
+      pedido HTTP sale siempre igual. Por eso no hace falta que “entienda” la API — hace
+      falta que estos campos estén bien, y para eso está <b>probar ahora</b>.</p>
+    <p class="hint"><b>Cada fuente de arriba es UNA cosa concreta, no una categoría.</b>
+      El motor llama la URL una vez por fuente, reemplazando <code>{source}</code>. Si la
+      URL apunta a un listado, tenés que decir en qué campo viene la lista; y si esa lista
+      no trae las imágenes adentro (muchas APIs devuelven links a un segundo pedido), esta
+      API no sirve acá — para eso está el conector en <code>connectors/</code>.
+      Ejemplo que anda: fuentes <code>pikachu, snorlax</code> · URL
+      <code>https://pokeapi.co/api/v2/pokemon/{source}/</code> · lista <i>vacío</i> ·
+      imagen <code>sprites.other.official-artwork.front_default</code>.</p>
+    <p class="hint">También podés usar <code>{limit}</code> y <code>{env:MI_API_KEY}</code>
+      para una credencial guardada en 🔑 credenciales. Los campos se escriben con puntos.</p>
     ${textInput(entry, "url", "URL de la API")}
     <div class="row" style="margin-top:6px">
       <div>${textInput(entry, "items_path", "dónde está la lista (vacío = la respuesta ES un solo item)")}</div>
