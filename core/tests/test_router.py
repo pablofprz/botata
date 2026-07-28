@@ -64,6 +64,20 @@ def test_build_router_propaga_timeout_s():
     assert float(r._clients["e"].timeout) == 45.0
 
 
+def test_build_router_completa_los_roles_del_motor():
+    """Una instancia creada antes de que existiera un rol tiene que verlo igual.
+    Anda sin esto (`_chain` cae al default), pero el admin no lo encontraría en
+    la UI para cambiarlo — que es peor que no tenerlo. El settings gana."""
+    cfg = {
+        "endpoints": {"e": {"base_url": "http://x/v1", "api_key": "k"}},
+        "aliases": {"lite": [{"endpoint": "e", "model": "m"}]},
+        "roles": {"reply": "lite"},          # snapshot viejo, sin los roles nuevos
+    }
+    roles = build_router(cfg, legacy={}, env={})._roles
+    assert roles["reply"] == "lite"                    # el override del admin manda
+    assert roles["facts_compact"] == "reasoning"       # el rol nuevo aparece solo
+
+
 def test_chain_resolves_role_to_targets():
     r = _make_router()
     chain = r._chain("r_dual")

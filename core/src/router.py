@@ -39,7 +39,11 @@ _DEFAULT_ROLES: dict[str, str] = {
     # qué se puede perder sin dañar al bot: es el trabajo menos apto para un
     # modelo chico. Resumir las notas de un día de charla, en cambio, es
     # resumir — y son muchas llamadas, así que va con el modelo liviano.
+    # Compactar los hechos de una persona también es razonar (cuál venció a
+    # cuál, qué detalle no se puede perder al fusionar), pero es una llamada por
+    # usuario: el tope bajo de `max_usuarios` es lo que lo hace pagable.
     "memory_compact":       "reasoning",
+    "facts_compact":        "reasoning",
     "interactions_compact": "lite",
 }
 
@@ -243,7 +247,11 @@ def build_router(
             if "timeout_s" in cfg:
                 endpoints[name]["timeout_s"] = cfg["timeout_s"]
         aliases = models_config["aliases"]
-        roles = models_config.get("roles", _DEFAULT_ROLES)
+        # Los roles del motor se completan con los defaults y el settings de la
+        # instancia gana. Sin esto, una instancia creada antes de que existiera
+        # un rol nunca lo ve: anda igual (`_chain` cae al default) pero el admin
+        # no lo encuentra en la UI para cambiarlo, que es peor que no tenerlo.
+        roles = {**_DEFAULT_ROLES, **(models_config.get("roles") or {})}
     else:
         if not legacy.get("api_key"):
             raise SystemExit(

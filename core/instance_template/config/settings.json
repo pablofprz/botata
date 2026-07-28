@@ -23,7 +23,10 @@
 		"max_chars": 4000,
 		"interactions": true,
 		"min_por_dia": 3,
-		"max_grupos": 8
+		"max_grupos": 8,
+		"facts": true,
+		"min_por_usuario": 5,
+		"max_usuarios": 3
 	},
 	"MEDIA_SEARCH": {
 		"catalog_max_distance": 0.47,

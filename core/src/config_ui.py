@@ -907,7 +907,8 @@ class ConfigStore:
             if not handle:
                 users = conn.execute(
                     "SELECT u.handle, u.display_name, COUNT(f.id) AS facts "
-                    "FROM users u LEFT JOIN user_facts f ON f.handle = u.handle "
+                    "FROM users u LEFT JOIN user_facts f "
+                    "ON f.handle = u.handle AND f.superseded_by IS NULL "
                     "GROUP BY u.handle ORDER BY facts DESC, u.handle").fetchall()
                 lessons = conn.execute(
                     "SELECT id, scope, lesson_text, created_at FROM lessons "
@@ -915,12 +916,17 @@ class ConfigStore:
                 return {"users": [dict(r) for r in users],
                         "lessons": [dict(r) for r in lessons]}
             handle = handle.strip().lstrip("@").lower()
+            # Solo lo VIGENTE: lo que compactó el pase quedó archivado con
+            # `superseded_by` y ya no lo lee el bot. Mostrarlo acá haría creer
+            # que la compactación no corrió.
             facts = conn.execute(
                 "SELECT id, fact_text, source_uri, created_at FROM user_facts "
-                "WHERE handle = ? ORDER BY id DESC", (handle,)).fetchall()
+                "WHERE handle = ? AND superseded_by IS NULL "
+                "ORDER BY id DESC", (handle,)).fetchall()
             inter = conn.execute(
                 "SELECT id, summary, source_uri, created_at FROM interactions "
-                "WHERE handle = ? ORDER BY id DESC LIMIT 50", (handle,)).fetchall()
+                "WHERE handle = ? AND superseded_by IS NULL "
+                "ORDER BY id DESC LIMIT 50", (handle,)).fetchall()
             return {"facts": [dict(r) for r in facts],
                     "interactions": [dict(r) for r in inter]}
         finally:

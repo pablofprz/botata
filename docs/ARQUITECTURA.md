@@ -342,6 +342,52 @@ el "antes" tiene que excluir las filas que generó la propia compactación
 de botata-arg: **1,6 → 2,9 días** de promedio, y los usuarios cuya ventana era un solo día
 pasaron de **14 a 7**.
 
+### Compactación de los hechos de cada persona (T49)
+
+Tercer caso, y de nuevo con su propia forma. `user_facts` tampoco se inyecta completa: el
+bot recupera los ~5 hechos más relevantes para lo que se está hablando. El problema no es
+el tamaño (367 filas no cuestan un token de contexto) sino la **puntería** — si dos de esos
+cinco son el mismo hecho escrito distinto, se quedó con tres. Y un fragmento mal guardado
+compite en igualdad con los buenos: en producción había hechos como *"No puede. Es un admin
+solo de comandos, el programador soy yo"* (un pedazo del mensaje **del usuario**, archivado
+como si fuera un hecho **sobre** él) y *"No se mete en estos asuntos"* (sin el contexto, no
+dice nada).
+
+**El grupo es el usuario entero, no el día.** Es la diferencia con `interactions` y no es
+cosmética: acá los duplicados no salen de una charla larga sino de contar lo mismo dos
+veces con semanas de diferencia (*"no quiere ver memes del mundial, le ponen muy triste"* /
+*"…porque le entristecen"*), así que agrupar por día no los pondría nunca en la misma
+llamada. Se revisa a los más cargados primero y se ignora la cola larga: con dos hechos no
+hay nada que fusionar y cada grupo cuesta una llamada.
+
+Usa el **modelo de razonamiento** (fusionar sin perder detalles concretos y ver qué dato
+venció a cuál es análisis, no resumen), y por eso el tope de usuarios por pase es bajo.
+
+**Sin el filtro de `superseded_by` en el retrieval, esto sería peor que no hacerlo.**
+`hybrid_search_user_facts` no lo filtraba —la columna existía desde el principio pero nadie
+la escribía— así que el hecho fusionado se habría **sumado** a los originales en vez de
+reemplazarlos. Son dos caminos independientes hasta la misma fila (vec0 y FTS5) y hay que
+cerrar los dos. Además, archivar **borra el embedding**: vec0 no tiene FK cascade ni
+triggers, así que un hecho archivado seguiría siendo el vecino más cercano de sí mismo y el
+dedup de escritura (k=1) rechazaría al hecho nuevo como duplicado de uno que ya nadie lee.
+
+Por lo mismo, la compactación inserta con `insert_user_fact` y no con `upsert_user_fact`:
+el texto fusionado **se parece por definición** a los que reemplaza, así que el dedup
+semántico lo saltearía y el pase archivaría los originales sin dejar sucesora.
+
+**Fusionar de más es un modo de falla, igual que fusionar de menos.** La unidad de
+recuperación es la fila: una fila que habla de dos temas responde peor a los dos. Con el
+primer prompt el modelo unificó *"Es de Santa Fe"* con *"es una cuenta millennial"* — no
+perdía información, pero degradaba justo lo que el pase viene a mejorar. Solo se fusiona lo
+que dice lo mismo, se repite o se contradice; dos hechos distintos se dejan quietos aunque
+entren cómodos en una línea.
+
+**Una segunda oportunidad, no infinitas.** El todo-o-nada por usuario es la guarda y no se
+negocia, pero tirar el trabajo entero por un desliz de contabilidad sí se puede evitar:
+medido contra producción, en el grupo más grande (64 hechos de una persona) el modelo puso
+un id en dos operaciones y se perdieron las otras diez, que estaban bien. Si el plan no
+pasa las guardas se le dice **qué** estuvo mal y se pide de nuevo, una sola vez.
+
 ⚠️ **La lección transversal, pagada dos veces:** lo que un LLM escribe en la base se acota
 en el **código**, no en el prompt. El intérprete de bios confiaba en que el modelo
 contestaría `NADA` y comparaba por igualdad exacta; ante una bio ambigua el modelo entró

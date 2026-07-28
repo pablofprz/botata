@@ -92,6 +92,10 @@ class Resultado:
     chars_antes: int = 0
     chars_despues: int = 0
     rechazos: list[str] = field(default_factory=list)
+    # Solo `bot_memory` se inyecta completa: ahí los chars ahorrados SON tokens
+    # menos en cada prompt. En interacciones y facts se gana precisión, no
+    # contexto, y decir "tokens por llamada" en el log sería mentirle al admin.
+    ahorra_contexto: bool = False
 
     @property
     def ok(self) -> bool:
@@ -104,8 +108,11 @@ class Resultado:
             return "no hay nada que compactar"
         verbo = "compactadas" if self.aplicado else "se compactarían"
         ahorro = self.chars_antes - self.chars_despues
+        detalle = f"{ahorro} chars menos"
+        if self.ahorra_contexto:
+            detalle += f", ~{ahorro // 4} tokens por llamada"
         return (f"{verbo} {self.filas_antes} → {self.filas_despues} filas "
-                f"({ahorro} chars menos, ~{ahorro // 4} tokens por llamada)")
+                f"({detalle})")
 
 
 def candidatas(memorias: list[dict]) -> list[dict]:
@@ -176,7 +183,7 @@ def compactar(conn, llm, *, prompt: str, dbmod, dry_run: bool = False) -> Result
     """
     todas = dbmod.list_bot_memory(conn, limit=1000)
     libres = candidatas(todas)
-    res = Resultado(filas_antes=len(todas),
+    res = Resultado(filas_antes=len(todas), ahorra_contexto=True,
                     chars_antes=sum(len(m["text"]) for m in todas))
     res.filas_despues, res.chars_despues = res.filas_antes, res.chars_antes
     if len(libres) < 2:
@@ -366,4 +373,110 @@ def compactar_interacciones(conn, llm, *, prompt: str, dbmod,
         sum(len(f["summary"]) for g in grupos for f in g["filas"] if f["id"] in op.ids)
         - len(op.texto) for op in res.plan)
     log.info("interacciones: %s (%d grupos)", res.resumen(), len(grupos))
+    return res
+
+
+# ─── user_facts: la memoria de cada persona ─────────────────────────────────
+# Tercer caso, con su propia forma. `user_facts` tampoco entra completa —se
+# recupera por búsqueda híbrida— así que 400 filas no cuestan contexto. Lo que
+# se degrada es la PRECISIÓN: el bot trae 5 hechos por consulta, y si dos de
+# esos cinco son el mismo hecho escrito distinto, perdió dos lugares. Peor, un
+# fragmento mal guardado ("No puede. Es un admin solo de comandos, el
+# programador soy yo…", el mensaje del usuario archivado como si fuera un hecho
+# sobre él) compite en igualdad con los hechos buenos y a veces gana.
+#
+# Por eso el grupo es el USUARIO y no el día: los duplicados acá nacen de
+# contar lo mismo dos veces con semanas de diferencia, así que agrupar por día
+# no los juntaría nunca. Hay dedup semántico en la escritura, pero corre con
+# umbral alto y a un solo vecino; lo que se le escapa se acumula.
+
+def _plan_de_facts(llm, prompt: str, usuario: str, g: dict):
+    """Pide el plan y, si no pasa las guardas, da UNA segunda oportunidad.
+
+    El todo-o-nada por usuario no se negocia (es la guarda), pero descartar el
+    trabajo entero por un desliz de contabilidad sí se puede evitar. Medido
+    contra producción: en el grupo más grande —64 hechos de una sola persona— el
+    modelo puso un id en dos operaciones y se perdieron las otras diez, buenas.
+    Cuanto más grande el grupo, más probable el desliz y más caro tirarlo.
+    """
+    for intento in (1, 2):
+        try:
+            plan = llm.complete(prompt, usuario, PlanCompactacion)
+        except Exception as e:
+            log.warning("facts: falló @%s (%s: %s)", g["handle"], type(e).__name__, e)
+            return None, []
+        errs = verificar(plan, g["filas"])
+        if not errs or intento == 2:
+            return plan, errs
+        log.info("facts: reintento para @%s — %s", g["handle"], "; ".join(errs))
+        usuario += ("\n\nTu plan anterior fue RECHAZADO por: " + "; ".join(errs)
+                    + "\nRehacelo corrigiendo eso. Ante la duda, dejá el hecho como está.")
+    return None, []  # inalcanzable; el bucle siempre sale por el return de arriba
+
+
+def compactar_facts(conn, llm, *, prompt: str, dbmod,
+                    min_por_usuario: int = 5, max_usuarios: int = 3,
+                    dry_run: bool = False) -> Resultado:
+    """Deduplica y limpia `user_facts`, un usuario por llamada.
+
+    `max_usuarios` es chico a propósito: esto corre dentro del loop del bot y
+    usa el modelo de razonamiento (fusionar hechos de una persona y resolver
+    cuál venció a cuál es análisis, no resumen). Lo que no entra en esta corrida
+    lo toma la siguiente, y queda dicho en el log — un tope silencioso se leería
+    como "ya está todo limpio".
+    """
+    grupos = dbmod.facts_compactables(conn, min_por_usuario=min_por_usuario)
+    res = Resultado()
+    if not grupos:
+        log.info("facts: ningún usuario con %d+ hechos", min_por_usuario)
+        return res
+    if len(grupos) > max_usuarios:
+        log.info("facts: %d usuarios compactables, hago %d en esta corrida "
+                 "(el resto queda para la próxima)", len(grupos), max_usuarios)
+        grupos = grupos[:max_usuarios]
+
+    res.filas_antes = sum(len(g["filas"]) for g in grupos)
+    res.chars_antes = sum(len(f["text"]) for g in grupos for f in g["filas"])
+    hechos = 0
+    for g in grupos:
+        usuario = (f"Hechos que el bot recuerda de @{g['handle']} "
+                   f"({len(g['filas'])}):\n" + bloque_para_el_modelo(g["filas"]))
+        plan, errs = _plan_de_facts(llm, prompt, usuario, g)
+        if plan is None:
+            continue
+        if errs:
+            log.warning("facts: plan rechazado para @%s: %s", g["handle"], "; ".join(errs))
+            res.rechazos += errs
+            continue
+        if not plan.operaciones:
+            continue
+        for op in plan.operaciones:
+            log.info("facts @%s: %s %s%s — %s", g["handle"], op.accion, op.ids,
+                     f" → {op.texto[:60]!r}" if op.texto else "", op.motivo[:80])
+        res.plan += plan.operaciones
+        if dry_run:
+            continue
+        # Todo o nada por usuario: la memoria de uno no queda a medio reescribir
+        # porque falló la de otro.
+        try:
+            with conn:
+                for op in plan.operaciones:
+                    nueva = None
+                    if op.accion == "fusionar":
+                        nueva = dbmod.insert_user_fact(
+                            conn, g["handle"], op.texto.strip(), "compact")
+                    dbmod.supersede_user_facts(conn, op.ids, nueva)
+            hechos += 1
+        except Exception as e:
+            log.error("facts: falló al aplicar @%s, se revirtió (%s)", g["handle"], e)
+            res.rechazos.append(f"@{g['handle']}: {e}")
+
+    res.aplicado = hechos > 0
+    por_id = {f["id"]: f["text"] for g in grupos for f in g["filas"]}
+    res.filas_despues = res.filas_antes - sum(
+        len(op.ids) - (1 if op.accion == "fusionar" else 0) for op in res.plan)
+    res.chars_despues = res.chars_antes - sum(
+        sum(len(por_id.get(i, "")) for i in op.ids) - len(op.texto)
+        for op in res.plan)
+    log.info("facts: %s (%d usuarios)", res.resumen(), len(grupos))
     return res

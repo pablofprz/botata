@@ -2759,6 +2759,26 @@ def run_interactions_compact_pass(router: ModelRouter, conn: sqlite3.Connection,
         max_grupos=int(cfg.get("max_grupos", 8)), dry_run=dry_run)
 
 
+def run_facts_compact_pass(router: ModelRouter, conn: sqlite3.Connection, *,
+                           dry_run: bool = False):
+    """T49: deduplica y limpia `user_facts`, un usuario por llamada.
+
+    Tampoco ahorra contexto (los hechos entran por búsqueda, no completos): lo
+    que recupera es PRECISIÓN. El bot trae 5 hechos por consulta; si dos son el
+    mismo hecho escrito distinto, se quedó con tres."""
+    cfg = settings.get("MEMORY_COMPACT") or {}
+    if not cfg.get("facts", True):
+        return None
+    prompt = load_text(PROMPTS_DIR / "compact_facts.md")
+    if not prompt:
+        log.warning("compact_facts.md no encontrado — no compacto hechos")
+        return None
+    return memory_compact.compactar_facts(
+        conn, RoleLLM(router, "facts_compact"), prompt=prompt, dbmod=dbmod,
+        min_por_usuario=int(cfg.get("min_por_usuario", 5)),
+        max_usuarios=int(cfg.get("max_usuarios", 3)), dry_run=dry_run)
+
+
 def run_reflection_pass(router: ModelRouter, conn: sqlite3.Connection, *,
                         activity_limit: int = 40, min_activity: int = 4) -> None:
     """Pase periódico INWARD-ONLY (nunca postea): mira la actividad reciente del
@@ -6242,7 +6262,8 @@ def run(mode: str) -> None:
         # del tiempo), así que casi siempre sale sin hacer nada y sin costo.
         PeriodicTask("memory_compact",
                      lambda: (run_memory_compact_pass(router, db),
-                              run_interactions_compact_pass(router, db)),
+                              run_interactions_compact_pass(router, db),
+                              run_facts_compact_pass(router, db)),
                      interval_hours=12, enabled=True),
     ]
     apply_tasks_config(tasks, TASKS_CONFIG)

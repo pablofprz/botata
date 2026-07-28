@@ -576,6 +576,10 @@ def hybrid_search_user_facts(
 
     Búsqueda híbrida: vec0 (coseno, partición del usuario) + FTS5 (BM25, filtrado
     por handle en el JOIN), fusionadas por RRF. Devuelve [(id, fact_text), ...].
+
+    Los hechos archivados (`superseded_by`) quedan afuera de las DOS ramas. Sin
+    ese filtro, compactar sería peor que no compactar: el hecho fusionado se
+    sumaría a los originales en vez de reemplazarlos.
     """
     q = embed(query)
     pool = max(k * 3, 15)
@@ -584,13 +588,14 @@ def hybrid_search_user_facts(
         "SELECT v.rowid AS id, f.fact_text AS text "
         "FROM user_facts_vec v JOIN user_facts f ON f.id = v.rowid "
         "WHERE v.embedding MATCH ? AND k = ? AND v.partition_key = ? "
+        "AND f.superseded_by IS NULL "
         "ORDER BY v.distance",
         (q, pool, handle),
     ).fetchall()
     fts_rows = conn.execute(
         "SELECT f.id AS id, f.fact_text AS text "
         "FROM user_facts_fts JOIN user_facts f ON f.id = user_facts_fts.rowid "
-        "WHERE user_facts_fts MATCH ? AND f.handle = ? "
+        "WHERE user_facts_fts MATCH ? AND f.handle = ? AND f.superseded_by IS NULL "
         "ORDER BY rank LIMIT ?",
         (_fts_query(query), handle, pool),
     ).fetchall()
@@ -1471,6 +1476,69 @@ def supersede_interactions(conn: sqlite3.Connection, viejas: list[int],
     for vid in viejas:
         conn.execute("UPDATE interactions SET superseded_by = ? WHERE id = ?",
                      (sucesora, vid))
+
+
+# ─── user_facts: compactación por usuario (T49) ─────────────────────────────
+
+def facts_compactables(conn: sqlite3.Connection, *,
+                       min_por_usuario: int = 5) -> list[dict]:
+    """Usuarios cuya memoria semántica vale la pena revisar, más cargados primero.
+
+    A diferencia de `interacciones_compactables` acá el grupo es el USUARIO
+    entero, no el día: los duplicados de un hecho no salen de una charla larga
+    sino de contarlo dos veces con meses de diferencia ("no quiere memes del
+    mundial, le ponen muy triste" / "…porque le entristecen"). Agrupar por día
+    no los pondría nunca en la misma llamada.
+
+    La cola larga de gente con dos o tres hechos se deja quieta: no hay nada que
+    fusionar y cada grupo cuesta una llamada al modelo.
+    """
+    filas = conn.execute(
+        "SELECT id, handle, fact_text, created_at FROM user_facts "
+        "WHERE superseded_by IS NULL ORDER BY handle, id"
+    ).fetchall()
+    por_handle: dict[str, list[dict]] = {}
+    for r in filas:
+        por_handle.setdefault(r["handle"], []).append(
+            {"id": r["id"], "text": r["fact_text"], "created_at": r["created_at"]})
+    return sorted(
+        ({"handle": h, "filas": fs} for h, fs in por_handle.items()
+         if len(fs) >= min_por_usuario),
+        key=lambda g: (-len(g["filas"]), g["handle"]))
+
+
+def insert_user_fact(conn: sqlite3.Connection, handle: str, fact_text: str,
+                     source_uri: str | None = None) -> int:
+    """Inserta un hecho SIN dedup semántico y devuelve su id.
+
+    `upsert_user_fact` no sirve para la compactación: el texto fusionado se
+    parece por definición a los que reemplaza, así que el dedup lo saltearía y
+    el pase archivaría los originales sin dejar sucesora. Tampoco commitea, para
+    poder correr dentro de la transacción todo-o-nada del pase.
+    """
+    cur = conn.execute(
+        "INSERT INTO user_facts(handle, fact_text, source_uri) VALUES (?, ?, ?)",
+        (handle, fact_text, source_uri))
+    fid = int(cur.lastrowid)
+    conn.execute(
+        "INSERT INTO user_facts_vec(rowid, embedding, partition_key) VALUES (?, ?, ?)",
+        (fid, embed(fact_text), handle))
+    return fid
+
+
+def supersede_user_facts(conn: sqlite3.Connection, viejas: list[int],
+                         sucesora: int | None) -> None:
+    """Archiva hechos: marca `superseded_by` y les saca el embedding.
+
+    Borrar el vector no es opcional. vec0 no tiene FK cascade ni triggers, así
+    que un hecho archivado seguiría siendo el vecino más cercano de sí mismo y
+    el dedup de `upsert_user_fact` (k=1) rechazaría el hecho nuevo como
+    duplicado de uno que ya nadie lee. `restore` lo re-embebe.
+    """
+    for vid in viejas:
+        conn.execute("UPDATE user_facts SET superseded_by = ? WHERE id = ?",
+                     (sucesora if sucesora is not None else vid, vid))
+        conn.execute("DELETE FROM user_facts_vec WHERE rowid = ?", (vid,))
 
 
 def purge_user_memory(

@@ -1672,6 +1672,19 @@ function renderAdvFlags() {
     + textInput(mc, "min_por_dia", "comprimir desde … notas en el día", "number")
     + `</div><div style="max-width:220px">`
     + textInput(mc, "max_grupos", "grupos por pase (costo/tiempo)", "number")
+    + `</div></div>
+       <p class="hint">🗂️ <b>Hechos de cada persona.</b> Esta memoria no entra entera: el bot
+       busca los <b>5 hechos más relevantes</b> para lo que se está hablando. El problema no
+       es el tamaño sino la puntería — si dos de esos cinco son el mismo hecho escrito
+       distinto, se quedó con tres. Repasa a una persona por llamada (con el modelo de
+       razonamiento: fusionar sin perder detalles y ver qué dato venció a cuál no es resumir),
+       empezando por quienes más hechos acumulan. <b>Nada se borra</b>: lo fusionado queda
+       archivado. El criterio se edita abajo en <code>compact_facts.md</code>.</p>`
+    + check(mc, "facts", "deduplicar los hechos de cada persona", true)
+    + `<div class="row"><div style="max-width:220px">`
+    + textInput(mc, "min_por_usuario", "revisar desde … hechos por persona", "number")
+    + `</div><div style="max-width:220px">`
+    + textInput(mc, "max_usuarios", "personas por pase (costo/tiempo)", "number")
     + `</div></div>`;
 }
 
