@@ -3128,6 +3128,7 @@ def _tool_search_videos(args: dict, ctx: ToolContext) -> ToolResult:
 # visión, así que no entra al índice semántico. Membrilla sigue existiendo para lo
 # otro: indexar y poder buscar por significado.
 _IMG_SRC_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.I)
+_PIN_THUMB_RE = re.compile(r"/(?:236|170|75)x/")   # tamaños chicos que sirve el RSS
 _LIVE_UA = "botata/1.0 (bot comunitario)"
 
 
@@ -3135,9 +3136,18 @@ def _pinterest_board_items(board: str, limit: int = 15) -> list[dict]:
     """Pins recientes de un tablero público vía su RSS oficial (`/usuario/tablero.rss`).
 
     Sin credenciales y sin scraping: Pinterest publica el feed del tablero. La URL
-    de la imagen viene embebida en el HTML de la descripción."""
+    de la imagen viene embebida en el HTML de la descripción.
+
+    Acepta las dos formas de escribirlo, porque el admin va a pegar cualquiera:
+    `usuario/tablero` o la URL del tablero copiada del navegador (con o sin
+    `.rss`, con o sin barra final, y sirve cualquier dominio de Pinterest).
+    Sin normalizar, una URL pegada tal cual devolvía el HTML de la página y el
+    parser no encontraba nada — fallaba en silencio.
+    """
     ref = board.strip().strip("/")
-    url = ref if ref.startswith("http") else f"https://www.pinterest.com/{ref}.rss"
+    url = ref if ref.startswith("http") else f"https://www.pinterest.com/{ref}"
+    if not url.endswith(".rss"):
+        url += ".rss"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _LIVE_UA})
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -3155,7 +3165,13 @@ def _pinterest_board_items(board: str, limit: int = 15) -> list[dict]:
             continue
         link = re.search(r"<link>(.*?)</link>", bloque, re.S)
         title = re.search(r"<title>(.*?)</title>", bloque, re.S)
-        out.append({"image_url": img.group(1),
+        # El RSS sirve miniaturas de 236px: posteadas se ven mal. La CDN expone
+        # el mismo path en otros tamaños; 736x es el punto justo (~70 KB) —
+        # `originals` puede pasar los 2 MB y no entra en un post. Si el tamaño
+        # grande no existiera, `image_url_alt` deja volver a la miniatura.
+        src = img.group(1)
+        out.append({"image_url": _PIN_THUMB_RE.sub("/736x/", src),
+                    "image_url_alt": src,
                     "url": (link.group(1).strip() if link else ""),
                     "title": _strip_html(title.group(1)) if title else "",
                     "source": board})
@@ -3251,6 +3267,8 @@ def _tool_get_latest_media(args: dict, ctx: ToolContext) -> ToolResult:
     frescos = [i for i in items if i.get("url") and i["url"] not in recientes] or items
     elegido = random.choice(frescos)
     path = _descargar_media(elegido["image_url"])
+    if not path and elegido.get("image_url_alt"):
+        path = _descargar_media(elegido["image_url_alt"])
     if not path:
         return ToolResult(text="encontré contenido pero no pude bajar la imagen")
     detalle = f"{elegido['title'][:120]} — {elegido['url']}" if elegido.get("title") else elegido.get("url", "")

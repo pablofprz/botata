@@ -22,7 +22,7 @@ from tools import Scope, ToolContext  # noqa: E402
 
 _PIN_RSS = """<rss><channel>
 <item><title>Un pin lindo</title><link>https://pinterest.com/pin/1</link>
-<description>&lt;a&gt;&lt;img src="https://i.pinimg.com/a.jpg"/&gt;&lt;/a&gt;</description></item>
+<description>&lt;a&gt;&lt;img src="https://i.pinimg.com/236x/ab/cd/ef/abcdef.jpg"/&gt;&lt;/a&gt;</description></item>
 <item><title>Sin imagen</title><link>https://pinterest.com/pin/2</link>
 <description>texto pelado</description></item>
 </channel></rss>"""
@@ -58,7 +58,7 @@ def test_pinterest_extrae_la_imagen_y_saltea_lo_que_no_tiene(monkeypatch):
                         lambda req, timeout=15: _Resp(_PIN_RSS.encode()))
     items = b._pinterest_board_items("polci/memes")
     assert len(items) == 1                      # el segundo item no tiene <img>
-    assert items[0]["image_url"] == "https://i.pinimg.com/a.jpg"
+    assert items[0]["image_url"] == "https://i.pinimg.com/736x/ab/cd/ef/abcdef.jpg"
     assert items[0]["url"] == "https://pinterest.com/pin/1"
 
 
@@ -154,3 +154,47 @@ def test_scope_no_es_publico():
     reg = b.build_tool_registry(b.TOOLS_CONFIG)
     assert "get_latest_media" not in [t.name for t in reg.available(Scope.REPLY)]
     assert "get_latest_media" in [t.name for t in reg.available(Scope.ADMIN)]
+
+
+# ─── Pinterest: cómo se escribe el tablero (el admin pega cualquier cosa) ────
+@pytest.mark.parametrize("escrito", [
+    "polci/memes",
+    "https://www.pinterest.com/polci/memes",
+    "https://www.pinterest.com/polci/memes/",
+    "https://www.pinterest.com/polci/memes.rss",
+    "  polci/memes/  ",
+])
+def test_pinterest_normaliza_todas_las_formas(monkeypatch, escrito):
+    """Pegar la URL del navegador tenía que funcionar igual que 'usuario/tablero':
+    sin normalizar traía el HTML de la página y el parser devolvía vacío."""
+    vistas = []
+
+    def _open(req, timeout=15):
+        vistas.append(req.full_url)
+        return _Resp(_PIN_RSS.encode())
+    monkeypatch.setattr(b.urllib.request, "urlopen", _open)
+    b._pinterest_board_items(escrito)
+    assert vistas == ["https://www.pinterest.com/polci/memes.rss"]
+
+
+def test_pinterest_sube_la_resolucion_con_fallback(monkeypatch):
+    monkeypatch.setattr(b.urllib.request, "urlopen",
+                        lambda req, timeout=15: _Resp(_PIN_RSS.encode()))
+    it = b._pinterest_board_items("polci/memes")[0]
+    assert "/736x/" in it["image_url"]          # el RSS sirve 236x: se ve mal posteado
+    assert "/236x/" in it["image_url_alt"]      # y queda la miniatura por las dudas
+
+
+def test_tool_cae_a_la_miniatura_si_falla_el_grande(conn, registro, monkeypatch):
+    intentos = []
+
+    def _bajar(url):
+        intentos.append(url)
+        return None if "/736x/" in url else "/tmp/chica.jpg"
+    monkeypatch.setattr(b, "_descargar_media", _bajar)
+    monkeypatch.setattr(b, "_pinterest_board_items", lambda ref, limit=15: [
+        {"image_url": "https://i.pinimg.com/736x/a.jpg",
+         "image_url_alt": "https://i.pinimg.com/236x/a.jpg",
+         "url": "https://pin/1", "title": "x", "source": ref}])
+    out = b._tool_get_latest_media({"topic": "ilustracion"}, ToolContext(state={}, conn=conn))
+    assert len(intentos) == 2 and out.image_path == "/tmp/chica.jpg"

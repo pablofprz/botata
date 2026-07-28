@@ -411,7 +411,9 @@
       en lo más popular de tu región). Solo necesita <code>YOUTUBE_API_KEY</code> en Credenciales.
       <br>📌 <b>Pinterest y Tumblr son conectores EN VIVO</b>: traen <b>lo último</b> de un
       tablero o blog en el momento, sin pasar por Membrilla (Pinterest usa el RSS oficial del
-      tablero, sin credenciales; Tumblr necesita <code>TUMBLR_API_KEY</code> en Credenciales).
+      tablero, sin credenciales — podés escribir <code>usuario/tablero</code> o pegar la URL
+      tal cual la copiás del navegador; Tumblr necesita <code>TUMBLR_API_KEY</code> en
+      Credenciales y acepta <code>blog</code> o <code>blog#etiqueta</code>).
       Ojo con la diferencia: lo que traen <b>no está indexado</b> —no lo describió el modelo de
       visión— así que sirve para "traeme lo nuevo de acá", no para "buscame un meme de fútbol".
       Para eso está 🍐 Membrilla, que indexa y permite buscar por significado. Las dos cosas
@@ -1384,7 +1386,7 @@ const SOURCE_TYPE_INFO = {
   rss:     {label: "feed RSS", ph: "https://diario.com/rss.xml", tool: "get_news"},
   spotify: {label: "playlist de Spotify", ph: "37i9dQZF1DX... (id de la playlist)", tool: "get_playlist_track"},
   youtube: {label: "canal o lista de YouTube", ph: "@canal, UCxxxx (canal) o PLxxxx (lista)", tool: "share_video"},
-  pinterest: {label: "tablero de Pinterest (en vivo)", ph: "usuario/tablero, otrousuario/otro", tool: "get_latest_media"},
+  pinterest: {label: "tablero de Pinterest (en vivo)", ph: "usuario/tablero — o pegá la URL del tablero", tool: "get_latest_media"},
   tumblr: {label: "blog de Tumblr (en vivo)", ph: "unblog, otro#tag", tool: "get_latest_media"},
 };
 
