@@ -149,10 +149,14 @@ def test_tool_sin_fuentes_configuradas(conn, monkeypatch, tmp_path):
     assert "no hay fuentes de Pinterest ni Tumblr" in out.text
 
 
-def test_scope_no_es_publico():
-    """El conector baja archivos: jamás scope reply (cualquiera lo dispararía)."""
+def test_disponible_en_replies():
+    """2026-07-27: pasó a scope reply. Un usuario pide "una foto de un mapache" y
+    el bot tiene que poder traerla de las fuentes que el admin declaró — antes la
+    tool existía pero era inalcanzable desde una mención, que es de donde vienen
+    los pedidos."""
     reg = b.build_tool_registry(b.TOOLS_CONFIG)
-    assert "get_latest_media" not in [t.name for t in reg.available(Scope.REPLY)]
+    disponibles = [t.name for t in reg.available(Scope.REPLY)]
+    assert "get_latest_media" in disponibles
     assert "get_latest_media" in [t.name for t in reg.available(Scope.ADMIN)]
 
 
@@ -198,3 +202,75 @@ def test_tool_cae_a_la_miniatura_si_falla_el_grande(conn, registro, monkeypatch)
          "url": "https://pin/1", "title": "x", "source": ref}])
     out = b._tool_get_latest_media({"topic": "ilustracion"}, ToolContext(state={}, conn=conn))
     assert len(intentos) == 2 and out.image_path == "/tmp/chica.jpg"
+
+
+# ═══ Pin suelto (no solo tableros) ═══════════════════════════════════════════
+def test_pin_suelto_sale_por_opengraph(monkeypatch):
+    """Un PIN no tiene RSS: devuelve 200 con CERO items (falla mudo). Su página
+    sí trae og:image, así que se resuelve por OpenGraph."""
+    vistas = []
+
+    def _og(url, max_bytes=200_000):
+        vistas.append((url, max_bytes))
+        return {"title": "Pin on Raccoons", "description": "",
+                "image": "https://i.pinimg.com/736x/ab/cd/ef/pin.jpg"}
+    monkeypatch.setattr(b, "_fetch_og_card", _og)
+    items = b._pinterest_board_items("https://ar.pinterest.com/pin/1055599909111921/")
+    assert items[0]["image_url"] == "https://i.pinimg.com/736x/ab/cd/ef/pin.jpg"
+    assert items[0]["title"] == "Pin on Raccoons"
+    # el og:image del pin vive pasado el byte 1.100.000: hay que pedir más
+    assert vistas[0][1] >= 1_200_000
+
+
+def test_pin_sin_imagen_no_rompe(monkeypatch):
+    monkeypatch.setattr(b, "_fetch_og_card", lambda url, max_bytes=200_000: None)
+    assert b._pinterest_board_items("https://ar.pinterest.com/pin/1/") == []
+
+
+def test_el_tablero_sigue_yendo_por_rss(monkeypatch):
+    """Los tableros no deben pasar por OpenGraph."""
+    monkeypatch.setattr(b, "_fetch_og_card",
+                        lambda *a, **k: pytest.fail("un tablero no usa OpenGraph"))
+    monkeypatch.setattr(b.urllib.request, "urlopen",
+                        lambda req, timeout=15: _Resp(_PIN_RSS.encode()))
+    assert b._pinterest_board_items("polci/memes")
+
+
+# ═══ El pedido de imagen usa las fuentes en vivo, no solo el catálogo ════════
+def test_tema_sin_indexar_cae_en_las_fuentes_en_vivo(conn, registro, monkeypatch):
+    """El caso real: el tema 'mapaches' solo tiene un pin de Pinterest. Antes
+    search_images contestaba "no tengo fuentes" aunque estuviera declarado."""
+    monkeypatch.setattr(b, "SOURCES", [
+        {"type": "pinterest", "category": "mapaches",
+         "sources": ["https://ar.pinterest.com/pin/1/"], "enabled": True}])
+    monkeypatch.setattr(b, "_pinterest_board_items", lambda ref, limit=15: [
+        {"image_url": "https://i.pinimg.com/736x/x.jpg", "url": "https://pin/1",
+         "title": "un mapache", "source": ref}])
+    out = b._tool_search_images({"query": "mapache", "topic": "mapaches"},
+                                ToolContext(state={}, conn=conn))
+    assert out.image_path and "mapache" in out.text
+
+
+def test_un_tema_indexado_no_va_a_las_fuentes_en_vivo(conn, monkeypatch, tmp_path):
+    """Si hay contenido indexado del tema, manda el catálogo (es el que busca
+    por significado)."""
+    monkeypatch.setattr(b, "SOURCES", [
+        {"type": "membrilla", "category": "memes", "sources": ["cuenta"], "enabled": True},
+        {"type": "pinterest", "category": "memes", "sources": ["u/b"], "enabled": True}])
+    monkeypatch.setattr(b, "_traer_de_fuentes_en_vivo",
+                        lambda *a, **k: pytest.fail("no debía ir en vivo"))
+    monkeypatch.setattr(b.dbmod, "prefer_fresh_media", lambda rows: rows)
+    monkeypatch.setattr(b.dbmod, "hybrid_search_image_catalog",
+                        lambda *a, **k: [{"id": 1, "file_path": "scrape/x.jpg",
+                                          "description": "un meme", "category": "meme"}])
+    monkeypatch.setattr(b, "_postable_media_path", lambda p: "/abs/" + p)
+    monkeypatch.setattr(b.dbmod, "mark_image_used", lambda *a: None)
+    out = b._tool_search_images({"query": "meme", "topic": "memes"},
+                                ToolContext(state={}, conn=conn))
+    assert out.image_path == "/abs/scrape/x.jpg"
+
+
+def test_tema_que_no_existe_en_ningun_lado_avisa(conn, registro):
+    out = b._tool_search_images({"query": "x", "topic": "dinosaurios"},
+                                ToolContext(state={}, conn=conn))
+    assert "no tengo fuentes declaradas" in out.text and out.image_path is None

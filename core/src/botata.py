@@ -754,8 +754,14 @@ def _youtube_oembed(url: str) -> dict | None:
             "image": data.get("thumbnail_url")}
 
 
-def _fetch_og_card(url: str) -> dict | None:
-    """Baja el OpenGraph del link (best-effort, stdlib). Devuelve {title, description, image}."""
+def _fetch_og_card(url: str, max_bytes: int = 200_000) -> dict | None:
+    """Baja el OpenGraph del link (best-effort, stdlib). Devuelve {title, description, image}.
+
+    `max_bytes` acota la lectura: 200 KB alcanza para el <head> de casi cualquier
+    página y evita bajar el mundo por una tarjeta de link. Algunas (Pinterest)
+    meten el OpenGraph MUY abajo — un pin pesa 1,2 MB y su og:image aparece
+    pasado el byte 1.100.000 — así que esos callers piden un límite mayor.
+    """
     yt = _youtube_oembed(url)
     if yt:
         return yt
@@ -764,7 +770,7 @@ def _fetch_og_card(url: str) -> dict | None:
         with urllib.request.urlopen(req, timeout=8) as resp:
             if "html" not in (resp.headers.get("Content-Type") or "").lower():
                 return None
-            html = resp.read(200_000).decode("utf-8", "ignore")
+            html = resp.read(max_bytes).decode("utf-8", "ignore")
     except Exception as e:
         log.debug("OG fetch falló %s: %s", url, e)
         return None
@@ -3105,6 +3111,13 @@ def _search_catalog_media(args: dict, ctx: ToolContext, *, want_video: bool) -> 
     if topic:
         sources = sources_for_topic(topic)
         if not sources:
+            # El tema no tiene contenido INDEXADO (Membrilla), pero puede tener
+            # fuentes EN VIVO. Ese era el agujero: un tema con solo un tablero de
+            # Pinterest respondía "no tengo fuentes" aunque estuviera declarado.
+            if not want_video:
+                vivo = _traer_de_fuentes_en_vivo(topic, ctx)
+                if vivo is not None:
+                    return vivo
             return ToolResult(text=(
                 f"no tengo fuentes declaradas para '{topic}'. Temas disponibles: "
                 + (", ".join(topics_available())
@@ -3123,6 +3136,13 @@ def _search_catalog_media(args: dict, ctx: ToolContext, *, want_video: bool) -> 
         if best is None:
             best, best_path = r, p
     if not best:
+        # El catálogo indexado no tenía nada. Si el tema tiene fuentes EN VIVO
+        # (Pinterest/Tumblr), se traen de ahí: para el usuario "una foto de un
+        # mapache" es una sola cosa, no le importa si está indexada o no.
+        if not want_video:
+            vivo = _traer_de_fuentes_en_vivo(topic or query, ctx)
+            if vivo is not None:
+                return vivo
         return ToolResult(text=f"no encontré {que} para '{query}'")
     dbmod.mark_image_used(ctx.conn, best["id"])
     summary = ", ".join(f"{r['description'][:50]}… [{r['category']}]" for r in elegidos[:3])
@@ -3158,6 +3178,19 @@ def _pinterest_board_items(board: str, limit: int = 15) -> list[dict]:
     parser no encontraba nada — fallaba en silencio.
     """
     ref = board.strip().strip("/")
+    # Un PIN suelto no tiene RSS (devuelve 200 con cero items — falla mudo). Su
+    # página sí trae og:image, así que se resuelve con el extractor de OpenGraph
+    # que el bot ya usa para las tarjetas de link.
+    if "/pin/" in ref:
+        card = _fetch_og_card(
+            ref if ref.startswith("http") else f"https://www.pinterest.com/{ref}",
+            max_bytes=2_000_000)      # el og:image del pin vive al final del HTML
+        if not card or not card.get("image"):
+            log.warning("pinterest: el pin %s no expuso imagen", ref)
+            return []
+        return [{"image_url": card["image"], "image_url_alt": card["image"],
+                 "url": ref, "title": (card.get("title") or "").strip(),
+                 "source": board}]
     url = ref if ref.startswith("http") else f"https://www.pinterest.com/{ref}"
     if not url.endswith(".rss"):
         url += ".rss"
@@ -3256,6 +3289,37 @@ def _descargar_media(url: str) -> str | None:
 # conector que se cargue en caliente— en vez de quedar congelado en el registro.
 connectorsmod.register_fetcher("pinterest", lambda ref, limit=15: _pinterest_board_items(ref, limit))
 connectorsmod.register_fetcher("tumblr", lambda ref, limit=15: _tumblr_blog_items(ref, limit))
+
+
+def _traer_de_fuentes_en_vivo(topic: str, ctx: ToolContext) -> ToolResult | None:
+    """Un item de las fuentes en vivo (Pinterest/Tumblr) del tema, o None.
+
+    None = el tema no tiene fuentes en vivo (el caller decide qué contestar).
+    """
+    topic = (topic or "").strip()
+    if not topic:
+        return None
+    vivos = [c.id for c in connectorsmod.CONNECTORS if c.live]
+    fuentes = [(k, s) for k in vivos for s in sources_of_type(k, topic)]
+    if not fuentes:
+        return None
+    items = []
+    for kind, ref in fuentes:
+        fn = connectorsmod.fetcher(kind)
+        if fn:
+            items += fn(ref)
+    if not items:
+        return ToolResult(text=f"tengo fuentes de '{topic}' pero no pude traer nada ahora")
+    recientes = " ".join(recent_bot_posts(ctx.conn, limit=30)) if ctx.conn is not None else ""
+    frescos = [i for i in items if i.get("url") and i["url"] not in recientes] or items
+    elegido = random.choice(frescos)
+    path = _descargar_media(elegido["image_url"])
+    if not path and elegido.get("image_url_alt"):
+        path = _descargar_media(elegido["image_url_alt"])
+    if not path:
+        return ToolResult(text="encontré contenido pero no pude bajar la imagen")
+    detalle = (elegido.get("title") or "").strip()[:120] or elegido.get("url", "")
+    return ToolResult(text=f"de {elegido['source']}: {detalle}".strip(), image_path=path)
 
 
 def _tool_get_latest_media(args: dict, ctx: ToolContext) -> ToolResult:
@@ -4243,7 +4307,7 @@ def build_tool_registry(config: dict | None = None, *,
             "properties": {
                 "query": {"type": "string", "description": "Search query in Spanish, e.g. 'meme de gato', 'perro enojado'."},
                 "category": {"type": "string", "description": "Optional file-type filter: 'meme', 'foto', 'arte', 'captura', 'otro'."},
-                "topic": {"type": "string", "description": "Optional TOPIC filter (e.g. 'futbol', 'politica'): restricts the search to the sources the admin registered for that topic. Use it when the request names a subject that has its own sources."},
+                "topic": {"type": "string", "description": "Optional TOPIC filter (e.g. 'futbol', 'mapaches'): restricts the search to the sources the admin registered for that topic. If the topic has no indexed content but has live sources (Pinterest/Tumblr), they are used automatically."},
             },
             "required": ["query"],
         },
@@ -4283,7 +4347,7 @@ def build_tool_registry(config: dict | None = None, *,
             "required": [],
         },
         _tool_get_latest_media,
-        {Scope.ADMIN, Scope.FEED_REFLECTION},
+        {Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN},
     )
     reg.register(
         "summarize_feed",
