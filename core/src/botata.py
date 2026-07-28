@@ -56,6 +56,7 @@ from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope, ALL
 from skills import skills_prompt_block, get_skill_body  # workspace de skills (T26)
 import routines as routinesmod  # conducta proactiva en archivos (rutinas; ex-heartbeat y ex-rooms)
 import moods as moodmod  # estados de ánimo del bot (registro conductual por día)
+import memory_compact  # compactación de bot_memory (T48)
 from scheduler import PeriodicTask, apply_tasks_config, run_due  # tareas periódicas (T27)
 from router import ModelRouter, RoleLLM, build_router, llm_api_key as router_llm_api_key  # router de modelos + fallbacks
 
@@ -214,6 +215,9 @@ MODELS_CONFIG      : dict | None = settings.get("MODELS")
 #     type "youtube" → sources = canales/listas       (tool share_video)
 #     type "pinterest" → sources = "usuario/tablero"  (tool get_latest_media)
 #     type "tumblr"  → sources = blogs                (tool get_latest_media)
+#     type "api"     → sources = lo que varía en la URL (tool get_latest_media);
+#                      la entrada trae además url/items_path/map — es el conector
+#                      declarativo: una API JSON nueva sin escribir código.
 # ---------------------------------------------------------------------------
 import connectors as connectorsmod
 
@@ -287,27 +291,40 @@ def _load_sources() -> list[dict]:
 SOURCES : list = _load_sources()
 
 
-def sources_of_type(kind: str, topic: str = "") -> list[str]:
-    """Fuentes habilitadas de un tipo, opcionalmente acotadas a un tema.
+def _entry_matches_topic(entry: dict, topic: str) -> bool:
+    """Matcheo tolerante de tema: lo escribe un LLM, no un formulario.
 
-    Sin `topic` devuelve todas las del tipo. Con `topic`, el matcheo es tolerante
-    (lo escribe un LLM): case-insensitive y por substring contra `category`,
-    `name`, `description` y los nombres de las fuentes.
-    """
+    Dos reglas, en OR. (1) La vieja: el tema como substring de
+    category/name/description/fuentes — barata y cubre el caso de una palabra.
+    (2) La nueva: puntaje por palabras con contenido, que es la que hace andar
+    los pedidos en prosa ("una foto de mapaches" contra una entrada `mapaches`).
+    Sin tema, matchea todo."""
+    t = (topic or "").strip().lower()
+    if not t:
+        return True
+    haystack = " ".join([
+        str(entry.get("category", "")), str(entry.get("name", "")),
+        str(entry.get("description", "")), *entry.get("sources", []),
+    ]).lower()
+    return t in haystack or source_match_score(entry, t) >= SOURCE_MATCH_MIN
+
+
+def entries_of_type(kind: str, topic: str = "") -> list[dict]:
+    """Entradas habilitadas de un tipo que matchean el tema.
+
+    Devuelve la ENTRADA entera y no solo los nombres de las fuentes porque los
+    conectores declarativos (`api`) llevan su config ahí — url, mapeo."""
     if not connectorsmod.is_enabled(kind, settings):
         return []          # conector desactivado por el admin (sección Plugins)
-    t = (topic or "").strip().lower()
+    return [e for e in SOURCES
+            if e["type"] == kind and e.get("enabled", True)
+            and _entry_matches_topic(e, topic)]
+
+
+def sources_of_type(kind: str, topic: str = "") -> list[str]:
+    """Fuentes habilitadas de un tipo, opcionalmente acotadas a un tema."""
     out: list[str] = []
-    for entry in SOURCES:
-        if entry["type"] != kind or not entry.get("enabled", True):
-            continue
-        if t:
-            haystack = " ".join([
-                str(entry.get("category", "")), str(entry.get("name", "")),
-                str(entry.get("description", "")), *entry["sources"],
-            ]).lower()
-            if t not in haystack:
-                continue
+    for entry in entries_of_type(kind, topic):
         out.extend(s for s in entry["sources"] if s not in out)
     return out
 
@@ -326,6 +343,99 @@ def topics_available() -> list[str]:
 def sources_for_topic(topic: str) -> list[str]:
     """Fuentes de Membrilla para un tema (usada por search_images/search_videos)."""
     return sources_of_type("membrilla", topic) if (topic or "").strip() else []
+
+
+# ─── Dos pesos distintos buscando lo mismo ───────────────────────────────────
+# El catálogo de Membrilla tiene peso SEMÁNTICO: cada imagen la describió el
+# modelo de visión, así que se puede buscar por significado. El registro de
+# fuentes tiene peso de ADMIN: si una entrada dice "mapaches", es una persona
+# afirmando qué hay ahí, y eso es más fiable que cualquier similitud.
+#
+# Compiten de igual a igual y ninguno tiene prioridad fija (`source_weight` 0.5
+# = moneda al aire cuando los dos sirven). El admin puede inclinar la balanza, y
+# el LLM puede pedir explícitamente uno u otro con el parámetro `prefer`.
+#
+# `catalog_max_distance`: distancia coseno máxima para creerle al catálogo.
+# Medido sobre el catálogo real de botata-arg (943 items, bge-m3): "meme de
+# futbol" 0.311 y "un gato tierno" 0.320 (los tiene), "carpincho" 0.434 (los
+# tiene), "mapache" 0.503 y "xilofono cuantico" 0.561 (no los tiene). El corte
+# va en el hueco entre 0.434 y 0.503.
+_MEDIA_SEARCH        : dict  = settings.get("MEDIA_SEARCH") or {}
+CATALOG_MAX_DISTANCE : float = float(_MEDIA_SEARCH.get("catalog_max_distance", 0.47))
+SOURCE_WEIGHT        : float = float(_MEDIA_SEARCH.get("source_weight", 0.5))
+MEDIA_PREFER_DEFAULT : str   = str(_MEDIA_SEARCH.get("prefer", "auto")).lower()
+
+# Palabras que no dicen NADA del tema: envoltorio del pedido ("una foto de…") y
+# muletillas. Sin sacarlas, "foto de mapaches" matchea contra cualquier fuente
+# que mencione fotos y el puntaje se diluye.
+_STOPWORDS = {
+    "una", "uno", "un", "el", "la", "los", "las", "de", "del", "al", "por",
+    "para", "con", "que", "algo", "algun", "alguna", "alguno", "me", "mi", "te",
+    "se", "lo", "es", "eso", "esto", "ese", "esta", "favor", "porfa", "please",
+    "dame", "mandame", "tirame", "pasame", "quiero", "busca", "buscame", "traeme",
+    "foto", "fotos", "imagen", "imagenes", "image", "images", "pic", "pics",
+    "video", "videos", "clip", "gif", "y", "o", "en", "a",
+}
+_ACENTOS = str.maketrans("áéíóúüñ", "aeiouun")
+
+
+def _tokens(texto: str) -> list[str]:
+    """Palabras con contenido de un texto: sin acentos, sin muletillas, sin cortas."""
+    limpio = (texto or "").lower().translate(_ACENTOS)
+    return [t for t in re.split(r"[^a-z0-9]+", limpio)
+            if len(t) >= 3 and t not in _STOPWORDS]
+
+
+def _mismo_concepto(a: str, b: str) -> bool:
+    """Igualdad tolerante al plural y a la derivación: mapache≈mapaches, pol≈politica."""
+    return a == b or (min(len(a), len(b)) >= 3 and (a.startswith(b) or b.startswith(a)))
+
+
+def source_match_score(entry: dict, consulta: str) -> float:
+    """Qué tanto del pedido cubre lo que el ADMIN declaró de esta fuente (0..1).
+
+    Reemplaza al `consulta in haystack` de antes, que fallaba con cualquier
+    pedido en prosa: "foto de mapaches" no es substring de "mapaches", así que
+    un tablero perfectamente declarado quedaba invisible."""
+    pedido = _tokens(consulta)
+    if not pedido:
+        return 0.0
+    hay = _tokens(" ".join([
+        str(entry.get("category", "")), str(entry.get("name", "")),
+        str(entry.get("description", "")), *entry.get("sources", []),
+    ]))
+    if not hay:
+        return 0.0
+    return sum(1 for t in pedido if any(_mismo_concepto(t, h) for h in hay)) / len(pedido)
+
+
+# Con cuánto del pedido cubierto se considera que la fuente habla de eso.
+SOURCE_MATCH_MIN = float(_MEDIA_SEARCH.get("source_match_min", 0.5))
+
+
+def _candidato_relevante(row: dict, query: str) -> bool:
+    """¿Este resultado del catálogo tiene que ver con lo que se pidió?
+
+    "Salió primero" no es "es esto": la búsqueda híbrida siempre devuelve el
+    vecino más cercano, aunque el catálogo no tenga nada del tema. Dos señales
+    para aceptarlo: la distancia coseno por debajo del corte, o la descripción
+    diciendo literalmente alguna palabra con contenido del pedido.
+
+    Lo segundo NO se delega al hit de FTS: FTS matchea cualquier término, así
+    que "una foto de un mapache" daba por relevante a un chihuahua porque su
+    descripción decía "foto". Acá el envoltorio del pedido ya está filtrado.
+
+    `vec_distance` ausente = caller viejo que no la trae, se le cree. Presente
+    en None = el candidato entró SOLO por FTS (quedó fuera de los vecinos más
+    cercanos), y ahí justamente hay que mirarle la descripción.
+    """
+    if "vec_distance" not in row:
+        return True
+    dist = row["vec_distance"]
+    if dist is not None and dist <= CATALOG_MAX_DISTANCE:
+        return True
+    descripcion = _tokens(f"{row.get('description', '')} {row.get('category', '')}")
+    return any(_mismo_concepto(t, d) for t in _tokens(query) for d in descripcion)
 
 # Leer la media (imágenes/video/GIF) de los posts del hilo: corre el modelo
 # vision (rol image_describe) sobre el frame/thumbnail y suma la descripción al
@@ -2007,6 +2117,10 @@ def fetch_rss(url: str, max_items: int = 15) -> list[dict]:
 # para que "prendé las noticias" aplique sin reiniciar.
 _RUNTIME_TASKS: list[PeriodicTask] = []
 
+# Router del proceso (lo llena run()). Lo necesitan las tools que disparan un
+# pase completo del motor, como compactar la memoria.
+_RUNTIME_ROUTER: ModelRouter | None = None
+
 # Claves que JAMÁS se cambian desde un post. Identidad (lock-out/secuestro) y
 # endpoints/modelos (redirigir el tráfico LLM = exfiltración de prompts+memoria).
 # Defensa en profundidad: aunque un handler futuro lo intente, el guard rechaza.
@@ -2588,6 +2702,63 @@ class LessonsReflection(BaseModel):
     lessons: list[LessonItem] = Field(default_factory=list)
 
 
+def memoria_chars(conn: sqlite3.Connection) -> int:
+    """Caracteres de la memoria general VIGENTE — lo que se paga en cada llamada."""
+    return sum(len(m["text"]) for m in dbmod.list_bot_memory(conn, limit=1000))
+
+
+def run_memory_compact_pass(router: ModelRouter, conn: sqlite3.Connection, *,
+                            forzar: bool = False, dry_run: bool = False):
+    """T48: compacta `bot_memory` cuando el bloque que se inyecta se pasa de largo.
+
+    Se auto-gatea por TAMAÑO y no por tiempo, que es la unidad que importa: esta
+    memoria entra completa en cada prompt, así que el costo es su largo, no su
+    antigüedad. Con `forzar` corre igual (tool admin / botón de la UI).
+    """
+    cfg = settings.get("MEMORY_COMPACT") or {}
+    if not cfg.get("enabled", True) and not forzar:
+        return None
+    tope = int(cfg.get("max_chars", 4000))
+    actual = memoria_chars(conn)
+    if actual < tope and not forzar:
+        log.info("compactación: memoria en %d/%d chars — todavía no toca", actual, tope)
+        return None
+    prompt = load_text(PROMPTS_DIR / "compact_memory.md")
+    if not prompt:
+        log.warning("compact_memory.md no encontrado — no compacto")
+        return None
+    log.info("compactación: memoria en %d chars (tope %d)%s", actual, tope,
+             " — forzada" if forzar else "")
+    res = memory_compact.compactar(conn, RoleLLM(router, "memory_compact"),
+                                   prompt=prompt, dbmod=dbmod, dry_run=dry_run)
+    log.info("compactación: %s", res.resumen())
+    return res
+
+
+def run_interactions_compact_pass(router: ModelRouter, conn: sqlite3.Connection, *,
+                                  dry_run: bool = False):
+    """T48b: comprime a una nota por día las charlas que dejaron varias.
+
+    A diferencia de bot_memory, esto NO ahorra contexto: las interacciones entran
+    por recencia con k fijo. Lo que arregla es la CALIDAD de esa ventana — cinco
+    notas de la misma mañana la tapaban entera."""
+    cfg = settings.get("MEMORY_COMPACT") or {}
+    if not cfg.get("interactions", True):
+        return None
+    prompt = load_text(PROMPTS_DIR / "compact_interactions.md")
+    if not prompt:
+        log.warning("compact_interactions.md no encontrado — no compacto interacciones")
+        return None
+    # Lote CHICO por corrida: esto vive dentro del loop del bot, y una llamada
+    # por grupo con el modelo grande lo dejaba clavado 40 minutos. Con un tope
+    # bajo el backfill se hace solo a lo largo de varios pases sin que el bot
+    # deje de contestar en ningún momento.
+    return memory_compact.compactar_interacciones(
+        conn, RoleLLM(router, "interactions_compact"), prompt=prompt, dbmod=dbmod,
+        min_por_dia=int(cfg.get("min_por_dia", 3)),
+        max_grupos=int(cfg.get("max_grupos", 8)), dry_run=dry_run)
+
+
 def run_reflection_pass(router: ModelRouter, conn: sqlite3.Connection, *,
                         activity_limit: int = 40, min_activity: int = 4) -> None:
     """Pase periódico INWARD-ONLY (nunca postea): mira la actividad reciente del
@@ -2928,11 +3099,36 @@ def _tool_save_to_user_profile(args: dict, ctx: ToolContext) -> ToolResult:
 def _tool_save_to_memory(args: dict, ctx: ToolContext) -> ToolResult:
     content = args["content"]
     who     = (ctx.state or {}).get("author_handle") or "?"
-    mem_id  = dbmod.add_bot_memory(ctx.conn, content, source=f"tool:@{who}")
+    # 📌 Cuando ALGUIEN PIDIÓ textualmente que lo recuerde, la memoria nace fijada
+    # y el pase de compactación no la toca. La distinción no se puede deducir
+    # después —el bot decidiendo solo y un "acordate de esto" quedaban idénticos
+    # en la base, los dos como `tool:@handle`—, así que la marca el modelo en el
+    # momento, que es el único que tiene el pedido a la vista.
+    pedido = _as_bool(args.get("explicit")) or False
+    mem_id  = dbmod.add_bot_memory(ctx.conn, content, source=f"tool:@{who}", pinned=pedido)
     if mem_id is None:
         return ToolResult(text=f"eso ya lo tenía anotado: {content}")
-    log.info("/remember → bot_memory: %s", content)
+    log.info("/remember → bot_memory%s: %s", " 📌" if pedido else "", content)
     return ToolResult(text=f"anotado en mi memoria: {content}")
+
+
+def _tool_compact_memory(args: dict, ctx: ToolContext) -> ToolResult:
+    """Compactación a pedido del admin. Sin `apply` solo dice qué haría."""
+    aplicar = _as_bool(args.get("apply")) or False
+    if _RUNTIME_ROUTER is None:
+        return ToolResult(text="no puedo compactar: el motor no está corriendo")
+    res = run_memory_compact_pass(_RUNTIME_ROUTER, ctx.conn, forzar=True, dry_run=not aplicar)
+    if res is None:
+        return ToolResult(text="no pude compactar (falta el prompt compact_memory.md)")
+    if not res.ok:
+        return ToolResult(text=f"no compacté: {res.resumen()}")
+    if not res.plan:
+        return ToolResult(text="miré la memoria y no hay nada que compactar")
+    detalle = "; ".join(
+        f"{op.accion} {op.ids}" + (f" → {op.texto[:50]}" if op.texto else "")
+        for op in res.plan[:4])
+    return ToolResult(text=(f"{res.resumen()}. {detalle}"
+                            + ("" if aplicar else " — mandá 'compactá de verdad' para aplicar")))
 
 
 def _mood_susceptibility() -> float:
@@ -3107,43 +3303,80 @@ def _search_catalog_media(args: dict, ctx: ToolContext, *, want_video: bool) -> 
     category = args.get("category")
     topic    = (args.get("topic") or "").strip()
     que      = "videos" if want_video else "imágenes"
-    sources  = None
-    if topic:
-        sources = sources_for_topic(topic)
-        if not sources:
-            # El tema no tiene contenido INDEXADO (Membrilla), pero puede tener
-            # fuentes EN VIVO. Ese era el agujero: un tema con solo un tablero de
-            # Pinterest respondía "no tengo fuentes" aunque estuviera declarado.
-            if not want_video:
-                vivo = _traer_de_fuentes_en_vivo(topic, ctx)
-                if vivo is not None:
-                    return vivo
+    consulta = topic or query
+    prefer   = (args.get("prefer") or MEDIA_PREFER_DEFAULT).strip().lower()
+    sources  = sources_for_topic(topic) if topic else None
+
+    # ── Candidato del CATÁLOGO (peso semántico) ──────────────────────────────
+    # `sources == []` = el tema no tiene nada indexado; la búsqueda devolvería
+    # vacío igual, pero se saltea para no pagar el embedding al pedo.
+    # Se busca por las palabras con CONTENIDO, no por la frase entera. El
+    # envoltorio ("una foto de un … please") no aporta significado y encima
+    # COMPRIME las distancias: medido contra el catálogo real, la misma imagen
+    # pasa de 0.503 a 0.410 solo por embeber la frase completa, y ahí entra
+    # cualquier cosa bajo el umbral (fue así como un chihuahua pasaba por
+    # mapache). Ordenar por relevancia mejora de paso el recupero.
+    query_limpia = " ".join(_tokens(query)) or query
+    crudos = [] if sources == [] else dbmod.hybrid_search_image_catalog(
+        ctx.conn, query_limpia, category=category, sources=sources,
+        limit=25 if want_video else 8)
+    postables: list[tuple[dict, str]] = []
+    for r in crudos:
+        p = _postable_media_path(r.get("file_path") or "")
+        if not p or p.lower().endswith(".mp4") != want_video:
+            continue
+        postables.append((r, p))
+    # RELEVANCIA ANTES QUE FRESCURA. Al revés —que era como estaba— el "mejor"
+    # termina siendo el más nuevo y no el que se parece a lo pedido: verificando
+    # contra el catálogo real, "una foto de un mapache" elegía un chihuahua
+    # recién indexado. La frescura es un desempate ENTRE los que sirven.
+    relevantes = [(r, p) for r, p in postables if _candidato_relevante(r, query)]
+    por_id = {r["id"]: p for r, p in relevantes}
+    elegidos = dbmod.prefer_fresh_media([r for r, _ in relevantes])
+    best = elegidos[0] if elegidos else None
+    best_path = por_id.get(best["id"]) if best else None
+    catalogo_sirve = best is not None
+
+    # ── Candidato de las FUENTES declaradas (peso de admin) ───────────────────
+    # Los conectores en vivo traen imágenes, no video: para search_videos el
+    # catálogo es el único camino.
+    fuentes_sirven = (not want_video) and bool(_entradas_en_vivo(consulta))
+
+    if not catalogo_sirve and not fuentes_sirven:
+        if best is not None:
+            log.info("search: descartado el mejor del catálogo para %r (dist=%.3f > %.2f)",
+                     query, best.get("vec_distance") or -1, CATALOG_MAX_DISTANCE)
+        if topic and sources == []:
             return ToolResult(text=(
                 f"no tengo fuentes declaradas para '{topic}'. Temas disponibles: "
                 + (", ".join(topics_available())
                    or "ninguno — el admin no cargó fuentes de contenido")))
-    # Pool más grande que en imágenes: los videos son minoría en el catálogo y el
-    # filtro descarta candidatos después de la búsqueda.
-    results = dbmod.prefer_fresh_media(
-        dbmod.hybrid_search_image_catalog(ctx.conn, query, category=category,
-                                          sources=sources, limit=25 if want_video else 8))
-    elegidos, best, best_path = [], None, None
-    for r in results:
-        p = _postable_media_path(r.get("file_path") or "")
-        if not p or p.lower().endswith(".mp4") != want_video:
-            continue
-        elegidos.append(r)
-        if best is None:
-            best, best_path = r, p
-    if not best:
-        # El catálogo indexado no tenía nada. Si el tema tiene fuentes EN VIVO
-        # (Pinterest/Tumblr), se traen de ahí: para el usuario "una foto de un
-        # mapache" es una sola cosa, no le importa si está indexada o no.
-        if not want_video:
-            vivo = _traer_de_fuentes_en_vivo(topic or query, ctx)
-            if vivo is not None:
-                return vivo
         return ToolResult(text=f"no encontré {que} para '{query}'")
+
+    # ── Quién gana ───────────────────────────────────────────────────────────
+    if prefer == "fuentes":
+        primero_fuentes = fuentes_sirven
+    elif prefer in ("catalogo", "catálogo", "membrilla"):
+        primero_fuentes = not catalogo_sirve
+    elif not (catalogo_sirve and fuentes_sirven):
+        primero_fuentes = fuentes_sirven          # solo uno sirve: no hay elección
+    else:
+        # Los dos sirven y nadie declaró preferencia: moneda al aire. Es
+        # deliberado — `source_weight` 0.5 significa "ninguno manda", y correrlo
+        # a 0 o a 1 fija la prioridad sin tocar código.
+        primero_fuentes = random.random() < SOURCE_WEIGHT
+
+    if primero_fuentes:
+        vivo = _traer_de_fuentes_en_vivo(consulta, ctx, mode=args.get("mode"))
+        if vivo is not None and vivo.image_path:
+            return vivo
+        if not catalogo_sirve:                    # la fuente falló y no hay plan B
+            return vivo or ToolResult(text=f"no encontré {que} para '{query}'")
+    elif not catalogo_sirve:
+        vivo = _traer_de_fuentes_en_vivo(consulta, ctx, mode=args.get("mode"))
+        if vivo is not None:
+            return vivo
+
     dbmod.mark_image_used(ctx.conn, best["id"])
     summary = ", ".join(f"{r['description'][:50]}… [{r['category']}]" for r in elegidos[:3])
     return ToolResult(text=f"encontré {len(elegidos)} {que}: {summary}", image_path=best_path)
@@ -3291,74 +3524,111 @@ connectorsmod.register_fetcher("pinterest", lambda ref, limit=15: _pinterest_boa
 connectorsmod.register_fetcher("tumblr", lambda ref, limit=15: _tumblr_blog_items(ref, limit))
 
 
-def _traer_de_fuentes_en_vivo(topic: str, ctx: ToolContext) -> ToolResult | None:
-    """Un item de las fuentes en vivo (Pinterest/Tumblr) del tema, o None.
+def _tipos_en_vivo() -> list[str]:
+    return [c.id for c in connectorsmod.CONNECTORS if c.live]
+
+
+# Cuántos items pedirle a cada fuente en vivo. El RSS de un tablero de Pinterest
+# sirve ~26 pins; con el default de 15 se descartaba un tercio del material
+# disponible y el bot repetía más de lo necesario.
+_LIVE_POOL = 30
+
+
+def _entradas_en_vivo(topic: str) -> list[tuple[str, dict]]:
+    """(tipo, entrada) de las fuentes EN VIVO que hablan del tema. Sin red."""
+    return [(kind, entry)
+            for kind in _tipos_en_vivo()
+            for entry in entries_of_type(kind, topic)]
+
+
+def _items_en_vivo(topic: str) -> tuple[list[dict], bool]:
+    """Items de TODAS las fuentes en vivo del tema. Devuelve (items, había fuentes).
+
+    Itera entradas y no nombres de fuente porque el conector declarativo `api`
+    lleva su configuración en la entrada; `fetch_items` se la pasa al que la pida.
+    Cada item se anota con `_orden`: su posición dentro de SU fuente, donde 0 es
+    lo más nuevo (los feeds vienen del más reciente al más viejo). Es lo que
+    permite después distinguir "lo último" de "cualquiera".
+    """
+    entradas = _entradas_en_vivo(topic)
+    items: list[dict] = []
+    for kind, entry in entradas:
+        for ref in entry["sources"]:
+            traidos = connectorsmod.fetch_items(kind, ref, limit=_LIVE_POOL, entry=entry)
+            items += [{**it, "_orden": n} for n, it in enumerate(traidos)]
+    return items, bool(entradas)
+
+
+def _elegir_media_en_vivo(items: list[dict], ctx: ToolContext,
+                          mode: str | None = None) -> tuple[dict, str] | None:
+    """Elige un item y baja su imagen. None si no se pudo bajar ninguna.
+
+    `mode`: "last" = lo más nuevo de cada fuente (el primero de cada feed);
+    cualquier otra cosa = al azar entre todo lo traído, que es el default —
+    para un tablero temático "traeme un mapache" casi nunca quiere decir "el
+    último mapache que subí".
+
+    Anti-repetición contra lo que el bot ya posteó (por link del post original);
+    si ya salieron todos, prefiere repetir antes que no traer nada."""
+    candidatos = [i for i in items if i.get("_orden") == 0] or items \
+        if (mode or "").strip().lower() == "last" else items
+    recientes = " ".join(recent_bot_posts(ctx.conn, limit=30)) if ctx.conn is not None else ""
+    frescos = [i for i in candidatos if i.get("url") and i["url"] not in recientes] or candidatos
+    elegido = random.choice(frescos)
+    path = _descargar_media(elegido["image_url"])
+    if not path and elegido.get("image_url_alt"):
+        path = _descargar_media(elegido["image_url_alt"])
+    return (elegido, path) if path else None
+
+
+def _traer_de_fuentes_en_vivo(topic: str, ctx: ToolContext,
+                              mode: str | None = None) -> ToolResult | None:
+    """Un item de las fuentes en vivo del tema, o None.
 
     None = el tema no tiene fuentes en vivo (el caller decide qué contestar).
     """
     topic = (topic or "").strip()
     if not topic:
         return None
-    vivos = [c.id for c in connectorsmod.CONNECTORS if c.live]
-    fuentes = [(k, s) for k in vivos for s in sources_of_type(k, topic)]
-    if not fuentes:
+    items, hubo = _items_en_vivo(topic)
+    if not hubo:
         return None
-    items = []
-    for kind, ref in fuentes:
-        fn = connectorsmod.fetcher(kind)
-        if fn:
-            items += fn(ref)
     if not items:
         return ToolResult(text=f"tengo fuentes de '{topic}' pero no pude traer nada ahora")
-    recientes = " ".join(recent_bot_posts(ctx.conn, limit=30)) if ctx.conn is not None else ""
-    frescos = [i for i in items if i.get("url") and i["url"] not in recientes] or items
-    elegido = random.choice(frescos)
-    path = _descargar_media(elegido["image_url"])
-    if not path and elegido.get("image_url_alt"):
-        path = _descargar_media(elegido["image_url_alt"])
-    if not path:
+    elegido = _elegir_media_en_vivo(items, ctx, mode)
+    if elegido is None:
         return ToolResult(text="encontré contenido pero no pude bajar la imagen")
-    detalle = (elegido.get("title") or "").strip()[:120] or elegido.get("url", "")
-    return ToolResult(text=f"de {elegido['source']}: {detalle}".strip(), image_path=path)
+    item, path = elegido
+    detalle = (item.get("title") or "").strip()[:120] or item.get("url", "")
+    return ToolResult(text=f"de {item['source']}: {detalle}".strip(), image_path=path)
 
 
 def _tool_get_latest_media(args: dict, ctx: ToolContext) -> ToolResult:
-    """Trae lo ÚLTIMO de un tablero de Pinterest o un blog de Tumblr registrado.
+    """Trae contenido de una fuente en vivo registrada (tablero, blog, API).
 
     Complementa a search_images: aquello busca por significado en el catálogo
-    indexado; esto trae lo nuevo de una fuente conocida, sin indexar."""
+    indexado; esto va a la fuente en el momento, sin indexar."""
     topic = (args.get("topic") or "").strip()
-    vivos = [c.id for c in connectorsmod.CONNECTORS if c.live]
-    fuentes: list[tuple[str, str]] = []
-    for kind in vivos:
-        fuentes += [(kind, s) for s in sources_of_type(kind, topic)]
-    if not fuentes:
+    mode  = (args.get("mode") or "random").strip().lower()
+    items, hubo = _items_en_vivo(topic)
+    if not hubo:
+        vivos = _tipos_en_vivo()
         disponibles = ", ".join(
             e.get("category") or e.get("name") or "?"
             for e in SOURCES
             if e["type"] in vivos and e.get("enabled", True))
         return ToolResult(text=(
-            f"no tengo tableros ni blogs para '{topic}'. Temas disponibles: {disponibles}"
-            if topic else
-            "no hay fuentes de Pinterest ni Tumblr configuradas"))
-    items = []
-    for kind, ref in fuentes:
-        fn = connectorsmod.fetcher(kind)
-        if fn:
-            items += fn(ref)
+            f"no tengo fuentes en vivo para '{topic}'. Temas disponibles: {disponibles}"
+            if topic else "no hay fuentes en vivo configuradas"))
     if not items:
         return ToolResult(text="no pude traer nada de esas fuentes ahora")
-    # Anti-repetición contra lo que ya posteó (por link del post original).
-    recientes = " ".join(recent_bot_posts(ctx.conn, limit=30)) if ctx.conn is not None else ""
-    frescos = [i for i in items if i.get("url") and i["url"] not in recientes] or items
-    elegido = random.choice(frescos)
-    path = _descargar_media(elegido["image_url"])
-    if not path and elegido.get("image_url_alt"):
-        path = _descargar_media(elegido["image_url_alt"])
-    if not path:
+    elegido = _elegir_media_en_vivo(items, ctx, mode)
+    if elegido is None:
         return ToolResult(text="encontré contenido pero no pude bajar la imagen")
-    detalle = f"{elegido['title'][:120]} — {elegido['url']}" if elegido.get("title") else elegido.get("url", "")
-    return ToolResult(text=f"último de {elegido['source']}: {detalle}".strip(),
+    item, path = elegido
+    detalle = f"{item['title'][:120]} — {item['url']}" if item.get("title") else item.get("url", "")
+    prefijo = "último de" if mode == "last" else "de"
+    return ToolResult(text=f"{prefijo} {item['source']}: {detalle}".strip(),
                       image_path=path)
 
 
@@ -4190,11 +4460,27 @@ def build_tool_registry(config: dict | None = None, *,
         {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The fact to save, written as a short plain sentence."}
+                "content": {"type": "string", "description": "The fact to save, written as a short plain sentence."},
+                "explicit": {"type": "boolean", "description": "true SOLO si la persona pidió textualmente que lo recuerdes ('acordate de esto', 'guardate que…'). false si lo estás anotando por iniciativa propia. Lo pedido explícitamente queda protegido de la compactación."},
             },
             "required": ["content"],
         },
         _tool_save_to_memory,
+        {Scope.ADMIN},
+    )
+    reg.register(
+        "compact_memory",
+        "Compacta tu memoria general: fusiona lo repetido, resuelve contradicciones "
+        "y descarta lo que ya no aporta. Sin apply solo REPORTA qué haría. Usala si "
+        "el admin te pide limpiar, ordenar o compactar la memoria.",
+        {
+            "type": "object",
+            "properties": {
+                "apply": {"type": "boolean", "description": "true = aplicar de verdad. Omitir o false = solo decir qué haría (recomendado la primera vez)."},
+            },
+            "required": [],
+        },
+        _tool_compact_memory,
         {Scope.ADMIN},
     )
 
@@ -4299,15 +4585,27 @@ def build_tool_registry(config: dict | None = None, *,
     )
     reg.register(
         "search_images",
-        "Search the image catalog for images matching a query. "
-        "Use when the admin asks for a meme, image, foto, or picture. "
-        "Returns the path to the best matching image so it can be posted.",
+        "Busca una imagen para postear. Mira DOS lugares a la vez: el catálogo "
+        "indexado (búsqueda por significado) y las fuentes que el admin declaró "
+        "por tema (tableros de Pinterest, blogs, APIs), que se consultan en vivo. "
+        "Usala cuando te piden un meme, una imagen o una foto de algo. La imagen "
+        "queda adjunta al post automáticamente: NO escribas su link ni la describas.",
         {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query in Spanish, e.g. 'meme de gato', 'perro enojado'."},
-                "category": {"type": "string", "description": "Optional file-type filter: 'meme', 'foto', 'arte', 'captura', 'otro'."},
-                "topic": {"type": "string", "description": "Optional TOPIC filter (e.g. 'futbol', 'mapaches'): restricts the search to the sources the admin registered for that topic. If the topic has no indexed content but has live sources (Pinterest/Tumblr), they are used automatically."},
+                "query": {"type": "string", "description": "Qué buscar, en castellano: 'meme de gato', 'foto de un mapache'."},
+                "category": {"type": "string", "description": "Filtro opcional por tipo de archivo: 'meme', 'foto', 'arte', 'captura', 'otro'."},
+                "topic": {"type": "string", "description": "Tema opcional (ej. 'futbol', 'mapaches') para acotar a las fuentes que el admin registró para ese tema."},
+                "prefer": {
+                    "type": "string",
+                    "enum": ["auto", "catalogo", "fuentes"],
+                    "description": "De dónde sacarla. 'catalogo' = lo indexado, que se busca por significado y está descripto. 'fuentes' = ir en vivo a los tableros/blogs/APIs que el admin declaró para el tema; usalo cuando pidan algo NUEVO o RECIENTE, o cuando el tema exista como fuente declarada. 'auto' (default) deja que gane el que tenga algo bueno.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["random", "last"],
+                    "description": "Solo si sale de una fuente en vivo: 'last' = lo último que se subió ahí; 'random' (default) = cualquiera de lo reciente.",
+                },
             },
             "required": ["query"],
         },
@@ -4336,13 +4634,19 @@ def build_tool_registry(config: dict | None = None, *,
     )
     reg.register(
         "get_latest_media",
-        "Trae lo ÚLTIMO de los tableros de Pinterest o blogs de Tumblr que registró el "
-        "admin (por tema). Usala cuando piden algo NUEVO/reciente de esas fuentes; para "
-        "buscar por significado en el catálogo ya indexado usá search_images.",
+        "Trae contenido EN VIVO de las fuentes que registró el admin (tableros de "
+        "Pinterest, blogs de Tumblr, APIs), por tema. Usala cuando piden algo de una "
+        "fuente conocida; para buscar por significado en el catálogo indexado usá "
+        "search_images. La imagen queda adjunta sola: NO escribas su link.",
         {
             "type": "object",
             "properties": {
                 "topic": {"type": "string", "description": "Tema de las fuentes a mirar (ej. 'ilustración', 'gatos'). Omitir para todas."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["random", "last"],
+                    "description": "'last' = lo ÚLTIMO que se subió a esa fuente (usalo si piden lo nuevo/lo último). 'random' (default) = cualquiera de lo reciente, que es lo que suele querer un pedido temático ('traeme un mapache').",
+                },
             },
             "required": [],
         },
@@ -4967,6 +5271,62 @@ class ClassifyNode:
         return {"classification": result}
 
 
+# ─── Saneo de la interpretación de bios ─────────────────────────────────────
+# Caso real (2026-07-24, encontrado el 28/7): el modelo entró en un loop de
+# razonamiento ante la bio "estupidez natural" y devolvió 96.789 caracteres de
+# monólogo interno ("* Wait, is 'estupidez natural' a data point in itself?").
+# El guardrail era `interp.upper() in ("NADA","NOTHING")` —igualdad EXACTA—, así
+# que una respuesta que divagaba y de paso decía NADA no lo activó: se guardó
+# entera como bio del usuario y cada línea entró como un hecho suyo. Resultado:
+# 262 filas basura (el 42% de user_facts) que además GANABAN el retrieval.
+#
+# La lección general: la salida de un LLM que va a la base se acota en el código,
+# no en el prompt. El prompt pide; acá se comprueba.
+BIO_INTERP_MAX_CHARS = 600      # una bio interpretada son bullets, no un ensayo
+BIO_INTERP_MAX_LINEAS = 6
+_BIO_DESCARTE_MAX = 2500        # más que esto no se salva: el modelo se colgó
+_BIO_RUIDO = (
+    "wait", "let's", "lets ", "let me", "i will", "i should", "i'll", "actually",
+    "hmm", "okay", "ok,", "so ", "but ", "the instruction", "the prompt",
+    "the criteria", "the bio", "could it be", "what about", "espera", "veamos",
+)
+
+
+def _es_razonamiento(linea: str) -> bool:
+    """¿Es el modelo pensando en voz alta en vez de un dato del usuario?
+
+    El criterio es ASIMÉTRICO a propósito: perder un bullet es barato (la bio es
+    enriquecimiento, nunca bloquea un reply) y guardar basura es caro (entra al
+    contexto y gana el retrieval). Ante la duda, se descarta.
+    """
+    l = linea.strip().lstrip("*-•").strip()
+    if not l or l.upper() in ("NADA", "NOTHING", "N/A", "NA"):
+        return True
+    bajo = l.lower()
+    return (bajo.startswith(_BIO_RUIDO)
+            or l.endswith("?")                    # se pregunta a sí mismo
+            or l.startswith('"')                  # cita el prompt o la bio
+            # "no encontré nada" embebido en una oración: era la forma exacta
+            # que burló el guardrail viejo, que comparaba por igualdad.
+            or re.search(r"\b(nada|nothing)\b", bajo) is not None
+            # Arranca en minúscula: un dato es "Vive en Rosario", no el pedazo
+            # del medio de un razonamiento ("is appropriate. The bio is…").
+            or l[0].islower())
+
+
+def _sanear_bio_interp(crudo: str) -> str:
+    """Deja solo bullets plausibles, o "" si no hay nada que guardar."""
+    crudo = (crudo or "").strip()
+    if not crudo:
+        return ""
+    if len(crudo) > _BIO_DESCARTE_MAX:
+        log.warning("bio_interp descartada: %d chars (el modelo se fue de tema)", len(crudo))
+        return ""
+    lineas = [l.strip().lstrip("*-•").strip() for l in crudo.splitlines()]
+    utiles = [l for l in lineas if not _es_razonamiento(l)][:BIO_INTERP_MAX_LINEAS]
+    return "\n".join(utiles)[:BIO_INTERP_MAX_CHARS].strip()
+
+
 class LoadContextNode:
     """
     Node 2: Ensure the user exists in the DB. For first-time users, fetch the
@@ -5021,8 +5381,8 @@ class LoadContextNode:
             log.info("handle cambiado: @%s → @%s (mismo DID) — migrados %d facts, %d events",
                      old["handle"], handle, moved["facts"], moved["events"])
         bio = profile.description or ""
-        interp = self._extract_from_bio(handle, bio) if bio else ""
-        bio_interp = None if (not interp or interp.upper() in ("NADA", "NOTHING")) else interp
+        interp = _sanear_bio_interp(self._extract_from_bio(handle, bio) if bio else "")
+        bio_interp = interp or None
         self.conn.execute(
             "UPDATE users SET did = ?, display_name = ?, bio_raw = ?, bio_interp = ?, "
             "updated_at = datetime('now') WHERE handle = ?",
@@ -5153,6 +5513,7 @@ class GenerateReplyNode:
 
         # Fase de tools scope REPLY (toggleable por config; hoy: summarize_feed).
         # Si el LLM decide llamar una tool, su resultado se inyecta al contexto.
+        tool_image: str | None = None
         if self.registry is not None:
             # Filtrado por grupos de usuario (USER_GROUPS): las tools restringidas
             # ni se le ofrecen al LLM si el autor no pertenece.
@@ -5178,6 +5539,17 @@ class GenerateReplyNode:
                                                         handle=handle)
                         log.info("GenerateReplyNode: resultado de %s: %r", cname, (outcome.text or "")[:200])
                         parts.append(f"\n---\nResultado de {cname}: {outcome.text}")
+                        # La imagen que trajo la tool ES la del reply. Sin esto se
+                        # descartaba y el reply solo podía adjuntar lo que saliera
+                        # de `image_search_query` — una SEGUNDA búsqueda, ciega a
+                        # las fuentes en vivo. El bot buscaba bien, perdía la
+                        # imagen en el camino y terminaba escribiendo un link
+                        # inventado para simular el adjunto.
+                        if outcome.image_path and not tool_image:
+                            tool_image = outcome.image_path
+                            parts.append(
+                                "(esa imagen YA queda adjunta al post: no escribas su "
+                                "link ni la describas entre corchetes)")
                 except Exception as e:
                     log.warning("GenerateReplyNode: fase de tools falló: %s", e)
 
@@ -5196,7 +5568,9 @@ class GenerateReplyNode:
         return {
             "reply_text": result.text,
             "should_update_profile": result.should_update_profile,
-            "image_path": self._resolve_image(result.image_search_query),
+            # Manda la tool: ya resolvió el pedido concreto y puede haber traído
+            # algo de una fuente en vivo, que `image_search_query` no sabe mirar.
+            "image_path": tool_image or self._resolve_image(result.image_search_query),
         }
 
     def _resolve_image(self, search_query: str | None) -> str | None:
@@ -5863,8 +6237,17 @@ def run(mode: str) -> None:
                      interval_hours=6, enabled=True),  # inward: decide el humor del día (solo modo auto)
         PeriodicTask("bio", lambda: run_bio_pass(bsky, router, db),
                      interval_hours=6, enabled=False),  # outward: bio del perfil según prompts/bio.md
+        # memory_compact: inward. El intervalo es solo cada cuánto MIRA; el gate
+        # real es el tamaño de la memoria (se paga en cada prompt, no con el paso
+        # del tiempo), así que casi siempre sale sin hacer nada y sin costo.
+        PeriodicTask("memory_compact",
+                     lambda: (run_memory_compact_pass(router, db),
+                              run_interactions_compact_pass(router, db)),
+                     interval_hours=12, enabled=True),
     ]
     apply_tasks_config(tasks, TASKS_CONFIG)
+    global _RUNTIME_ROUTER
+    _RUNTIME_ROUTER = router
     _RUNTIME_TASKS[:] = tasks  # T30: las tools de config del admin mutan esta lista en vivo
     log.info("Tareas: %s", ", ".join(
         f"{t.name}{'(off)' if not t.enabled else ''}" for t in tasks))

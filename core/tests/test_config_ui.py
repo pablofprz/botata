@@ -100,6 +100,78 @@ def test_sources_invalidas():
         [{"type": "membrilla", "sources": ["x"]}]))
 
 
+# ─── Conector declarativo `api`: config, prueba y credenciales ───────────────
+_API_OK = {"type": "api", "category": "pokemon", "sources": ["pikachu"],
+           "url": "https://pokeapi.co/api/v2/pokemon/{source}",
+           "map": {"image_url": "sprites.front_default"}}
+
+
+def test_sources_api_valida():
+    assert cu.validate_sources([_API_OK]) == []
+
+
+def test_sources_api_invalida():
+    assert any("falta la URL" in e for e in
+               cu.validate_sources([{**_API_OK, "url": ""}]))
+    assert any("http" in e for e in
+               cu.validate_sources([{**_API_OK, "url": "file:///etc/passwd"}]))
+    assert any("imagen" in e for e in cu.validate_sources([{**_API_OK, "map": {}}]))
+
+
+def test_sources_api_no_exige_la_credencial_para_guardar():
+    # Se puede describir la fuente hoy y cargar la clave en el .env después.
+    assert cu.validate_sources(
+        [{**_API_OK, "url": "https://x/y?k={env:CLAVE_QUE_NO_EXISTE}"}]) == []
+
+
+def test_probar_fuente_api_devuelve_el_error_explicado(store, monkeypatch):
+    def _boom(source, limit=15, entry=None):
+        raise cu.connectorsmod.ApiSourceError("no encontré 'results' en la respuesta")
+    monkeypatch.setattr(cu.connectorsmod, "api_items", _boom)
+    r = store.test_source({"entry": _API_OK})
+    assert r["ok"] is False and "results" in r["error"]
+
+
+def test_probar_fuente_api_ok_devuelve_una_muestra(store, monkeypatch):
+    monkeypatch.setattr(cu.connectorsmod, "api_items",
+                        lambda s, l=15, e=None: [{"image_url": "https://x/a.png",
+                                                  "title": "pikachu", "url": "",
+                                                  "source": s}])
+    r = store.test_source({"entry": _API_OK})
+    assert r["ok"] and r["count"] == 1 and r["sample"]["title"] == "pikachu"
+    assert r["source"] == "pikachu"          # usó la primera fuente de la entrada
+
+
+def test_probar_fuente_sin_fuentes_avisa(store):
+    assert store.test_source({"entry": {**_API_OK, "sources": []}})["ok"] is False
+
+
+def test_probar_fuente_avisa_que_falta_la_credencial(store, monkeypatch):
+    monkeypatch.delenv("CLAVE_INEXISTENTE", raising=False)
+    r = store.test_source({"entry": {
+        **_API_OK, "url": "https://x/y?k={env:CLAVE_INEXISTENTE}"}})
+    assert r["ok"] is False and r["missing_env"] == ["CLAVE_INEXISTENTE"]
+
+
+def test_credencial_pedida_por_una_fuente_se_puede_guardar(store):
+    """Sin esto el conector declarativo no serviría para ninguna API con token."""
+    store.write_sources([{**_API_OK, "url": "https://x/y?k={env:POKE_KEY}"}])
+    assert "POKE_KEY" in store.read_all()["env_keys"]
+    assert store.update_env({"POKE_KEY": "abc123"}) == []
+    assert store.read_all()["env_keys"]["POKE_KEY"] is True
+
+
+def test_no_se_pueden_escribir_claves_arbitrarias_ni_reservadas(store):
+    # No referenciada por ninguna fuente: la UI no la ofrece ni la escribe.
+    store.update_env({"CUALQUIER_COSA": "x"})
+    assert "CUALQUIER_COSA" not in store.env_path.read_text(encoding="utf-8")
+    # Referenciada, pero gobierna el proceso: tampoco.
+    store.write_sources([{**_API_OK, "url": "https://x/y?k={env:PATH}"}])
+    assert "PATH" not in store.read_all()["env_keys"]
+    store.update_env({"PATH": "/tmp/malo"})
+    assert "PATH=" not in store.env_path.read_text(encoding="utf-8")
+
+
 # ─── Store ───────────────────────────────────────────────────────────────────
 def test_write_settings_atomico_con_backup(store):
     nuevo = json.loads(json.dumps(_SETTINGS))

@@ -395,8 +395,8 @@
       <code>search_videos</code>) o
       <code>spotify</code> (playlists → <code>get_playlist_track</code>) o
       <code>youtube</code> (canales y listas → <code>share_video</code>), o los conectores
-      <b>en vivo</b> <code>pinterest</code> y <code>tumblr</code> (tableros y blogs →
-      <code>get_latest_media</code>).
+      <b>en vivo</b> <code>pinterest</code>, <code>tumblr</code> y <code>api</code> (tableros,
+      blogs y cualquier API JSON → <code>get_latest_media</code>).
       Podés tener <b>varias playlists</b> (rock, cumbia), varios grupos de cuentas por tema y
       varios diarios por sección: cuando alguien pide "un meme de fútbol" o la rutina pide
       música de rock, el bot resuelve el tema contra este registro en vez de adivinar.
@@ -417,6 +417,11 @@
       tablero, sin credenciales — podés escribir <code>usuario/tablero</code> o pegar la URL
       tal cual la copiás del navegador; Tumblr necesita <code>TUMBLR_API_KEY</code> en
       Credenciales y acepta <code>blog</code> o <code>blog#etiqueta</code>).
+      <br>🧩 <b><code>api</code> es el conector "hágalo usted mismo"</b>: sirve para cualquier
+      API que devuelva JSON con imágenes, sin escribir una línea de código. Elegís el tipo
+      <b>API (JSON)</b>, pegás la URL, decís de qué campo sale la imagen y apretás
+      <b>probar ahora</b> — si algo está mal, te dice qué. Si la API pide una clave, guardala
+      en 🔑 Credenciales y referenciala como <code>{env:MI_API_KEY}</code>.
       Ojo con la diferencia: lo que traen <b>no está indexado</b> —no lo describió el modelo de
       visión— así que sirve para "traeme lo nuevo de acá", no para "buscame un meme de fútbol".
       Para eso está 🍐 Membrilla, que indexa y permite buscar por significado. Las dos cosas
@@ -771,11 +776,19 @@ function renderData() {
       <div style="max-width:110px"><button onclick="addPref()">+ agregar</button></div></div>`;
 
   const mem = DATA.memory ?? [];
+  const memChars = mem.reduce((n, r) => n + (r.text ?? "").length, 0);
   $("c-memory").innerHTML = `<table>${mem.map(r =>
     `<tr><td class="hint" style="white-space:nowrap">${esc((r.created_at ?? "").slice(0, 10))}</td>
+     <td><button class="ghost" title="${r.pinned ? "fijada: la compactación no la toca" : "fijar (protegerla de la compactación)"}"
+          style="padding:2px 6px;opacity:${r.pinned ? 1 : .35}"
+          onclick="pinMem(${r.id}, ${r.pinned ? "false" : "true"})">📌</button></td>
      <td>${esc(r.text)}</td><td class="hint">${esc(r.source ?? "")}</td>
      <td><button class="danger" onclick="delData('/api/memory',${r.id})">borrar</button></td></tr>`).join("")
     || "<tr><td class='hint'>memoria vacía</td></tr>"}</table>
+    <p class="hint">Esta memoria entra <b>entera</b> en cada respuesta del bot:
+      hoy son <b>${memChars} caracteres</b> (~${Math.round(memChars / 4)} tokens) en
+      cada llamada. Cuando pasa el tope se compacta sola — 📌 protege una entrada
+      de ese pase. Ver ⚠️ Avanzado.</p>
     <div class="row" style="margin-top:10px">
       <div><label>nueva entrada<input id="mem-text" type="text" placeholder="directiva o dato que el bot debe recordar siempre"></label></div>
       <div style="max-width:110px"><button onclick="addMem()">+ agregar</button></div></div>`;
@@ -948,6 +961,8 @@ function addMem() {
   if (!text) return toast("falta el texto", false);
   dataAction("/api/memory", {action: "add", text});
 }
+// 📌 protege una entrada del pase de compactación (T48)
+function pinMem(id, pinned) { dataAction("/api/memory", {action: "pin", id, pinned}); }
 function addEvent() {
   dataAction("/api/events", {action: "add", title: $("ev-title").value.trim(),
     event_at: $("ev-at").value.trim(), kind: $("ev-kind").value,
@@ -1423,6 +1438,70 @@ function addSource(kind) {
   SOURCES.push({type: kind, name: "", category: "", sources: [], description: "", enabled: true});
   markDirty(); render();
 }
+// ─── Conector declarativo `api`: describir una API JSON sin escribir código ──
+function headersText(entry) {
+  return Object.entries(entry.headers ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n");
+}
+function setApiHeaders(i, raw) {
+  const h = {};
+  raw.split("\n").forEach(linea => {
+    const corte = linea.indexOf(":");
+    if (corte > 0) h[linea.slice(0, corte).trim()] = linea.slice(corte + 1).trim();
+  });
+  SOURCES[i].headers = h;
+  markDirty();
+}
+async function testSource(i) {
+  const box = $(`api-test-${i}`);
+  box.innerHTML = "probando…";
+  let d;
+  try {
+    d = await api("/api/sources/test", {entry: SOURCES[i]});
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">⚠️ ${esc(String(e.message || e))}</span>`;
+    return;
+  }
+  if (!d.ok) {
+    const falta = (d.missing_env ?? []).length
+      ? `<br>cargá en 🔑 credenciales: ${d.missing_env.map(v => `<code>${esc(v)}</code>`).join(", ")}`
+      : "";
+    box.innerHTML = `<span style="color:var(--err)">⚠️ ${esc(d.error || "no anduvo")}</span>${falta}`;
+    return;
+  }
+  const s = d.sample ?? {};
+  box.innerHTML = `<span style="color:var(--ok)">✅ anduvo</span> — ${d.count} item(s)
+    de <code>${esc(d.source)}</code>
+    <div style="display:flex;gap:10px;margin-top:6px;align-items:flex-start">
+      <img src="${esc(s.image_url)}" alt="" style="max-width:110px;border-radius:6px">
+      <div><b>${esc(s.title || "(sin título)")}</b><br>
+        <code style="word-break:break-all">${esc(s.image_url)}</code></div>
+    </div>`;
+}
+function apiFields(entry, i) {
+  const mapa = (entry.map ??= {});
+  return `<div class="card" style="margin-top:8px">
+    <p class="hint" style="margin-top:0">Describí la API una vez y el bot la usa como
+      cualquier otra fuente. En la URL podés poner <code>{source}</code> (cada fuente de
+      arriba, una por una), <code>{limit}</code> y <code>{env:MI_API_KEY}</code> para una
+      credencial guardada en 🔑 credenciales. Los campos se escriben con puntos:
+      <code>sprites.other.official-artwork.front_default</code>.</p>
+    ${textInput(entry, "url", "URL de la API")}
+    <div class="row" style="margin-top:6px">
+      <div>${textInput(entry, "items_path", "dónde está la lista (vacío = la respuesta ES un solo item)")}</div>
+      <div>${textInput(mapa, "image_url", "campo de la imagen (obligatorio)")}</div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div>${textInput(mapa, "title", "campo del título (opcional)")}</div>
+      <div>${textInput(mapa, "url", "campo del link al original (opcional)")}</div>
+    </div>
+    <label>headers (opcional, uno por línea: <code>Authorization: Bearer {env:MI_TOKEN}</code>)
+      <textarea style="min-height:52px" oninput="setApiHeaders(${i}, this.value)"
+        >${esc(headersText(entry))}</textarea></label>
+    <div style="margin-top:8px;display:flex;gap:10px;align-items:flex-start">
+      <button class="ghost" onclick="testSource(${i})" style="flex:none">probar ahora</button>
+      <span id="api-test-${i}" class="hint" style="margin:0"></span></div>
+  </div>`;
+}
 function renderSourceButtons() {
   $("c-source-buttons").innerHTML = CONNECTORS.filter(c => c.enabled).map(c =>
     `<button class="ghost cbtn" onclick="addSource('${esc(c.id)}')" title="${esc(c.help)}">
@@ -1460,6 +1539,7 @@ function renderSources() {
           ${libres.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}
         </select></div>` : ""}
     </div>
+    ${kind === "api" ? apiFields(entry, i) : ""}
     ${textInput(entry, "description", "descripción (el bot la usa como contexto; también sirve para matchear el tema)")}
     <div style="margin-top:8px">${check(entry, "enabled", "activa", true)}
       <span class="hint">la usa <code>${esc(c.tool || "")}</code></span>
@@ -1564,10 +1644,35 @@ function renderRoutines() {
 
 // ─── Flags avanzados sueltos ─────────────────────────────────────────────
 function renderAdvFlags() {
+  const mc = (S.MEMORY_COMPACT ??= {});
   $("c-adv-flags").innerHTML =
     check(S, "READ_THREAD_MEDIA",
           "leer la media de los hilos (vision: describe imágenes/GIFs/videos del contexto de cada mención — cuesta 1 llamada al modelo de imagen por pieza)",
-          true);
+          true)
+    + `<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
+       <p class="hint" style="margin-top:0"><b>🧠 Compactar memoria.</b> La memoria general
+       entra <b>entera</b> en cada respuesta, así que su largo es contexto gastado en todas
+       las conversaciones. Cuando pasa el tope, el bot usa su modelo de razonamiento para
+       fusionar lo repetido, resolver contradicciones (gana lo más reciente) y descartar lo
+       efímero. <b>Nada se borra</b>: lo compactado queda archivado y se puede restaurar.
+       Las entradas 📌 no se tocan. El criterio se edita abajo en
+       <code>compact_memory.md</code>.</p>`
+    + check(mc, "enabled", "compactar la memoria general automáticamente", true)
+    + `<div class="row"><div style="max-width:220px">`
+    + textInput(mc, "max_chars", "compactar al pasar los … caracteres", "number")
+    + `</div></div>
+       <p class="hint">🗣️ <b>Notas de conversación.</b> Cada mención que el bot contesta deja
+       una nota, así que un rato de ida y vuelta deja varias casi iguales y tapan las
+       <b>5 últimas</b> que el bot ve de esa persona — que era el problema real: no ocupaban
+       contexto de más, ocupaban la ventana. Se comprimen a una nota por día, dejando
+       intacto el día en curso. Usa el modelo liviano (son muchas llamadas) y va de a pocos
+       grupos por pase para no frenar al bot.</p>`
+    + check(mc, "interactions", "comprimir las notas de conversación por día", true)
+    + `<div class="row"><div style="max-width:220px">`
+    + textInput(mc, "min_por_dia", "comprimir desde … notas en el día", "number")
+    + `</div><div style="max-width:220px">`
+    + textInput(mc, "max_grupos", "grupos por pase (costo/tiempo)", "number")
+    + `</div></div>`;
 }
 
 // ─── Editor compartido de archivos de comportamiento (skills y rutinas) ──

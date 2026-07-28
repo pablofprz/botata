@@ -48,6 +48,39 @@ def test_no_toca_corchetes_legitimos():
         assert strip_fake_media(texto) == texto
 
 
+# ─── la segunda piel del mismo bug: el link markdown (2026-07-28) ───────────
+def test_el_caso_del_mapache_bis():
+    """Caso real: fingió el adjunto con un link markdown y una URL de CDN
+    INVENTADA (el DID no era ni el suyo). La regex de corchetes no lo cazaba
+    porque la etiqueta no empieza con una palabra de media."""
+    crudo = ("obvio polci, viste cuando uno pide las cosas bien\n\n"
+             "[📸 mapache para el admin](https://cdn.bsky.app/img/feed_thumbnail/"
+             "plain/did:plc:jq2qowg4gycxkxs43wtanrtd/bafkreidql@jpeg)")
+    assert strip_fake_media(crudo) == "obvio polci, viste cuando uno pide las cosas bien"
+
+
+@pytest.mark.parametrize("crudo", [
+    "mirá esto [📸 un mapache](https://cdn.bsky.app/img/x)",
+    "mirá esto [🖼️ arte](https://x/y.png)",
+    "mirá esto ![](https://x/y.png)",
+    "mirá esto [imagen del gato](https://x/y.png)",
+    "mirá esto [foto](https://x/y.png)",
+])
+def test_saca_el_adjunto_fingido_en_markdown(crudo):
+    assert strip_fake_media(crudo) == "mirá esto"
+
+
+def test_un_link_de_verdad_sobrevive_pero_sin_markdown():
+    """Compartir un link SÍ es legítimo (Spotify, noticias); el markdown no —
+    el SOUL dice 'sin listas, markdown o tablas'. Se desenvuelve a la URL pelada."""
+    assert strip_fake_media("escuchá [este tema](https://open.spotify.com/track/1)") == \
+        "escuchá https://open.spotify.com/track/1"
+
+
+def test_link_markdown_sin_url_deja_el_texto():
+    assert strip_fake_media("mirá [esta nota](no-es-una-url)") == "mirá esta nota"
+
+
 def test_limpia_los_espacios_que_deja():
     assert strip_fake_media("hola [imagen: x] mundo") == "hola mundo"
     assert strip_fake_media("[imagen: x]") == ""

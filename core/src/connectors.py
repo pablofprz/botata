@@ -20,7 +20,13 @@ corresponda. Nada más: la UI, el validador y los toggles salen de acá.
 """
 from __future__ import annotations
 
+import inspect
+import json
 import logging
+import os
+import re
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, fields, replace
 from typing import Callable
 
@@ -85,6 +91,13 @@ _BUILTIN: tuple[Connector, ...] = (
         needs_env=("TUMBLR_API_KEY",),
         live=True,
     ),
+    Connector(
+        id="api", label="API (JSON)", color="#0ea5e9", initial="{}",
+        placeholder="pikachu, bulbasaur — lo que cambia en la URL",
+        tool="get_latest_media",
+        help="Cualquier API que devuelva JSON. Se configura acá, sin escribir código.",
+        live=True,
+    ),
 )
 
 # Los built-in más los que se sumen en runtime: plugins de la instancia
@@ -135,6 +148,185 @@ def unregister(cid: str) -> bool:
 def register_fetcher(cid: str, fn: Callable) -> None:
     """botata registra acá la función que trae contenido de ese conector."""
     _FETCHERS[cid] = fn
+
+
+def _accepts_entry(fn: Callable) -> bool:
+    """¿El fetcher quiere la ENTRADA del registro además del nombre de la fuente?
+
+    Los conectores clásicos (Pinterest, Tumblr, plugins) se bastan con el string
+    de la fuente. Los declarativos necesitan la config de la entrada — url,
+    mapeo—, que vive en `sources.json`. Se distingue por la firma para no romper
+    los fetchers ya escritos ni obligar a los plugins a un parámetro que no usan.
+    """
+    try:
+        return "entry" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def fetch_items(cid: str, source: str, limit: int = 15,
+                entry: dict | None = None) -> list[dict]:
+    """Trae items de una fuente. Único camino: nunca llamar al fetcher a mano.
+
+    Devuelve [] ante cualquier falla — traer contenido es best-effort y una
+    fuente rota no puede tumbar un pase del bot."""
+    fn = _FETCHERS.get(cid)
+    if fn is None:
+        return []
+    try:
+        if _accepts_entry(fn):
+            return fn(source, limit=limit, entry=entry) or []
+        return fn(source, limit=limit) or []
+    except Exception as e:
+        log.warning("conector %s: falló al traer '%s': %s", cid, source, e)
+        return []
+
+
+# ─── El conector declarativo `api`: una API JSON descripta por config ────────
+#
+# Vive ACÁ y no en botata a propósito, contra la regla general del módulo: solo
+# usa stdlib, así la UI de configuración puede ejecutarlo sin levantar el motor
+# y ofrecer un botón de "probar". Sin esa prueba, alguien que no programa no
+# tiene forma de saber por qué su fuente no trae nada.
+_UA = "Mozilla/5.0 (compatible; botata/1.0)"
+_MAX_BYTES = 2_000_000
+# Lo único interpolable en la URL y los headers. Cerrado a propósito: el admin
+# describe UNA API, no arma requests arbitrarios en runtime.
+_TPL_RE = re.compile(r"\{(source|limit|env:[A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+class ApiSourceError(RuntimeError):
+    """Config o respuesta inutilizable. El mensaje se le muestra tal cual al admin."""
+
+
+def dig(data, path: str):
+    """Camina un JSON con un path de puntos: `sprites.other.front_default`.
+
+    Los índices numéricos entran a las listas (`results.0.name`). None si el
+    camino no existe — que es distinto de existir valiendo null, pero para
+    elegir un campo de una API la diferencia no cambia nada.
+    """
+    if not path:
+        return data
+    cur = data
+    for parte in path.split("."):
+        if isinstance(cur, list):
+            if not parte.lstrip("-").isdigit():
+                return None
+            i = int(parte)
+            cur = cur[i] if -len(cur) <= i < len(cur) else None
+        elif isinstance(cur, dict):
+            cur = cur.get(parte)
+        else:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+
+def entry_env_vars(entry: dict) -> tuple[str, ...]:
+    """Credenciales que pide una entrada `api` (para avisar si faltan en el .env)."""
+    crudo = " ".join([
+        str((entry or {}).get("url") or ""),
+        *(f"{k}={v}" for k, v in ((entry or {}).get("headers") or {}).items()),
+    ])
+    return tuple(dict.fromkeys(
+        m.group(1)[4:] for m in _TPL_RE.finditer(crudo) if m.group(1).startswith("env:")))
+
+
+def _resolve_tpl(tpl: str, source: str, limit: int, quote: bool) -> str:
+    faltan: list[str] = []
+
+    def _sub(m: re.Match) -> str:
+        token = m.group(1)
+        if token == "limit":
+            return str(limit)
+        val = str(source) if token == "source" else (os.environ.get(token[4:]) or "")
+        if token.startswith("env:") and not val:
+            faltan.append(token[4:])
+            return ""
+        # En la URL va escapado: la fuente la escribe un humano en un campo de
+        # texto y un espacio o un & romperían el request.
+        return urllib.parse.quote(val, safe="") if quote else val
+
+    out = _TPL_RE.sub(_sub, tpl or "")
+    if faltan:
+        raise ApiSourceError("falta en el .env: " + ", ".join(dict.fromkeys(faltan)))
+    return out
+
+
+def api_items(source: str, limit: int = 15, entry: dict | None = None) -> list[dict]:
+    """Trae items de una API JSON descripta en la entrada del registro.
+
+    La entrada declara:
+        url        — endpoint, con {source} / {limit} / {env:MI_API_KEY}
+        items_path — dónde está la lista en la respuesta ("" = la respuesta ES el item)
+        map        — de qué campo sale cada cosa: {image_url, url, title}
+        headers    — opcional, mismos reemplazos (para APIs con token)
+
+    Levanta ApiSourceError con un mensaje explicable: lo lee el admin en la UI.
+    """
+    entry = entry or {}
+    plantilla = str(entry.get("url") or "").strip()
+    if not plantilla:
+        raise ApiSourceError("la entrada no tiene URL")
+    url = _resolve_tpl(plantilla, source, limit, quote=True)
+    if not url.startswith(("http://", "https://")):
+        raise ApiSourceError("la URL tiene que empezar con http:// o https://")
+    headers = {"User-Agent": _UA, "Accept": "application/json"}
+    for k, v in (entry.get("headers") or {}).items():
+        headers[str(k)] = _resolve_tpl(str(v), source, limit, quote=False)
+    try:
+        with urllib.request.urlopen(
+                urllib.request.Request(url, headers=headers), timeout=15) as resp:
+            crudo = resp.read(_MAX_BYTES)
+    except Exception as e:
+        raise ApiSourceError(f"la API no respondió: {e}") from e
+    try:
+        data = json.loads(crudo.decode("utf-8", "replace"))
+    except Exception as e:
+        raise ApiSourceError(f"la respuesta no es JSON: {e}") from e
+
+    items_path = str(entry.get("items_path") or "").strip()
+    nodo = dig(data, items_path)
+    if nodo is None:
+        raise ApiSourceError(
+            f"no encontré '{items_path}' en la respuesta" if items_path
+            else "la respuesta vino vacía")
+    crudos = nodo if isinstance(nodo, list) else [nodo]
+
+    mapa = dict(entry.get("map") or {})
+    img_path = str(mapa.get("image_url") or "").strip()
+    if not img_path:
+        raise ApiSourceError("falta decir de qué campo sale la imagen")
+    out: list[dict] = []
+    for it in crudos:
+        img = dig(it, img_path)
+        if not isinstance(img, str) or not img.startswith("http"):
+            continue      # item sin imagen usable: se saltea, no es un error
+        titulo = dig(it, str(mapa.get("title") or "").strip()) if mapa.get("title") else ""
+        link = dig(it, str(mapa.get("url") or "").strip()) if mapa.get("url") else ""
+        out.append({"image_url": img,
+                    "url": link if isinstance(link, str) else "",
+                    "title": ("" if titulo is None else str(titulo))[:200],
+                    "source": source})
+        if len(out) >= max(1, int(limit)):
+            break
+    if not out:
+        raise ApiSourceError(
+            f"traje {len(crudos)} resultado(s) pero ninguno tiene una imagen en '{img_path}'")
+    return out
+
+
+def _api_fetch(source: str, limit: int = 15, entry: dict | None = None) -> list[dict]:
+    try:
+        return api_items(source, limit, entry)
+    except ApiSourceError as e:
+        log.warning("api: fuente '%s': %s", source, e)
+        return []
+
+
+_FETCHERS["api"] = _api_fetch
 
 
 # ─── Extensión 1: plugins de la instancia (connectors/*.py) ─────────────────

@@ -127,7 +127,9 @@ def test_tool_trae_de_la_fuente_del_tema(conn, registro, monkeypatch):
 
 def test_tool_tema_desconocido_sugiere(conn, registro):
     out = b._tool_get_latest_media({"topic": "cocina"}, ToolContext(state={}, conn=conn))
-    assert "no tengo tableros ni blogs para 'cocina'" in out.text
+    # El texto habla de "fuentes en vivo" y no de Pinterest/Tumblr: desde el
+    # conector `api` y los plugins, la lista de en-vivo ya no es fija.
+    assert "no tengo fuentes en vivo para 'cocina'" in out.text
     assert "ilustracion" in out.text and "gatos" in out.text
     assert out.image_path is None
 
@@ -146,7 +148,7 @@ def test_tool_evita_repetir_lo_ya_posteado(conn, registro, monkeypatch):
 def test_tool_sin_fuentes_configuradas(conn, monkeypatch, tmp_path):
     monkeypatch.setattr(b, "SOURCES", [])
     out = b._tool_get_latest_media({}, ToolContext(state={}, conn=conn))
-    assert "no hay fuentes de Pinterest ni Tumblr" in out.text
+    assert "no hay fuentes en vivo configuradas" in out.text
 
 
 def test_disponible_en_replies():
@@ -251,23 +253,33 @@ def test_tema_sin_indexar_cae_en_las_fuentes_en_vivo(conn, registro, monkeypatch
     assert out.image_path and "mapache" in out.text
 
 
-def test_un_tema_indexado_no_va_a_las_fuentes_en_vivo(conn, monkeypatch, tmp_path):
-    """Si hay contenido indexado del tema, manda el catálogo (es el que busca
-    por significado)."""
+def test_un_tema_indexado_puede_ir_igual_a_las_fuentes_en_vivo(conn, monkeypatch, tmp_path):
+    """Ya NO manda el catálogo por tener algo indexado.
+
+    Antes (2026-07-27) el catálogo tenía prioridad fija. El admin la derogó
+    (2026-07-28): *"search_images debería poder buscar de Membrilla pero también
+    de las fuentes asociadas sin ninguna prioridad"*. Con los dos sirviendo,
+    quién gana lo decide `source_weight` — acá se fuerza la moneda para que el
+    test sea determinista."""
     monkeypatch.setattr(b, "SOURCES", [
         {"type": "membrilla", "category": "memes", "sources": ["cuenta"], "enabled": True},
         {"type": "pinterest", "category": "memes", "sources": ["u/b"], "enabled": True}])
-    monkeypatch.setattr(b, "_traer_de_fuentes_en_vivo",
-                        lambda *a, **k: pytest.fail("no debía ir en vivo"))
     monkeypatch.setattr(b.dbmod, "prefer_fresh_media", lambda rows: rows)
     monkeypatch.setattr(b.dbmod, "hybrid_search_image_catalog",
                         lambda *a, **k: [{"id": 1, "file_path": "scrape/x.jpg",
                                           "description": "un meme", "category": "meme"}])
     monkeypatch.setattr(b, "_postable_media_path", lambda p: "/abs/" + p)
     monkeypatch.setattr(b.dbmod, "mark_image_used", lambda *a: None)
-    out = b._tool_search_images({"query": "meme", "topic": "memes"},
-                                ToolContext(state={}, conn=conn))
-    assert out.image_path == "/abs/scrape/x.jpg"
+    monkeypatch.setattr(b, "_traer_de_fuentes_en_vivo",
+                        lambda *a, **k: b.ToolResult(text="de u/b: pin", image_path="/abs/pin.jpg"))
+
+    monkeypatch.setattr(b.random, "random", lambda: 0.99)      # cae del lado del catálogo
+    assert b._tool_search_images({"query": "meme", "topic": "memes"},
+                                 ToolContext(state={}, conn=conn)).image_path == "/abs/scrape/x.jpg"
+
+    monkeypatch.setattr(b.random, "random", lambda: 0.0)       # cae del lado de la fuente
+    assert b._tool_search_images({"query": "meme", "topic": "memes"},
+                                 ToolContext(state={}, conn=conn)).image_path == "/abs/pin.jpg"
 
 
 def test_tema_que_no_existe_en_ningun_lado_avisa(conn, registro):

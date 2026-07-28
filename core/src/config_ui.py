@@ -54,6 +54,11 @@ ENV_KEYS = [
     "IG_USERNAME", "IG_PASSWORD", "GOOGLE_OAUTH_ID", "GOOGLE_OAUTH_SECRET",
 ]
 
+# Nunca escribibles desde la UI, aunque una fuente las referencie: gobiernan el
+# proceso, no una credencial de API.
+_ENV_RESERVADAS = {"PATH", "PYTHONPATH", "BOTATA_INSTANCE", "HOME", "USERPROFILE",
+                   "LD_PRELOAD", "PYTHONSTARTUP"}
+
 _CHANNELS = {"bluesky", "mastodon", "discord"}
 # `local` = timeline local (Mastodon); `channel` = mensajes de un canal (Discord)
 _FEED_TYPES = {"list", "feed", "following", "local", "channel"}
@@ -296,6 +301,17 @@ def validate_sources(sources: list) -> list[str]:
             for s in srcs:
                 if not s.startswith("http") and s.count("/") != 1:
                     errs.append(f"{tag}: '{s}' tiene que ser 'usuario/tablero' o la URL del tablero")
+        if kind == "api":
+            # El conector declarativo: sin URL ni campo de imagen no hay nada que
+            # traer. Las credenciales que falten NO son error de validación — se
+            # pueden cargar después en el .env; el botón de probar las avisa.
+            url = str(entry.get("url") or "").strip()
+            if not url:
+                errs.append(f"{tag}: falta la URL de la API")
+            elif not url.startswith(("http://", "https://")):
+                errs.append(f"{tag}: la URL tiene que empezar con http:// o https://")
+            if not str((entry.get("map") or {}).get("image_url") or "").strip():
+                errs.append(f"{tag}: falta indicar de qué campo de la respuesta sale la imagen")
         if not (entry.get("category") or "").strip() and not (entry.get("name") or "").strip():
             errs.append(f"{tag}: poné al menos un tema (category) o un nombre")
     return errs
@@ -863,12 +879,18 @@ class ConfigStore:
                 text = (body.get("text") or "").strip()
                 if not text:
                     return ["falta el texto"]
-                dbmod.add_bot_memory(conn, text, source="admin")
+                # Lo que carga el admin a mano nace 📌: lo escribió una persona
+                # con intención, no lo dedujo el bot de una conversación.
+                dbmod.add_bot_memory(conn, text, source="admin", pinned=True)
             elif body.get("action") == "delete":
                 if not dbmod.delete_bot_memory(conn, int(body.get("id", 0))):
                     return ["id inexistente"]
+            elif body.get("action") == "pin":
+                if not dbmod.set_bot_memory_pinned(
+                        conn, int(body.get("id", 0)), bool(body.get("pinned"))):
+                    return ["id inexistente"]
             else:
-                return ["action inválida (add|delete)"]
+                return ["action inválida (add|delete|pin)"]
             return []
         finally:
             conn.close()
@@ -1104,7 +1126,27 @@ class ConfigStore:
                     key = line.split("=", 1)[0].strip()
                     if line.split("=", 1)[1].strip():
                         present.add(key)
-        return {k: (k in present) for k in ENV_KEYS}
+        return {k: (k in present) for k in [*ENV_KEYS, *self._env_keys_de_fuentes()]}
+
+    def _env_keys_de_fuentes(self) -> list[str]:
+        """Credenciales que pidió el admin al describir una fuente `api`.
+
+        La whitelist fija no puede conocer de antemano el nombre de la clave de
+        una API que todavía no existe, y sin esto el conector declarativo no
+        serviría para ninguna API con token: habría que editar el `.env` a mano,
+        que es justo lo que este conector viene a evitar. El permiso queda
+        acotado: solo se pueden escribir claves **referenciadas desde
+        sources.json**, nunca un nombre arbitrario venido del navegador."""
+        out: list[str] = []
+        try:
+            entries = json.loads(self.sources_path.read_text(encoding="utf-8"))
+        except Exception:
+            return out
+        for e in entries if isinstance(entries, list) else []:
+            if isinstance(e, dict) and (e.get("type") or "").strip().lower() == "api":
+                out += [v for v in connectorsmod.entry_env_vars(e)
+                        if v not in ENV_KEYS and v not in _ENV_RESERVADAS and v not in out]
+        return out
 
     def _skills_info(self) -> list[dict]:
         out = []
@@ -1156,9 +1198,46 @@ class ConfigStore:
                 legacy.replace(legacy.with_suffix(legacy.suffix + ".migrado"))
         return []
 
+    def test_source(self, body: dict) -> dict:
+        """Corre UNA fuente ahora y cuenta qué trajo, sin guardar nada.
+
+        Es la pieza que hace usable al conector declarativo para alguien que no
+        programa: sin esto, una URL mal escrita o un campo mal elegido se ven
+        igual que una API caída — el bot simplemente no postea y no hay dónde
+        mirar. Acá el error vuelve explicado."""
+        entry = dict(body.get("entry") or {})
+        kind = (entry.get("type") or "").strip().lower()
+        srcs = entry.get("sources")
+        if isinstance(srcs, str):
+            srcs = srcs.split(",")
+        srcs = [str(s).strip() for s in (srcs or []) if str(s).strip()]
+        entry["sources"] = srcs
+        source = str(body.get("source") or (srcs[0] if srcs else "")).strip()
+        if not source:
+            return {"ok": False, "error": "escribí al menos una fuente para probar"}
+        faltan = [v for v in connectorsmod.entry_env_vars(entry) if not os.environ.get(v)]
+        if kind == "api":
+            try:
+                items = connectorsmod.api_items(source, 5, entry)
+            except connectorsmod.ApiSourceError as e:
+                return {"ok": False, "error": str(e), "missing_env": faltan, "source": source}
+            except Exception as e:                     # bug nuestro, no del admin
+                log.exception("test_source")
+                return {"ok": False, "error": f"error inesperado: {e}", "source": source}
+        elif connectorsmod.fetcher(kind):
+            items = connectorsmod.fetch_items(kind, source, limit=5, entry=entry)
+            if not items:
+                return {"ok": False, "source": source,
+                        "error": "no trajo nada — mirá el log del bot para el detalle"}
+        else:
+            return {"ok": False, "source": source,
+                    "error": f"el conector '{kind}' solo se puede probar con el bot corriendo"}
+        return {"ok": True, "count": len(items), "sample": items[0], "source": source}
+
     def update_env(self, updates: dict[str, str]) -> list[str]:
         """Actualiza SOLO las claves con valor no vacío; preserva el resto tal cual."""
-        updates = {k: v for k, v in updates.items() if k in ENV_KEYS and (v or "").strip()}
+        permitidas = {*ENV_KEYS, *self._env_keys_de_fuentes()}
+        updates = {k: v for k, v in updates.items() if k in permitidas and (v or "").strip()}
         if not updates:
             return []
         lines = (self.env_path.read_text(encoding="utf-8").splitlines()
@@ -1411,6 +1490,9 @@ def make_handler(store: ConfigStore):
                 elif self.path == "/api/sources":
                     errs = store.write_sources(
                         body if isinstance(body, list) else body.get("sources", []))
+                elif self.path == "/api/sources/test":
+                    self._send(200, store.test_source(body))
+                    return
                 elif self.path == "/api/env":
                     errs = store.update_env(body)
                 elif self.path == "/api/skills":

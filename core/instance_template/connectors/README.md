@@ -4,6 +4,30 @@ Cada `.py` de esta carpeta suma un **conector de contenido**: una plataforma má
 de donde el bot puede sacar cosas, que después aparece en la UI (🧩 Plugins y
 🏷️ Fuentes) igual que Pinterest o Tumblr, con su logo y su switch.
 
+> ### 👀 Antes de escribir código: probá el tipo **API (JSON)**
+>
+> Si lo que querés conectar es una API que devuelve JSON con imágenes, **no hace
+> falta este archivo**. En 🏷️ Fuentes elegí el tipo **API (JSON)**, pegá la URL y
+> decí de qué campo sale la imagen. Hay un botón **probar ahora** que te dice qué
+> trajo — o qué está mal, si algo lo está.
+>
+> Ejemplo completo (PokéAPI, sin credenciales):
+>
+> | campo | valor |
+> |---|---|
+> | fuentes | `pikachu, snorlax, gengar` |
+> | URL | `https://pokeapi.co/api/v2/pokemon/{source}` |
+> | dónde está la lista | *(vacío: la respuesta ES un solo item)* |
+> | campo de la imagen | `sprites.other.official-artwork.front_default` |
+> | campo del título | `name` |
+>
+> En la URL podés usar `{source}` (cada fuente, una por una), `{limit}` y
+> `{env:MI_API_KEY}` para una clave guardada en 🔑 Credenciales. Si la API pide un
+> token por header, va en *headers*: `Authorization: Bearer {env:MI_TOKEN}`.
+>
+> Escribí un `.py` solo si eso no alcanza: OAuth, paginado, o cuando hace falta
+> una segunda llamada por item.
+
 > ⚠️ **Esto ejecuta código.** El archivo se importa dentro del proceso del bot,
 > con acceso a las credenciales y a la base. Poné acá solo código tuyo. Para
 > plugins de terceros el camino es otro: un server **MCP** (corre en su propio

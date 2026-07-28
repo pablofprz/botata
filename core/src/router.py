@@ -35,6 +35,12 @@ _DEFAULT_ROLES: dict[str, str] = {
     "feed_opinion":   "lite",
     "bio_interp":     "lite",
     "image_describe": "vision",
+    # Compactar la memoria GENERAL exige razonar sobre contradicciones y sobre
+    # qué se puede perder sin dañar al bot: es el trabajo menos apto para un
+    # modelo chico. Resumir las notas de un día de charla, en cambio, es
+    # resumir — y son muchas llamadas, así que va con el modelo liviano.
+    "memory_compact":       "reasoning",
+    "interactions_compact": "lite",
 }
 
 
@@ -81,7 +87,15 @@ class ModelRouter:
         """Cadena de fallback (targets válidos) para un rol."""
         alias = self._roles.get(role)
         if alias is None:
-            raise KeyError(f"rol sin mapear: {role!r}")
+            # Un rol nuevo del motor no puede romper las instancias que ya
+            # existen: sus `MODELS.roles` fueron escritos antes de que ese rol
+            # existiera y nadie va a editar el settings de cada instancia cada
+            # vez que se agrega una capacidad. Se cae al mapeo por defecto, y de
+            # ahí al primer alias declarado.
+            alias = _DEFAULT_ROLES.get(role) or next(iter(self._aliases), None)
+            if alias is None:
+                raise KeyError(f"rol sin mapear: {role!r}")
+            log.warning("rol %r no está en MODELS.roles — uso el alias %r", role, alias)
         targets = self._aliases.get(alias)
         if not targets:
             raise KeyError(f"alias {alias!r} (rol {role!r}) sin targets")

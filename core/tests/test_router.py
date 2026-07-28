@@ -76,14 +76,26 @@ def test_chain_skips_unknown_endpoint():
     assert [(t.endpoint, t.model) for t in chain] == [("a", "m1")]
 
 
-def test_chain_unmapped_role_raises():
+def test_chain_alias_roto_si_lanza():
+    """Un alias declarado pero sin targets válidos sigue siendo un error de config."""
     r = _make_router()
-    for role in ("nope", "r_badalias"):
-        try:
-            r._chain(role)
-        except KeyError:
-            continue
-        raise AssertionError(f"rol {role} debía lanzar KeyError")
+    try:
+        r._chain("r_badalias")
+    except KeyError:
+        return
+    raise AssertionError("un alias sin targets debía lanzar KeyError")
+
+
+def test_un_rol_nuevo_del_motor_no_rompe_una_instancia_vieja(caplog):
+    """Los `MODELS.roles` de una instancia se escribieron antes de que existiera
+    el rol que agrega una capacidad nueva, y nadie va a editar el settings de
+    cada instancia cada vez. Se cae al mapeo por defecto (o al primer alias) con
+    un warning, en vez de romper el pase entero — que fue lo que pasó al sumar
+    `memory_compact` (T48)."""
+    r = _make_router()
+    chain = r._chain("rol_que_no_existe")
+    assert chain                                   # resolvió a algo usable
+    assert "no está en MODELS.roles" in caplog.text
 
 
 def test_run_uses_first_target_on_success():

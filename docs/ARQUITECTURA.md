@@ -93,12 +93,39 @@ las fuentes que le correspondan, y un `type` que dice por dónde entra cada una:
 | `youtube` | canales (`@handle`, `UC…`) o listas (`PL…`) | tool `share_video` (parámetro `topic`) |
 | `pinterest` | tableros `usuario/tablero` (RSS oficial, sin credenciales) | tool `get_latest_media` |
 | `tumblr` | blogs (`blog` o `blog#tag`, API v2 + `TUMBLR_API_KEY`) | tool `get_latest_media` |
+| `api` | cualquier API JSON, **descripta en la propia entrada** (T46) | tool `get_latest_media` |
 
 **Indexado vs en vivo (frontera a no confundir):** `membrilla` es contenido **indexado** —
 Membrilla lo baja, `catalog.py` lo describe con visión y entra al motor de búsqueda semántica,
-así que resuelve *"un meme de fútbol"*. `pinterest`/`tumblr` son conectores **en vivo**: traen
-*lo último* de un tablero o blog en el momento, sin descripción ni embedding, y por eso sirven
-para *"traeme lo nuevo de acá"* y no para buscar por significado. Conviven a propósito.
+así que resuelve *"un meme de fútbol"*. `pinterest`/`tumblr`/`api` son conectores **en vivo**:
+van a la fuente en el momento, sin descripción ni embedding. Conviven a propósito.
+
+**Cómo se elige entre los dos (T47, 2026-07-28).** `search_images` mira los dos y **ninguno
+tiene prioridad fija**: el catálogo aporta peso *semántico* (cada imagen la describió el modelo
+de visión) y el registro de fuentes aporta peso de *admin* (si una entrada dice "mapaches", hay
+una persona afirmando qué hay ahí). Tres piezas:
+* **Umbral de relevancia** (`MEDIA_SEARCH.catalog_max_distance`, 0.47). La búsqueda híbrida
+  siempre devuelve el vecino más cercano, así que "encontró algo" no es "encontró esto". Se
+  corta por la **distancia coseno** (`vec_distance`, que `hybrid_search_image_catalog` ahora
+  expone) — el score de RRF no sirve para esto: es rank-fusion, el primero saca ~2/61 aunque
+  no tenga nada que ver. Calibrado midiendo el catálogo real: lo que está da 0.31–0.43, lo que
+  no, 0.50–0.56. Un candidato también pasa si su **descripción dice literalmente** una palabra
+  con contenido del pedido.
+* **La query se limpia antes de buscar.** El envoltorio ("una foto de un … please") no aporta
+  significado y **comprime las distancias** (la misma imagen: 0.503 con la palabra sola, 0.410
+  con la frase entera), lo que dejaba pasar cualquier cosa bajo el umbral.
+* **Relevancia antes que frescura.** `prefer_fresh_media` desempata **entre los que ya
+  pasaron** el filtro; al revés, el "mejor" era el más nuevo y no el más parecido.
+Si sirven los dos, decide `MEDIA_SEARCH.source_weight` (0.5 = moneda al aire; 0 o 1 fijan la
+prioridad sin tocar código). El LLM puede forzar con `prefer: auto|catalogo|fuentes`, que es
+preferencia y no mordaza: si el preferido no tiene nada, se usa el otro.
+
+**Regla dura del pipeline de media:** una tool que encuentra una imagen devuelve `image_path`, y
+**ese path tiene que llegar al post**. Cuando no llega, el LLM ve un resultado de tool que
+promete una imagen que nunca aparece y termina **fingiendo el adjunto** — con una anotación
+`[imagen: …]` o con un link markdown y una URL inventada. Por eso `strip_fake_media` corre en
+los seis embudos de salida y `GenerateReplyNode` propaga `outcome.image_path` avisándole al
+modelo que ya queda adjunta.
 
 Todo se resuelve **en query** (el tema se matchea contra category/name/description/fuentes),
 así editar el registro aplica en caliente sin reindexar. Permite varias playlists por tema,
@@ -236,7 +263,91 @@ nodos en hilos). El esquema completo está en `CLAUDE.md`; las tablas por respon
 | `feed_cursors` | cursores genéricos clave→timestamp (feeds, news:host, task:name) |
 | `image_catalog` (+`_vec`, `_fts`) | imágenes scrapeadas descritas por el modelo de visión |
 | `relationships` | grafo social ponderado (schema listo, aún sin poblar — ver Neo4J en CLAUDE.md) |
+| `bot_memory` | memoria general del bot — **se inyecta ENTERA en cada llamada** |
 | `posted_news`, `clearsky_cache` | dedup/cache de subsistemas |
+
+### Completa vs. retrieval (el corte que gobierna el costo del contexto)
+
+No todas las memorias entran igual, y la diferencia decide qué crece y qué no:
+
+* **Completas en cada prompt**: `bot_memory` y `preferences`. Su **largo es contexto
+  gastado en todas las conversaciones**, y crecen sin techo (~4,5 filas/día medidas en
+  producción → ~20k tokens por llamada a los 6 meses). Son las que necesitan compactación.
+* **Por retrieval con k fijo**: `user_facts`, `lessons` (híbrida) e `interactions`
+  (cronológica). **No saturan el contexto nunca**, tengan 600 filas o 600.000. Su problema
+  al crecer es de **precisión**: más filas = más chance de que las k que salgan sean
+  irrelevantes o se contradigan.
+
+Confundir los dos lleva a optimizar lo que no duele. Un pase de compactación sobre
+`user_facts` no ahorra un solo token de contexto; sobre `bot_memory`, todos.
+
+### Compactación de la memoria (T48, `memory_compact.py`)
+
+Cuando `bot_memory` pasa `MEMORY_COMPACT.max_chars`, una tarea del motor le pide al
+**modelo de razonamiento** un plan para fusionar duplicados, resolver contradicciones
+(gana lo más reciente — por eso al modelo se le pasa la **fecha** de cada entrada) y
+descartar lo efímero. El disparador es el **tamaño y no el tiempo**, porque es la unidad
+que se paga.
+
+Tres invariantes que no se negocian:
+
+1. **El código verifica el plan contra la base**, no contra lo que el prompt pidió: ids
+   inexistentes, ids 📌, ids repetidos entre operaciones, filas desmesuradas o un plan que
+   no reduce nada → se rechaza entero. Se aplica todo-o-nada.
+2. **Nada se borra**: `superseded_by` archiva las originales. Salen del contexto, quedan
+   para auditar y se restauran. Un LLM reescribiendo la identidad del bot sin undo es una
+   puerta de una sola dirección.
+3. **Lo 📌 es intocable**: la identidad (`migration:*`), lo que carga el admin por UI y lo
+   que alguien pidió recordar textualmente (flag `explicit` de `save_to_memory`).
+
+### Compactación de las notas de conversación (T48b)
+
+Problema **distinto** al anterior, y confundirlos lleva a optimizar lo que no duele.
+`interactions` no se inyecta completa: entra por recencia con k fijo (las 5 últimas del
+usuario), así que **no gasta contexto por más que crezca**. Lo que se rompe es la *calidad*
+de esa ventana: cada mención respondida deja una nota, así que un rato de ida y vuelta deja
+cinco notas casi iguales y ocupan las cinco. Medido en producción: **947 notas en 172
+grupos (usuario, día)** — 5,5× de redundancia, con un caso de **64 notas de un solo día** y
+27 de 64 usuarios con la ventana tapada por una sola charla.
+
+Se comprime a **una nota por (usuario, día)**, dejando intacto el día más reciente de cada
+usuario (esa charla puede seguir, y resumirla a mitad de camino perdería lo más fresco).
+Las últimas 5 pasan a ser cinco *días* de relación en vez de cinco ángulos de la misma
+mañana.
+
+Dos decisiones de costo, ambas porque esto corre **dentro del loop del bot**:
+* **Modelo liviano**, no el de razonamiento. Resumir las notas de un día es resumir; no hay
+  contradicciones que dirimir ni identidad en juego. Con el grande, una corrida de 40
+  grupos dejaba al bot clavado ~40 minutos.
+* **Lote chico por pase** (`max_grupos`): el backfill se hace solo a lo largo de varios
+  pases sin que el bot deje de contestar, y lo que queda afuera se **loguea** — un tope
+  silencioso se leería como "ya está todo compactado".
+
+El tope de largo es **otro** que el de `bot_memory` (1100 vs 400 chars): comprimir 48 notas
+en una legítimamente no entra en una oración. El invariante que de verdad se verifica es
+que la nota nueva sea **más corta que la suma de las que reemplaza** — un "resumen" más
+largo que el original no es un resumen.
+
+**Los schemas toleran la lista pelada.** Los modelos livianos devuelven `[{…}]` en vez del
+objeto que la envuelve: medido en el backfill, 7 de cada 20 llamadas se rechazaban y se
+reintentaban por eso — un tercio del tiempo del pase gastado en nada. Un
+`model_validator(mode="before")` la envuelve, con el mismo criterio con el que `BotReply`
+acepta `text` o `message`. Es una forma inequívoca de la misma respuesta: absorberla sale
+más barato que pelearla.
+
+**Cómo se mide si esto sirvió.** No por cantidad de filas: 8 notas en 8 días distintos es
+una ventana sana. Lo que se cuenta son **días distintos dentro de las 5 que ve el bot**, y
+el "antes" tiene que excluir las filas que generó la propia compactación
+(`source_uri='compact'`) o se está comparando contra sí mismo. Resultado real del backfill
+de botata-arg: **1,6 → 2,9 días** de promedio, y los usuarios cuya ventana era un solo día
+pasaron de **14 a 7**.
+
+⚠️ **La lección transversal, pagada dos veces:** lo que un LLM escribe en la base se acota
+en el **código**, no en el prompt. El intérprete de bios confiaba en que el modelo
+contestaría `NADA` y comparaba por igualdad exacta; ante una bio ambigua el modelo entró
+en loop, devolvió 96k de monólogo interno y cada línea terminó como un "hecho" del usuario
+— 262 filas basura que además ganaban el retrieval. Todo pase que persista salida de
+modelo lleva topes duros y verificación posterior.
 
 ### Embeddings
 
@@ -507,11 +618,20 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
   necesita) + su función de fetch registrada con `register_fetcher` + engancharla a la tool
   que corresponda. La UI (botones, selector, sección 🧩 Plugins), el validador y el toggle
   on/off salen **solos** de esa declaración — no hay que tocar nada más.
-- **Conector sin tocar el repo** (T44 fase 2): dos puertas. (a) `<instancia>/connectors/*.py`
-  con un dict `CONNECTOR` + `fetch(source, limit)` — se carga solo, es recargable y **ejecuta
-  código** (solo plugins propios). (b) Un server **MCP** con un bloque `connector` en su
-  config: el fetcher proxea a una tool del server, que corre aislado en su proceso y no
-  necesita que su autor sepa nada de Botata.
+- **Conector sin tocar el repo**: tres puertas, **en este orden**. (a) **T46 — sin código**: una
+  entrada `type: "api"` en 🏷️ Fuentes con `url` (acepta `{source}`/`{limit}`/`{env:CLAVE}`),
+  `items_path`, `map` y `headers`; los campos se eligen con paths de puntos y el botón *probar
+  ahora* devuelve el error explicado. Es la vía para quien **no programa**, que es la mayoría de
+  los que van a instalar Botata; empezar siempre por acá. (b) `<instancia>/connectors/*.py` con
+  un dict `CONNECTOR` + `fetch(source, limit)` — se carga solo, es recargable y **ejecuta
+  código** (solo plugins propios); para lo que (a) no cubre: OAuth, paginado, dos llamadas por
+  item. (c) Un server **MCP** con un bloque `connector` en su config: el fetcher proxea a una
+  tool del server, que corre aislado en su proceso y no necesita que su autor sepa nada de
+  Botata.
+  ⚠️ **Lo que NO se hace: una tool genérica de HTTP request.** Con scope `reply` es un agujero
+  de exfiltración (el bot es público y obedece texto de terceros), no compone con el registro de
+  fuentes y obliga al LLM a re-adivinar URL/auth/forma del JSON en cada llamada. El caso
+  legítimo de "andá a mirar esta página" ya lo cubre el browser agéntico (T16).
 - **Conector externo**: si existe un MCP server (oficial o de terceros), es una entrada en
   `settings.json → MCP`. Si no existe, escribirlo con FastMCP en `mcp_servers/` (~50-150
   líneas; plantillas: `tests/mcp_echo_server.py` y `mcp_servers/reddit_server.py`).

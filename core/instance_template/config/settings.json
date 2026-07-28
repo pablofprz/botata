@@ -18,6 +18,19 @@
 		"repo": "",
 		"commands": []
 	},
+	"MEMORY_COMPACT": {
+		"enabled": true,
+		"max_chars": 4000,
+		"interactions": true,
+		"min_por_dia": 3,
+		"max_grupos": 8
+	},
+	"MEDIA_SEARCH": {
+		"catalog_max_distance": 0.47,
+		"source_weight": 0.5,
+		"source_match_min": 0.5,
+		"prefer": "auto"
+	},
 	"CALENDAR_ANNOUNCE": {
 		"from": "admin",
 		"groups": [],

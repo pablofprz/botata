@@ -72,6 +72,26 @@ _MEDIA_FAKE_RE = re.compile(
     r"\[\s*(?:imagen|image|img|foto|video|vídeo|gif|adjunto|attachment)\b[^\]]*\]",
     re.I)
 
+# La otra forma de fingir un adjunto, vista en producción el 2026-07-28:
+#   [📸 mapache para el admin](https://cdn.bsky.app/img/feed_thumbnail/…)
+# Un link markdown con una URL de CDN INVENTADA. No lo cazaba la regex de arriba
+# (la etiqueta no empieza con una palabra de media) y el usuario veía texto donde
+# esperaba una foto. Se resuelve en dos pasos: si la etiqueta huele a media, se
+# tira todo; si no, se desenvuelve a la URL pelada — el bot no escribe markdown
+# (lo dice el SOUL) pero compartir un link sí es legítimo.
+_MD_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\(\s*([^)\s]*)[^)]*\)")
+_ETIQUETA_MEDIA_RE = re.compile(
+    r"imagen|image|img|foto|photo|video|vídeo|gif|adjunto|attachment"
+    r"|[\U0001F4F8\U0001F4F7\U0001F5BC\U0001F3A5\U0001F3AC\U0001F4F9]",
+    re.I)
+
+
+def _desarmar_link_markdown(m: re.Match) -> str:
+    etiqueta, url = m.group(1), m.group(2)
+    if m.group(0).startswith("!") or _ETIQUETA_MEDIA_RE.search(etiqueta):
+        return ""                       # adjunto fingido: no queda nada
+    return url if url.startswith(("http://", "https://")) else etiqueta
+
 
 def strip_fake_media(text: str) -> str:
     """Saca las anotaciones de media que el LLM haya escrito en el texto.
@@ -79,7 +99,8 @@ def strip_fake_media(text: str) -> str:
     Las anotaciones son ENTRADA (lo que el bot ve), nunca salida. Adjuntar de
     verdad es cosa del pipeline (`media_path`), no del texto.
     """
-    limpio = _MEDIA_FAKE_RE.sub("", text or "")
+    limpio = _MD_LINK_RE.sub(_desarmar_link_markdown, text or "")
+    limpio = _MEDIA_FAKE_RE.sub("", limpio)
     # Puede quedar el renglón vacío o espacios dobles donde estaba la anotación.
     limpio = re.sub(r"[ \t]{2,}", " ", limpio)
     limpio = re.sub(r"\n{3,}", "\n\n", limpio)

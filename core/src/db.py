@@ -163,7 +163,12 @@ CREATE TABLE IF NOT EXISTS interactions (
     handle     TEXT NOT NULL REFERENCES users(handle) ON DELETE CASCADE,
     summary    TEXT NOT NULL,               -- ej. "discutimos del mundial, tono jodón"
     source_uri TEXT,                        -- URI de la mención de origen
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Compactación (T48): una charla de ida y vuelta deja UNA fila por mención
+    -- respondida, así que un rato de conversación genera varias notas casi
+    -- iguales y tapa la ventana de recencia. Al compactar por día, las
+    -- originales quedan archivadas acá en vez de borrarse.
+    superseded_by INTEGER REFERENCES interactions(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_interactions_handle ON interactions(handle, created_at);
 
@@ -176,7 +181,13 @@ CREATE TABLE IF NOT EXISTS bot_memory (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     text       TEXT NOT NULL,
     source     TEXT,                            -- 'admin'|'tool:@handle'|'migration:MEMORY.md'
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- 📌 el pase de compactación no la toca (identidad del bot, o el admin la fijó)
+    pinned     INTEGER NOT NULL DEFAULT 0,
+    -- Compactación (T48): la fila sigue existiendo para auditoría/undo pero deja
+    -- de entrar al contexto. NULL = vigente. Apunta a la fila que la reemplazó,
+    -- o a sí misma cuando se descartó sin sucesora (efímero, basura).
+    superseded_by INTEGER REFERENCES bot_memory(id) ON DELETE SET NULL
 );
 
 -- ─── preferences: gustos y disgustos del bot ─────────────────────────
@@ -390,6 +401,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # política 'groups': se decide a la hora de anunciar (gate viejo).
         conn.execute("ALTER TABLE events ADD COLUMN announce INTEGER")
         log.info("migración: events.announce agregada")
+
+    # bot_memory: compactación (T48, 2026-07-28)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(bot_memory)")}
+    if "pinned" not in cols:
+        conn.execute("ALTER TABLE bot_memory ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        # La identidad del bot venía del MEMORY.md curado a mano: nace fijada.
+        # Lo que escribió la comunidad por tool NO — es justo lo que hay que poder
+        # deduplicar (medido en producción: los duplicados y las contradicciones
+        # están repartidos entre el admin y los power users por igual).
+        n = conn.execute(
+            "UPDATE bot_memory SET pinned = 1 WHERE source LIKE 'migration:%'").rowcount
+        log.info("migración: bot_memory.pinned agregada (%d fijadas por origen)", n)
+    if "superseded_by" not in cols:
+        conn.execute("ALTER TABLE bot_memory ADD COLUMN superseded_by INTEGER "
+                     "REFERENCES bot_memory(id) ON DELETE SET NULL")
+        log.info("migración: bot_memory.superseded_by agregada")
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(interactions)")}
+    if "superseded_by" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN superseded_by INTEGER "
+                     "REFERENCES interactions(id) ON DELETE SET NULL")
+        log.info("migración: interactions.superseded_by agregada")
 
 
 # ─── Embeddings (bge-m3, lazy) ─────────────────────────────────────────────
@@ -739,7 +772,7 @@ def hybrid_search_image_catalog(
 
     if conds:
         vec_rows = conn.execute(
-            "SELECT v.rowid AS id FROM image_catalog_vec v "
+            "SELECT v.rowid AS id, v.distance AS distance FROM image_catalog_vec v "
             "JOIN image_catalog i ON i.id = v.rowid "
             f"WHERE v.embedding MATCH ? AND k = ?{extra} "
             "ORDER BY v.distance",
@@ -747,7 +780,7 @@ def hybrid_search_image_catalog(
         ).fetchall()
     else:
         vec_rows = conn.execute(
-            "SELECT v.rowid AS id FROM image_catalog_vec v "
+            "SELECT v.rowid AS id, v.distance AS distance FROM image_catalog_vec v "
             "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
             (q, pool),
         ).fetchall()
@@ -775,7 +808,15 @@ def hybrid_search_image_catalog(
         ids,
     ).fetchall()
     by_id = {r["id"]: dict(r) for r in rows}
-    return [by_id[doc_id] for doc_id, _ in fused[:limit] if doc_id in by_id]
+    # `vec_distance` es la señal de RELEVANCIA para el que llama. El score de RRF
+    # no sirve para eso: es rank-fusion, el primero siempre saca ~2/61 aunque no
+    # tenga nada que ver con la query. La distancia coseno sí mide parecido. Sin
+    # esto no hay forma de distinguir "el catálogo tiene esto" de "esto es lo
+    # menos lejano que encontré", que es como un pedido de mapaches terminaba
+    # devolviendo un carpincho. None = el candidato salió solo por FTS.
+    dist = {r["id"]: r["distance"] for r in vec_rows}
+    return [{**by_id[doc_id], "vec_distance": dist.get(doc_id)}
+            for doc_id, _score in fused[:limit] if doc_id in by_id]
 
 
 def list_uncataloged_files(
@@ -1124,30 +1165,67 @@ def _norm_text(text: str) -> str:
 
 def add_bot_memory(conn: sqlite3.Connection, text: str, *,
                    source: str | None = None,
-                   created_at: str | None = None) -> int | None:
+                   created_at: str | None = None,
+                   pinned: bool = False) -> int | None:
     """Agrega una entrada a la memoria general del bot. Devuelve su id,
-    o None si ya existía una entrada con el mismo texto normalizado (dedup)."""
+    o None si ya existía una entrada con el mismo texto normalizado (dedup).
+
+    `pinned` = el pase de compactación no la va a tocar (la pidió el admin, o
+    alguien dijo explícitamente "acordate de esto")."""
     norm = _norm_text(text)
-    for row in conn.execute("SELECT id, text FROM bot_memory").fetchall():
+    for row in conn.execute("SELECT id, text FROM bot_memory "
+                            "WHERE superseded_by IS NULL").fetchall():
         if _norm_text(row["text"]) == norm:
             return None
     if created_at:
         cur = conn.execute(
-            "INSERT INTO bot_memory (text, source, created_at) VALUES (?, ?, ?)",
-            (text, source, created_at))
+            "INSERT INTO bot_memory (text, source, created_at, pinned) VALUES (?, ?, ?, ?)",
+            (text, source, created_at, int(pinned)))
     else:
         cur = conn.execute(
-            "INSERT INTO bot_memory (text, source) VALUES (?, ?)", (text, source))
+            "INSERT INTO bot_memory (text, source, pinned) VALUES (?, ?, ?)",
+            (text, source, int(pinned)))
     conn.commit()
     return int(cur.lastrowid)
 
 
-def list_bot_memory(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
-    """Memoria general del bot, cronológica (más vieja primero — lectura natural)."""
+def list_bot_memory(conn: sqlite3.Connection, limit: int = 200, *,
+                    incluir_archivadas: bool = False) -> list[dict]:
+    """Memoria general del bot, cronológica (más vieja primero — lectura natural).
+
+    Por defecto SOLO las vigentes: lo compactado sigue en la tabla para poder
+    auditarlo o revertirlo, pero no vuelve a entrar al contexto."""
+    filtro = "" if incluir_archivadas else "WHERE superseded_by IS NULL"
     rows = conn.execute(
-        "SELECT * FROM bot_memory ORDER BY created_at ASC, id ASC LIMIT ?", (limit,)
-    ).fetchall()
+        f"SELECT * FROM bot_memory {filtro} ORDER BY created_at ASC, id ASC LIMIT ?",
+        (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def set_bot_memory_pinned(conn: sqlite3.Connection, mem_id: int, pinned: bool) -> bool:
+    cur = conn.execute("UPDATE bot_memory SET pinned = ? WHERE id = ?",
+                       (int(pinned), mem_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def supersede_bot_memory(conn: sqlite3.Connection, viejas: list[int],
+                         sucesora: int | None) -> None:
+    """Archiva `viejas` apuntando a `sucesora` (o a sí mismas si se descartaron).
+
+    No borra: el texto original queda para auditar qué se perdió y para poder
+    revertir. `restore_bot_memory` deshace."""
+    for vid in viejas:
+        conn.execute("UPDATE bot_memory SET superseded_by = ? WHERE id = ?",
+                     (sucesora if sucesora is not None else vid, vid))
+    conn.commit()
+
+
+def restore_bot_memory(conn: sqlite3.Connection, mem_id: int) -> bool:
+    """Devuelve al contexto una fila archivada (undo de la compactación)."""
+    cur = conn.execute("UPDATE bot_memory SET superseded_by = NULL WHERE id = ?", (mem_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def delete_bot_memory(conn: sqlite3.Connection, mem_id: int) -> bool:
@@ -1317,12 +1395,20 @@ def log_interaction(
     summary: str,
     *,
     source_uri: str | None = None,
+    created_at: str | None = None,
 ) -> int:
-    """Registra una nota de interacción directa con un usuario."""
-    cur = conn.execute(
-        "INSERT INTO interactions(handle, summary, source_uri) VALUES (?, ?, ?)",
-        (handle, summary, source_uri),
-    )
+    """Registra una nota de interacción directa con un usuario.
+
+    `created_at` explícito solo para reconstruir historial (tests, migraciones):
+    en el uso normal lo pone la base."""
+    if created_at:
+        cur = conn.execute(
+            "INSERT INTO interactions(handle, summary, source_uri, created_at) "
+            "VALUES (?, ?, ?, ?)", (handle, summary, source_uri, created_at))
+    else:
+        cur = conn.execute(
+            "INSERT INTO interactions(handle, summary, source_uri) VALUES (?, ?, ?)",
+            (handle, summary, source_uri))
     conn.commit()
     return cur.lastrowid
 
@@ -1331,10 +1417,14 @@ def recent_interactions(conn: sqlite3.Connection, handle: str, limit: int = 5) -
     """Últimas notas de interacción con un usuario, de más nueva a más vieja.
 
     Recuperación cronológica a propósito (recencia > semántica): es historial
-    de conversación, no conocimiento — por eso no tiene embeddings."""
+    de conversación, no conocimiento — por eso no tiene embeddings.
+
+    Solo las vigentes: una charla larga deja muchas notas casi iguales y, sin
+    compactar, las 5 más recientes terminaban siendo cinco ángulos del mismo
+    rato (medido: un usuario con 64 filas de un solo día)."""
     rows = conn.execute(
         "SELECT summary, source_uri, created_at FROM interactions "
-        "WHERE handle = ? ORDER BY id DESC LIMIT ?",
+        "WHERE handle = ? AND superseded_by IS NULL ORDER BY id DESC LIMIT ?",
         (handle, limit),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -1348,10 +1438,39 @@ def recent_interactions_all(conn: sqlite3.Connection, limit: int = 20) -> list[d
     mood en modo auto. Cronológico (recencia), sin embeddings."""
     rows = conn.execute(
         "SELECT handle, summary, created_at FROM interactions "
-        "ORDER BY id DESC LIMIT ?",
+        "WHERE superseded_by IS NULL ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def interacciones_compactables(conn: sqlite3.Connection, *,
+                               min_por_dia: int = 3) -> list[dict]:
+    """Grupos (usuario, día) que valen la pena compactar.
+
+    Excluye el día MÁS RECIENTE de cada usuario: esa charla puede seguir, y
+    resumirla a mitad de camino perdería lo más fresco justo cuando más importa.
+    Los días con pocas notas se dejan como están — no hay nada que fusionar.
+    """
+    filas = conn.execute(
+        "SELECT id, handle, summary, created_at, date(created_at) AS dia "
+        "FROM interactions WHERE superseded_by IS NULL ORDER BY handle, id"
+    ).fetchall()
+    por_grupo: dict[tuple[str, str], list[dict]] = {}
+    ultimo_dia: dict[str, str] = {}
+    for r in filas:
+        por_grupo.setdefault((r["handle"], r["dia"]), []).append(dict(r))
+        ultimo_dia[r["handle"]] = max(ultimo_dia.get(r["handle"], ""), r["dia"])
+    return [{"handle": h, "dia": d, "filas": fs}
+            for (h, d), fs in sorted(por_grupo.items())
+            if len(fs) >= min_por_dia and d != ultimo_dia[h]]
+
+
+def supersede_interactions(conn: sqlite3.Connection, viejas: list[int],
+                           sucesora: int) -> None:
+    for vid in viejas:
+        conn.execute("UPDATE interactions SET superseded_by = ? WHERE id = ?",
+                     (sucesora, vid))
 
 
 def purge_user_memory(
