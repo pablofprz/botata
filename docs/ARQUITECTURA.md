@@ -507,6 +507,11 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
   necesita) + su función de fetch registrada con `register_fetcher` + engancharla a la tool
   que corresponda. La UI (botones, selector, sección 🧩 Plugins), el validador y el toggle
   on/off salen **solos** de esa declaración — no hay que tocar nada más.
+- **Conector sin tocar el repo** (T44 fase 2): dos puertas. (a) `<instancia>/connectors/*.py`
+  con un dict `CONNECTOR` + `fetch(source, limit)` — se carga solo, es recargable y **ejecuta
+  código** (solo plugins propios). (b) Un server **MCP** con un bloque `connector` en su
+  config: el fetcher proxea a una tool del server, que corre aislado en su proceso y no
+  necesita que su autor sepa nada de Botata.
 - **Conector externo**: si existe un MCP server (oficial o de terceros), es una entrada en
   `settings.json → MCP`. Si no existe, escribirlo con FastMCP en `mcp_servers/` (~50-150
   líneas; plantillas: `tests/mcp_echo_server.py` y `mcp_servers/reddit_server.py`).

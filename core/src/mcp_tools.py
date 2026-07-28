@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import fnmatch
+import json
 import logging
 import sys
 import threading
@@ -215,6 +216,27 @@ def get_bridge() -> MCPBridge:
 
 
 # ─── Registro en el ToolRegistry ─────────────────────────────────────────────
+def call_tool(server: str, tool: str, args: dict, timeout: float = 30.0) -> list[dict]:
+    """Llama una tool de un server ya conectado y devuelve JSON parseado.
+
+    Lo usa el puente MCP→conector de contenido (T44): la tool devuelve texto y
+    acá se espera una lista de items. Si no es JSON, se devuelve vacío.
+    """
+    res = get_bridge().call(server, tool, args, timeout)
+    texto, _ = _result_text(res)
+    try:
+        data = json.loads(texto)
+    except Exception:
+        log.warning("MCP %s.%s: la respuesta no es JSON parseable", server, tool)
+        return []
+    if isinstance(data, dict):
+        for clave in ("items", "results", "posts", "data"):
+            if isinstance(data.get(clave), list):
+                return data[clave]
+        return []
+    return data if isinstance(data, list) else []
+
+
 def _passes_filter(name: str, flt: dict) -> bool:
     include = flt.get("include") or []
     exclude = flt.get("exclude") or []

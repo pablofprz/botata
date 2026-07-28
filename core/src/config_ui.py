@@ -402,6 +402,7 @@ class ConfigStore:
     # -- lectura ---------------------------------------------------------------
     def read_all(self) -> dict:
         settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        connectorsmod.load_instance_plugins(self.base / "connectors")
         sources = self._read_sources(settings)
         soul_path = self.base / "context" / "SOUL.md"
         scrape = self.base / "scrape"
@@ -430,6 +431,9 @@ class ConfigStore:
             "settings": settings,
             "sources": sources,
             "catalog_sources": catalog_sources,
+            # Los conectores propios de la instancia (connectors/*.py) también son
+            # parte del catálogo: sin esto la UI mostraba solo los built-in y un
+            # plugin recién puesto era invisible.
             "connectors": connectorsmod.catalog(settings),
             "env_keys": self._env_status(),
             "skills": self._skills_info(),

@@ -98,6 +98,7 @@ PROMPTS_DIR = BASE_DIR / "prompts"
 SKILLS_DIR  = BASE_DIR / "skills"   # T26: workspace de skills en markdown
 MOODS_DIR   = BASE_DIR / "moods"    # estados de ánimo del bot (markdown)
 ROUTINES_DIR = BASE_DIR / "routines"  # rutinas: conducta proactiva en archivos (markdown)
+PLUGINS_DIR  = BASE_DIR / "connectors"  # conectores propios de la instancia (T44 fase 2)
 POSTED_DIR  = BASE_DIR / "posted"
 FEEDS_DIR   = CONTEXT_DIR / "feeds"
 
@@ -214,6 +215,10 @@ MODELS_CONFIG      : dict | None = settings.get("MODELS")
 #     type "tumblr"  → sources = blogs                (tool get_latest_media)
 # ---------------------------------------------------------------------------
 import connectors as connectorsmod
+
+# Conectores propios de la instancia: se cargan al importar, así el registro de
+# fuentes y la UI los ven como a cualquier otro. Ejecuta código del admin.
+connectorsmod.load_instance_plugins(PLUGINS_DIR)
 
 SOURCE_TYPES = connectorsmod.all_ids()
 
@@ -4489,6 +4494,17 @@ def build_tool_registry(config: dict | None = None, *,
         import mcp_tools  # lazy: solo si hay servers MCP habilitados
         n = mcp_tools.register_mcp_tools(reg, mcp_config)
         log.info("MCP: %d tool(s) externas registradas", n)
+        # Un server MCP puede además declararse CONECTOR de contenido: el admin
+        # mapea una de sus tools en settings (MCP.<server>.connector) y pasa a ser
+        # un tipo más del registro de fuentes, con su logo y su switch.
+        for nombre, cfg in mcp_config.items():
+            if not cfg.get("enabled", True):
+                continue
+            cid = connectorsmod.register_from_mcp(
+                nombre, cfg,
+                lambda tool, args, _s=nombre: mcp_tools.call_tool(_s, tool, args))
+            if cid:
+                log.info("MCP %s: registrado como conector de contenido '%s'", nombre, cid)
     if config:
         reg.apply_config(config)
     reg.set_groups(USER_GROUPS, admin_handle=ADMIN_HANDLES,

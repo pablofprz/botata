@@ -538,3 +538,19 @@ def test_user_memory_alta_manual(store, monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_ui_ve_los_plugins_de_la_instancia(store):
+    """El plugin recién puesto tiene que aparecer en el catálogo de la UI: antes
+    solo se cargaban en el motor y desde el panel eran invisibles."""
+    d = store.base / "connectors"
+    d.mkdir(exist_ok=True)
+    (d / "lemmy.py").write_text(
+        'CONNECTOR = {"id": "lemmy", "label": "Lemmy", "color": "#0b8", "initial": "L",\n'
+        '             "placeholder": "c@i", "tool": "get_latest_media", "help": "h"}\n'
+        'def fetch(source, limit=15):\n    return []\n', encoding="utf-8")
+    cat = {c["id"]: c for c in store.read_all()["connectors"]}
+    assert cat["lemmy"]["label"] == "Lemmy" and cat["lemmy"]["core"] is False
+    # y al borrar el archivo, el conector desaparece del catálogo (recarga)
+    (d / "lemmy.py").unlink()
+    assert "lemmy" not in {c["id"] for c in store.read_all()["connectors"]}

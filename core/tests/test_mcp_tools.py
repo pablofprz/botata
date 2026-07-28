@@ -175,3 +175,27 @@ def test_e2e_command_inexistente_se_omite():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ─── T44: parseo de la respuesta cuando un MCP hace de conector ─────────────
+def test_call_tool_parsea_lista_y_envoltorios(monkeypatch):
+    import mcp_tools as m
+
+    class _Bridge:
+        def __init__(self, payload): self.payload = payload
+        def call(self, server, tool, args, timeout): return self.payload
+
+    class _Res:
+        def __init__(self, txt):
+            self.isError = False
+            self.content = [type("C", (), {"type": "text", "text": txt})()]
+
+    for crudo, esperado in [
+        ('[{"a":1}]', [{"a": 1}]),
+        ('{"items":[{"a":2}]}', [{"a": 2}]),
+        ('{"posts":[{"a":3}]}', [{"a": 3}]),
+        ('{"otra_cosa":1}', []),
+        ('esto no es json', []),
+    ]:
+        monkeypatch.setattr(m, "get_bridge", lambda p=_Res(crudo): _Bridge(p))
+        assert m.call_tool("s", "t", {}) == esperado
