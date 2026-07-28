@@ -13,6 +13,7 @@ description: How to answer questions about the community rules
 scopes: reply, admin        # optional; default: reply, feed_reflection, admin
 enabled: true               # optional; default true
 inline: false               # optional; default false
+triggers: rules, norms      # optional; words that load it with no guessing
 ---
 Here go the instructions the LLM sees when it loads the skill.
 Free-form markdown: lists, tone examples, dos and don'ts.
@@ -29,12 +30,24 @@ Free-form markdown: lists, tone examples, dos and don'ts.
   for. Use sparingly: it burns context on every call. Note: in `admin` scope
   everything is always inline.
 - **enabled: false**: the skill stays off without deleting the file.
+- **triggers**: comma-separated words. If any of them shows up in the message,
+  the body is loaded **without asking the model** — same effect as `inline`, but
+  only for the replies where it matters. Match is whole-word and
+  accent-insensitive: `boke` fires on "dale BOKE!!" but not on "bokeron".
 
 ## How selection works
 
 The system prompt carries a light index (`name: description` per skill). If the
 conversation topic matches, the agent calls the `use_skill(name)` tool and the
-body enters the context before generating the reply. *Permanent* behavior
+body enters the context before generating the reply.
+
+**Declare `triggers` for anything you care about.** Asking the model to turn a
+topic into an exact skill name is where it breaks: in production it called
+`use_skill("bostera")` for a skill named `boca`, and `use_skill("dinosaurios")`
+for a skill that never existed. If a wrong name comes in, the tool answers with
+the list of real skills instead of an error — but the tool phase is a single
+round, so there is no second chance to get it right. A trigger removes the
+guessing entirely. *Permanent* behavior
 (personality, general tone) belongs in `context/SOUL.md`, not here.
 
 ## ⚠️ Security

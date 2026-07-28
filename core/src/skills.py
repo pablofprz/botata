@@ -49,6 +49,8 @@ class Skill:
     scopes: frozenset[str] = field(default_factory=lambda: _DEFAULT_SCOPES)
     enabled: bool = True
     inline: bool = False
+    # Palabras que cargan la skill SIN preguntarle al modelo (ver `disparadas`).
+    triggers: tuple[str, ...] = ()
 
 
 # ─── Parser de frontmatter (stdlib, formato key: value) ─────────────────────
@@ -87,7 +89,43 @@ def _parse_skill(path: Path) -> Skill | None:
         name=name, description=description, body=body, path=path, scopes=scopes,
         enabled=meta.get("enabled", "true").lower() != "false",
         inline=meta.get("inline", "false").lower() == "true",
+        triggers=tuple(t.strip().lower() for t in meta.get("triggers", "").split(",")
+                       if t.strip()),
     )
+
+
+# ─── Disparadores: sacar al modelo del medio ────────────────────────────────
+# El camino on-demand obliga al LLM a traducir "tema" → nombre exacto de skill,
+# y ahí se equivoca: medido en producción, pidió `use_skill("bostera")` cuando
+# la skill se llama `boca`, y `use_skill("dinosaurios")`, que no existe. El
+# matcheo semántico no salva el caso —"bostera"→boca da 0.385 y
+# "dinosaurios"→mapache 0.369, así que cualquier umbral que acierte uno erra el
+# otro—, así que el arreglo es no preguntarle: si el admin declara las palabras,
+# la skill entra sola.
+_SEPARADORES = ".,;:!?¡¿()[]{}\"'…\n\t/\\-—"
+
+
+def _normalizar(texto: str) -> str:
+    bajo = texto.lower()
+    for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ü", "u")):
+        bajo = bajo.replace(a, b)
+    for s in _SEPARADORES:
+        bajo = bajo.replace(s, " ")
+    return f" {' '.join(bajo.split())} "
+
+
+def disparadas(skills: list[Skill], texto: str) -> list[Skill]:
+    """Las skills cuyos `triggers` aparecen en `texto`.
+
+    Match por palabra entera y sin acentos: "boke" dispara con "decime boke" y
+    con "BOKE!", pero no con "bokeron". Una palabra suelta como trigger es
+    barata de declarar y no depende de que el modelo adivine nada.
+    """
+    if not texto:
+        return []
+    plano = _normalizar(texto)
+    return [s for s in skills
+            if any(f" {_normalizar(t).strip()} " in plano for t in s.triggers)]
 
 
 # ─── API ─────────────────────────────────────────────────────────────────────
@@ -109,7 +147,8 @@ def load_skills(skills_dir: Path) -> list[Skill]:
     return out
 
 
-def skills_prompt_block(skills_dir: Path, scope: str, *, all_inline: bool = False) -> str:
+def skills_prompt_block(skills_dir: Path, scope: str, *, all_inline: bool = False,
+                        texto: str = "") -> str:
     """Sección de skills para el system prompt de `scope`. "" si no hay ninguna.
 
     Modo normal: cuerpos de las `inline:true` + índice de las on-demand (el
@@ -119,8 +158,11 @@ def skills_prompt_block(skills_dir: Path, scope: str, *, all_inline: bool = Fals
     relevant = [s for s in load_skills(skills_dir) if scope in s.scopes]
     if not relevant:
         return ""
-    inlined = [s for s in relevant if s.inline or all_inline]
-    on_demand = [s for s in relevant if not (s.inline or all_inline)]
+    por_trigger = {s.name for s in disparadas(relevant, texto)}
+    if por_trigger:
+        log.info("skills disparadas por palabra clave: %s", ", ".join(sorted(por_trigger)))
+    inlined = [s for s in relevant if s.inline or all_inline or s.name in por_trigger]
+    on_demand = [s for s in relevant if s not in inlined]
     parts = []
     for s in inlined:
         parts.append(f"## Skill: {s.name} ({s.description})\n{s.body}")
@@ -133,9 +175,51 @@ def skills_prompt_block(skills_dir: Path, scope: str, *, all_inline: bool = Fals
     return "Skills (guías de comportamiento por tema):\n" + "\n\n".join(parts)
 
 
-def get_skill_body(skills_dir: Path, name: str) -> str | None:
-    """Cuerpo de una skill habilitada por nombre (para la tool use_skill)."""
-    for s in load_skills(skills_dir):
-        if s.name == name:
-            return f"## Skill: {s.name}\n{s.body}"
+def resolver_skill(skills: list[Skill], name: str) -> Skill | None:
+    """La skill que el modelo quiso pedir, tolerando la variación de nombre.
+
+    Exacto → sin mayúsculas/acentos → tipeo parecido (difflib). NO se intenta
+    adivinar por significado: medido, "dinosaurios" queda tan cerca de `mapache`
+    como "bostera" de `boca`, así que un umbral semántico cargaría la skill
+    equivocada — peor que no cargar ninguna.
+    """
+    pedido = (name or "").strip()
+    if not pedido:
+        return None
+    for s in skills:
+        if s.name == pedido:
+            return s
+    plano = _normalizar(pedido).strip()
+    for s in skills:
+        if _normalizar(s.name).strip() == plano:
+            return s
+    import difflib
+    cerca = difflib.get_close_matches(plano, [_normalizar(s.name).strip() for s in skills],
+                                      n=1, cutoff=0.8)
+    if cerca:
+        return next(s for s in skills if _normalizar(s.name).strip() == cerca[0])
     return None
+
+
+def get_skill_body(skills_dir: Path, name: str, scope: str | None = None) -> str:
+    """Cuerpo de una skill para la tool `use_skill`.
+
+    Si el nombre no existe devuelve el ÍNDICE de las que sí, no un error seco.
+    La fase de tools es de una sola ronda: con "[skill desconocida]" el modelo
+    se queda sin nada y improvisa —en producción contestó "aunque la skill no
+    ande"—, mientras que con la lista al menos sabe qué tiene y puede decir algo
+    coherente. Y el admin lo ve en el log.
+    """
+    skills = [s for s in load_skills(skills_dir) if scope is None or scope in s.scopes]
+    s = resolver_skill(skills, name)
+    if s is not None:
+        if s.name != (name or "").strip():
+            log.info("use_skill: pidió %r, cargué %r", name, s.name)
+        return f"## Skill: {s.name}\n{s.body}"
+    log.warning("use_skill: no existe %r — devuelvo el índice (%d skills)", name, len(skills))
+    if not skills:
+        return "[no hay ninguna skill disponible]"
+    indice = "\n".join(f"- {x.name}: {x.description}" for x in skills)
+    return (f"[no existe ninguna skill llamada '{name}'. Las que tenés son:\n{indice}\n"
+            "Si alguna aplica, usá su nombre EXACTO; si no aplica ninguna, contestá "
+            "normalmente y no menciones nada de esto.]")

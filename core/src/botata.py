@@ -3318,11 +3318,7 @@ def _tool_get_help(args: dict, ctx: ToolContext) -> ToolResult:
 
 def _tool_use_skill(args: dict, ctx: ToolContext) -> ToolResult:
     """T26: carga el cuerpo de una skill on-demand (índice en el system prompt)."""
-    name = (args.get("name") or "").strip()
-    body = get_skill_body(SKILLS_DIR, name)
-    if body is None:
-        return ToolResult(text=f"[skill desconocida o deshabilitada: {name}]")
-    return ToolResult(text=body)
+    return ToolResult(text=get_skill_body(SKILLS_DIR, args.get("name") or "", Scope.REPLY))
 
 
 def _tool_search_images(args: dict, ctx: ToolContext) -> ToolResult:
@@ -5539,7 +5535,10 @@ class GenerateReplyNode:
             parts.append("\n---\nLecciones de comportamiento:\n" + "\n".join(f"- {t}" for _, t in lessons))
 
         # T26: skills — inline las marcadas + índice on-demand (use_skill)
-        skills_block = skills_prompt_block(SKILLS_DIR, Scope.REPLY)
+        # `texto`: lo que la persona acaba de decir. Si dispara los triggers de
+        # una skill, su cuerpo entra entero acá y el modelo no tiene que pedirla.
+        skills_block = skills_prompt_block(SKILLS_DIR, Scope.REPLY,
+                                           texto=state["mention_text"])
         if skills_block:
             parts.append(f"\n---\n{skills_block}")
 

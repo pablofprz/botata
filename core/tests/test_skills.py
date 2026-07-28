@@ -114,7 +114,21 @@ def test_tool_use_skill(skills_dir, monkeypatch):
     monkeypatch.setattr(b, "SKILLS_DIR", skills_dir)
     out = b._tool_use_skill({"name": "reglas-comunidad"}, _CTX)
     assert "Respondé amable sobre las reglas." in out.text
-    assert "[skill desconocida" in b._tool_use_skill({"name": "nada"}, _CTX).text
+
+
+def test_un_nombre_inventado_devuelve_el_indice_y_no_un_error_seco(skills_dir, monkeypatch):
+    """La fase de tools es de UNA ronda: con "[skill desconocida]" el modelo se
+    queda sin nada y improvisa. En producción pidió `use_skill("bostera")` —la
+    skill se llama `boca`— y contestó "aunque la skill no ande"."""
+    monkeypatch.setattr(b, "SKILLS_DIR", skills_dir)
+    txt = b._tool_use_skill({"name": "bostera"}, _CTX).text
+    assert "reglas-comunidad" in txt and "nombre EXACTO" in txt
+
+
+def test_tolera_mayusculas_acentos_y_tipeos(skills_dir, monkeypatch):
+    monkeypatch.setattr(b, "SKILLS_DIR", skills_dir)
+    for variante in ("Reglas-Comunidad", "reglas-comunidád", "reglas-comunidas"):
+        assert "Respondé amable" in b._tool_use_skill({"name": variante}, _CTX).text
 
 
 def test_tool_use_skill_registrada():
@@ -130,6 +144,53 @@ def test_edicion_en_caliente(skills_dir, monkeypatch):
         "---\nname: reglas-comunidad\ndescription: x\n---\nTEXTO NUEVO EDITADO"
     ))
     assert "TEXTO NUEVO EDITADO" in b._tool_use_skill({"name": "reglas-comunidad"}, _CTX).text
+
+
+# ─── Triggers: sacar al modelo del medio ─────────────────────────────────────
+# El camino on-demand obliga al LLM a traducir tema → nombre exacto, y ahí se
+# equivoca. El matcheo semántico no lo salva: medido con bge-m3, "bostera"→boca
+# da 0.385 y "dinosaurios"→mapache 0.369, así que cualquier umbral que acierte
+# uno carga la skill equivocada en el otro. Si el admin declara las palabras, la
+# skill entra sola y no hay nada que adivinar.
+@pytest.fixture()
+def skills_con_trigger(tmp_path):
+    (tmp_path / "boca.md").write_text(
+        "---\nname: boca\ndescription: cuando le nombran a boca\n"
+        "triggers: boke, bostero, bokita\n---\nGritá BOKE y poné un meme.\n",
+        encoding="utf-8")
+    (tmp_path / "otra.md").write_text(
+        "---\nname: otra\ndescription: otra cosa\n---\nCuerpo de otra.\n",
+        encoding="utf-8")
+    return tmp_path
+
+
+def test_el_trigger_mete_el_cuerpo_sin_tool(skills_con_trigger):
+    block = sk.skills_prompt_block(skills_con_trigger, Scope.REPLY,
+                                   texto="contame si yo digo BOKE vos me decís?")
+    assert "Gritá BOKE y poné un meme." in block      # cuerpo inline
+    assert "- boca:" not in block                     # ya no está en el índice
+    assert "- otra: otra cosa" in block               # la otra sigue on-demand
+
+
+def test_sin_el_trigger_la_skill_queda_on_demand(skills_con_trigger):
+    block = sk.skills_prompt_block(skills_con_trigger, Scope.REPLY, texto="hola qué tal")
+    assert "Gritá BOKE" not in block and "- boca:" in block
+
+
+def test_el_trigger_matchea_por_palabra_entera_y_sin_acentos(skills_con_trigger):
+    ss = sk.load_skills(skills_con_trigger)
+    assert [s.name for s in sk.disparadas(ss, "dale BOKE!!")] == ["boca"]
+    assert [s.name for s in sk.disparadas(ss, "soy re bostero, viste")] == ["boca"]
+    # no matchea adentro de otra palabra: si no, "bokeron" o "bostereada" activan todo
+    assert sk.disparadas(ss, "eso es un bokeron") == []
+    assert sk.disparadas(ss, "") == []
+
+
+def test_una_skill_sin_triggers_no_se_dispara_nunca(skills_con_trigger):
+    ss = sk.load_skills(skills_con_trigger)
+    otra = next(s for s in ss if s.name == "otra")
+    assert otra.triggers == ()
+    assert otra not in sk.disparadas(ss, "otra otra otra")
 
 
 if __name__ == "__main__":
