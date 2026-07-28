@@ -715,11 +715,26 @@ class ConfigStore:
         cfg = settings.get("MEMBRILLA") or {}
         repo = Path(str(cfg.get("repo") or "")).expanduser()
         commands = [c for c in (cfg.get("commands") or []) if str(c).strip()]
-        if not cfg.get("repo") or not commands:
+        # Decir cuál de las dos mitades falta, no "sin configurar": con el repo
+        # puesto y los comandos vacíos, ese mensaje manda a revisar lo que ya
+        # estaba bien.
+        if not cfg.get("repo") and not commands:
             return {"ok": False, "errors": [
-                "MEMBRILLA sin configurar: en settings.json poné "
-                '{"MEMBRILLA": {"repo": "ruta al repo membrilla", '
-                '"commands": ["python scrape_ig.py api-run"]}}']}
+                "Membrilla sin configurar. En settings.json → MEMBRILLA va la ruta del "
+                "repo y qué scrapers correr, por ejemplo: "
+                '{"repo": "C:\\\\ruta\\\\a\\\\membrilla", "commands": '
+                '[".venv\\\\Scripts\\\\python.exe scrape_pinterest.py run"]}']}
+        if not cfg.get("repo"):
+            return {"ok": False, "errors": [
+                "Falta la ruta del repo de Membrilla (settings.json → MEMBRILLA → repo). "
+                "Los comandos ya están puestos."]}
+        if not commands:
+            return {"ok": False, "errors": [
+                f"El repo está bien ({repo}) pero no hay ningún scraper que correr: "
+                "settings.json → MEMBRILLA → commands está vacío. Cada comando corre "
+                "adentro de ese repo, así que van tal cual los correrías ahí — por "
+                'ejemplo ".venv\\\\Scripts\\\\python.exe scrape_pinterest.py run". '
+                "Mirá el README de Membrilla para los de cada plataforma."]}
         if not repo.is_dir():
             return {"ok": False, "errors": [f"repo de Membrilla no existe: {repo}"]}
         env = {**os.environ, "MEMBRILLA_OUTPUT_DIR": str(self.base / "scrape")}

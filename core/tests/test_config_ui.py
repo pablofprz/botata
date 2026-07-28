@@ -220,7 +220,22 @@ def test_sources_migra_los_registros_viejos(store):
 def test_membrilla_sin_config_da_instrucciones(store):
     out = store.run_action("membrilla_scrape")
     assert out["ok"] is False
-    assert any("MEMBRILLA sin configurar" in e for e in out["errors"])
+    assert any("sin configurar" in e for e in out["errors"])
+
+
+def test_membrilla_dice_CUAL_mitad_falta(store):
+    """Con el repo puesto y los comandos vacíos, "sin configurar" manda a
+    revisar lo que ya estaba bien. Caso real del admin."""
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    s["MEMBRILLA"] = {"repo": str(store.base), "commands": []}
+    store.settings_path.write_text(json.dumps(s), encoding="utf-8")
+    err = store.run_action("membrilla_scrape")["errors"][0]
+    assert "commands está vacío" in err and str(store.base) in err
+
+    s["MEMBRILLA"] = {"repo": "", "commands": ["echo hola"]}
+    store.settings_path.write_text(json.dumps(s), encoding="utf-8")
+    err = store.run_action("membrilla_scrape")["errors"][0]
+    assert "Falta la ruta del repo" in err
 
 
 def test_membrilla_repo_inexistente(store):
