@@ -323,6 +323,29 @@ def tool_catalog(settings: dict) -> list[dict]:
 _BOT: dict = {"proc": None, "log": None}
 
 
+def _matar_arbol(proc: subprocess.Popen) -> None:
+    """Mata el proceso del bot Y sus hijos.
+
+    `terminate()` solo mataba al proceso lanzado; con pyenv-win (y con cualquier
+    launcher que haga de shim) el intérprete real es un HIJO y sobrevivía. Así
+    quedó un bot huérfano polleando en paralelo al nuevo — dos bots sobre la
+    misma instancia, pisándose las menciones. En Windows se usa taskkill /T.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception as e:
+        log.warning("no pude matar el árbol del bot (%s): %s", proc.pid, e)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def _bomba_de_log(proc: subprocess.Popen, log_path: Path) -> None:
     """Vuelca la salida del bot al archivo y a la consola, línea por línea."""
     try:
@@ -353,11 +376,7 @@ def bot_status(base_dir: Path, lineas: int = 200) -> dict:
 def bot_control(base_dir: Path, action: str, mode: str = "open") -> list[str]:
     proc = _BOT.get("proc")
     if action in ("stop", "restart") and proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _matar_arbol(proc)
         if proc.stdout is not None:
             try:
                 proc.stdout.close()      # corta la bomba de log
@@ -376,7 +395,9 @@ def bot_control(base_dir: Path, action: str, mode: str = "open") -> list[str]:
             [sys.executable, "-u", "-m", "botata",
              "--instance", str(base_dir), "--mode", mode],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1)
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            # grupo propio: permite matar el árbol entero en POSIX (killpg)
+            start_new_session=(os.name != "nt"))
         # Se lee en un hilo y se escribe a los DOS lados: al archivo (lo que lee el
         # panel de la UI) y a la consola donde corre este panel, que es donde uno
         # naturalmente mira cuando arranca el bot desde acá.

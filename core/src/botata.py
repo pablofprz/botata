@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import atexit
 import base64
 import json
 import logging
@@ -5577,6 +5578,83 @@ def _handle_pause_command(db: sqlite3.Connection, mention: dict, cmd: str,
     db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Instancia única: dos bots sobre la misma instancia se pisan
+# ---------------------------------------------------------------------------
+_LOCK_PATH = POSTED_DIR / "bot.lock"
+
+
+def _proceso_vivo(pid: int) -> bool:
+    """True si el PID existe. Portable sin dependencias."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:      # existe pero no es nuestro
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def acquire_instance_lock() -> None:
+    """Impide que corran DOS bots sobre la misma instancia.
+
+    Pasó de verdad (2026-07-27): quedó un bot huérfano de una prueba y otro
+    lanzado desde la UI, los dos polleando las mismas menciones y escribiendo la
+    misma DB. Resultado: uno marcaba la mención `pending`, el otro la veía
+    'ya atendida' y la salteaba — el bot dejaba de responder sin un solo error
+    en el log. La DB es single-writer por diseño; esto lo hace cumplir.
+    """
+    try:
+        if _LOCK_PATH.exists():
+            datos = json.loads(_LOCK_PATH.read_text(encoding="utf-8"))
+            pid = int(datos.get("pid", 0))
+            if pid != os.getpid() and _proceso_vivo(pid):
+                raise SystemExit(
+                    f"Ya hay un bot corriendo sobre esta instancia (PID {pid}, "
+                    f"arrancado {datos.get('desde', '?')}).\n"
+                    f"Pará ese primero, o borrá {_LOCK_PATH} si estás seguro de "
+                    "que ya no existe.")
+            log.info("lock huérfano de un PID muerto (%s): lo tomo", pid)
+        _LOCK_PATH.write_text(json.dumps(
+            {"pid": os.getpid(), "desde": now_local().isoformat()}), encoding="utf-8")
+        atexit.register(release_instance_lock)
+    except SystemExit:
+        raise
+    except Exception as e:      # el lock no puede ser motivo para no arrancar
+        log.warning("no pude tomar el lock de instancia: %s", e)
+
+
+def release_instance_lock() -> None:
+    try:
+        if _LOCK_PATH.exists():
+            datos = json.loads(_LOCK_PATH.read_text(encoding="utf-8"))
+            if int(datos.get("pid", 0)) == os.getpid():
+                _LOCK_PATH.unlink()
+    except Exception:
+        pass
+
+
+def _rescatar_pending_colgados(db: sqlite3.Connection, minutos: int = 10) -> None:
+    """Devuelve a 'failed' las menciones que quedaron en 'pending' hace rato.
+
+    `has_replied` saltea 'pending', y hasta ahora eso solo se reparaba AL
+    ARRANCAR (`retry_stuck_mentions`). Si una mención quedaba trancada con el bot
+    corriendo —proceso muerto a mitad, dos bots pisándose, un timeout raro— el
+    bot la ignoraba en silencio para siempre: ni respuesta ni error. Ahora se
+    repara sola en el propio loop.
+    """
+    limite = (datetime.now(timezone.utc) - timedelta(minutes=minutos)).isoformat()
+    cur = db.execute(
+        "UPDATE replied_posts SET status = 'failed' "
+        "WHERE status = 'pending' AND replied_at < ?", (limite,))
+    if cur.rowcount:
+        db.commit()
+        log.warning("rescaté %d mención(es) colgadas en 'pending' (>%d min) — "
+                    "se reintentan ahora", cur.rowcount, minutos)
+
+
 def process_mention(graph, db: sqlite3.Connection, mention: dict, mode: str,
                     channel=None) -> None:
     uri    = mention["uri"]
@@ -5680,6 +5758,7 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
 
 def run(mode: str) -> None:
     log.info("Starting botata — mode: %s", mode.upper())
+    acquire_instance_lock()      # dos bots sobre la misma instancia se pisan
 
     db     = init_db()
     bsky   = build_channel()
@@ -5817,6 +5896,7 @@ def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -
     mentions = [m for m in bsky.get_mentions() if not has_replied(db, m["uri"])]
     if mentions:
         log.info("Found %d mention(s) to process", len(mentions))
+        _rescatar_pending_colgados(db)
         for mention in mentions:
             ctx, root_uri, root_cid, leaf_media = bsky.get_thread_info(mention["uri"], mention["cid"])
             mention["thread_context"]  = ctx
