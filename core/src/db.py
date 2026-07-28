@@ -1463,7 +1463,7 @@ def interacciones_compactables(conn: sqlite3.Connection, *,
     Los días con pocas notas se dejan como están — no hay nada que fusionar.
     """
     filas = conn.execute(
-        "SELECT id, handle, summary, created_at, date(created_at) AS dia "
+        "SELECT id, handle, summary, source_uri, created_at, date(created_at) AS dia "
         "FROM interactions WHERE superseded_by IS NULL ORDER BY handle, id"
     ).fetchall()
     por_dia: dict[tuple[str, str], list[dict]] = {}
@@ -1473,6 +1473,14 @@ def interacciones_compactables(conn: sqlite3.Connection, *,
         ultimo_dia[r["handle"]] = max(ultimo_dia.get(r["handle"], ""), r["dia"])
     por_handle: dict[str, list[dict]] = {}
     for (h, dia), fs in sorted(por_dia.items()):
+        # Un día hecho SOLO de notas que ya salieron de una compactación no
+        # vuelve a entrar. El prompt permite hasta tres notas por día cuando el
+        # día tuvo charlas separadas, así que la salida del pase puede volver a
+        # cumplir el mínimo y el pase se comería su propio resultado: resumir un
+        # resumen, y otra vez, hasta dejar la nota en nada. Con notas nuevas
+        # mezcladas sí se rehace: ahí hay material que todavía no se resumió.
+        if all(f["source_uri"] == "compact" for f in fs):
+            continue
         if len(fs) >= min_por_dia and dia != ultimo_dia[h]:
             por_handle.setdefault(h, []).append({"dia": dia, "filas": fs})
     return [{"handle": h, "dias": ds, "filas": [f for d in ds for f in d["filas"]]}

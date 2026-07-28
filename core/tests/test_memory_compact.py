@@ -426,6 +426,36 @@ def test_rechaza_un_resumen_que_mezcla_dos_dias(charlas):
     assert charlas.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == antes
 
 
+def test_el_pase_no_se_come_su_propio_resultado(charlas):
+    """El prompt permite hasta tres notas para un día con charlas separadas, así
+    que la salida puede volver a cumplir el mínimo. Sin esta guarda el pase
+    resume el resumen, y otra vez, hasta dejar la nota en nada. Caso real: tras
+    el backfill quedaba un "grupo compactable" que eran sus propias tres notas."""
+    class _TresPorDia:
+        def complete(self, s, u, schema):
+            return PlanInteracciones(dias=[
+                ResumenDia(ids=ids[:2], resumen=f"charla {n}, parte A")
+                for n, ids in enumerate(_ids_por_dia(u))] + [
+                ResumenDia(ids=ids[2:], resumen=f"charla {n}, parte B")
+                for n, ids in enumerate(_ids_por_dia(u)) if len(ids[2:]) >= 2])
+
+    mc.compactar_interacciones(charlas, _TresPorDia(), prompt="P", dbmod=d, max_grupos=1)
+    quedan = d.interacciones_compactables(charlas, min_por_dia=2)
+    assert not any(g["handle"] == "panchi.test" for g in quedan)
+
+
+def test_un_dia_mixto_si_se_rehace(charlas):
+    """Si al día ya compactado le llegan notas nuevas, hay material sin resumir
+    y vuelve a entrar: la guarda es contra el bucle, no contra el trabajo."""
+    mc.compactar_interacciones(charlas, _LLMDias(), prompt="P", dbmod=d, max_grupos=1)
+    for i in range(2):
+        d.log_interaction(charlas, "panchi.test", f"nota tardía {i}",
+                          created_at=f"2026-07-21 23:5{i}")
+    dias = [x["dia"] for g in d.interacciones_compactables(charlas, min_por_dia=3)
+            if g["handle"] == "panchi.test" for x in g["dias"]]
+    assert "2026-07-21" in dias
+
+
 def test_cada_nota_nueva_se_fecha_con_su_propio_dia(charlas):
     """Si todas las notas de una persona heredaran la fecha de la última, los
     días colapsarían al mismo timestamp y la ventana por recencia perdería el
