@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import random
+import html
 import re
 from html import unescape as _html_unescape
 import sqlite3
@@ -209,8 +210,10 @@ MODELS_CONFIG      : dict | None = settings.get("MODELS")
 #     type "membrilla" → sources = source_name de Membrilla (search_images/search_videos)
 #     type "spotify" → sources = ids de playlist      (tool get_playlist_track)
 #     type "youtube" → sources = canales/listas       (tool share_video)
+#     type "pinterest" → sources = "usuario/tablero"  (tool get_latest_media)
+#     type "tumblr"  → sources = blogs                (tool get_latest_media)
 # ---------------------------------------------------------------------------
-SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube")
+SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube", "pinterest", "tumblr")
 
 
 def _normalize_source_entry(e: dict) -> dict | None:
@@ -3118,6 +3121,143 @@ def _tool_search_videos(args: dict, ctx: ToolContext) -> ToolResult:
     return _search_catalog_media(args, ctx, want_video=True)
 
 
+# ─── T42 · Conectores en vivo: Pinterest y Tumblr ───────────────────────────
+# Tier "API estable": no hay riesgo de bloqueo, así que el bot puede consultarlos
+# en el momento sin pasar por Membrilla. OJO: esto da FRESCURA ("lo último de este
+# tablero"), no búsqueda temática — lo traído no está descripto por el modelo de
+# visión, así que no entra al índice semántico. Membrilla sigue existiendo para lo
+# otro: indexar y poder buscar por significado.
+_IMG_SRC_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.I)
+_LIVE_UA = "botata/1.0 (bot comunitario)"
+
+
+def _pinterest_board_items(board: str, limit: int = 15) -> list[dict]:
+    """Pins recientes de un tablero público vía su RSS oficial (`/usuario/tablero.rss`).
+
+    Sin credenciales y sin scraping: Pinterest publica el feed del tablero. La URL
+    de la imagen viene embebida en el HTML de la descripción."""
+    ref = board.strip().strip("/")
+    url = ref if ref.startswith("http") else f"https://www.pinterest.com/{ref}.rss"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _LIVE_UA})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except Exception as e:
+        log.warning("pinterest: no pude leer el tablero %s: %s", board, e)
+        return []
+    out = []
+    for m in re.finditer(r"<item>(.*?)</item>", raw, re.S | re.I):
+        # La descripción del feed viene con el HTML ESCAPADO (&lt;img …&gt;), así
+        # que hay que desescapar antes de buscar la imagen.
+        bloque = html.unescape(m.group(1))
+        img = _IMG_SRC_RE.search(bloque)
+        if not img:
+            continue
+        link = re.search(r"<link>(.*?)</link>", bloque, re.S)
+        title = re.search(r"<title>(.*?)</title>", bloque, re.S)
+        out.append({"image_url": img.group(1),
+                    "url": (link.group(1).strip() if link else ""),
+                    "title": _strip_html(title.group(1)) if title else "",
+                    "source": board})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tumblr_blog_items(blog: str, limit: int = 15) -> list[dict]:
+    """Posts de foto de un blog vía la API v2 oficial (consumer key gratis).
+
+    `blog` puede ser 'nombre' o 'nombre.tumblr.com'; también 'blog#tag' para
+    filtrar por etiqueta."""
+    key = os.environ.get("TUMBLR_API_KEY")
+    if not key:
+        log.warning("tumblr: falta TUMBLR_API_KEY en el .env")
+        return []
+    nombre, _, tag = blog.partition("#")
+    host = nombre.strip() if "." in nombre else f"{nombre.strip()}.tumblr.com"
+    params = {"api_key": key, "type": "photo", "limit": min(limit, 20)}
+    if tag.strip():
+        params["tag"] = tag.strip()
+    url = f"https://api.tumblr.com/v2/blog/{host}/posts?" + urllib.parse.urlencode(params)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _LIVE_UA})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log.warning("tumblr: no pude leer el blog %s: %s", blog, e)
+        return []
+    out = []
+    for post in (data.get("response") or {}).get("posts", []):
+        for foto in post.get("photos") or []:
+            src = ((foto.get("original_size") or {}).get("url") or "").strip()
+            if src:
+                out.append({"image_url": src, "url": post.get("post_url", ""),
+                            "title": _strip_html(post.get("summary") or ""),
+                            "source": blog})
+                break
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _descargar_media(url: str) -> str | None:
+    """Baja una imagen a `scrape/live/` de la instancia y devuelve el path.
+
+    Carpeta aparte del contenido de Membrilla a propósito: esto es efímero y NO
+    entra al catálogo (no está descripto, no tiene embedding)."""
+    destino = BASE_DIR / "scrape" / "live"
+    destino.mkdir(parents=True, exist_ok=True)
+    nombre = re.sub(r"[^a-zA-Z0-9._-]", "_", url.split("/")[-1].split("?")[0])[-80:]
+    if not nombre or "." not in nombre:
+        nombre = f"live_{abs(hash(url))}.jpg"
+    path = destino / nombre
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _LIVE_UA})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            blob = resp.read(8_000_000)
+        path.write_bytes(blob)
+        return str(path)
+    except Exception as e:
+        log.warning("no pude bajar %s: %s", url, e)
+        return None
+
+
+def _tool_get_latest_media(args: dict, ctx: ToolContext) -> ToolResult:
+    """Trae lo ÚLTIMO de un tablero de Pinterest o un blog de Tumblr registrado.
+
+    Complementa a search_images: aquello busca por significado en el catálogo
+    indexado; esto trae lo nuevo de una fuente conocida, sin indexar."""
+    topic = (args.get("topic") or "").strip()
+    fuentes: list[tuple[str, str]] = []
+    for kind in ("pinterest", "tumblr"):
+        fuentes += [(kind, s) for s in sources_of_type(kind, topic)]
+    if not fuentes:
+        disponibles = ", ".join(
+            e.get("category") or e.get("name") or "?"
+            for e in SOURCES
+            if e["type"] in ("pinterest", "tumblr") and e.get("enabled", True))
+        return ToolResult(text=(
+            f"no tengo tableros ni blogs para '{topic}'. Temas disponibles: {disponibles}"
+            if topic else
+            "no hay fuentes de Pinterest ni Tumblr configuradas"))
+    items = []
+    for kind, ref in fuentes:
+        items += (_pinterest_board_items(ref) if kind == "pinterest"
+                  else _tumblr_blog_items(ref))
+    if not items:
+        return ToolResult(text="no pude traer nada de esas fuentes ahora")
+    # Anti-repetición contra lo que ya posteó (por link del post original).
+    recientes = " ".join(recent_bot_posts(ctx.conn, limit=30)) if ctx.conn is not None else ""
+    frescos = [i for i in items if i.get("url") and i["url"] not in recientes] or items
+    elegido = random.choice(frescos)
+    path = _descargar_media(elegido["image_url"])
+    if not path:
+        return ToolResult(text="encontré contenido pero no pude bajar la imagen")
+    detalle = f"{elegido['title'][:120]} — {elegido['url']}" if elegido.get("title") else elegido.get("url", "")
+    return ToolResult(text=f"último de {elegido['source']}: {detalle}".strip(),
+                      image_path=path)
+
+
 # ─── T9 · Calendar: leer/escribir la tabla events (T4) como tools ────────────
 def _format_events(events: list[dict]) -> str:
     if not events:
@@ -4085,6 +4225,21 @@ def build_tool_registry(config: dict | None = None, *,
         },
         _tool_search_videos,
         {Scope.ADMIN},
+    )
+    reg.register(
+        "get_latest_media",
+        "Trae lo ÚLTIMO de los tableros de Pinterest o blogs de Tumblr que registró el "
+        "admin (por tema). Usala cuando piden algo NUEVO/reciente de esas fuentes; para "
+        "buscar por significado en el catálogo ya indexado usá search_images.",
+        {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Tema de las fuentes a mirar (ej. 'ilustración', 'gatos'). Omitir para todas."},
+            },
+            "required": [],
+        },
+        _tool_get_latest_media,
+        {Scope.ADMIN, Scope.FEED_REFLECTION},
     )
     reg.register(
         "summarize_feed",

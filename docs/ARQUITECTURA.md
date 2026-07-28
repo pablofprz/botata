@@ -91,6 +91,14 @@ las fuentes que le correspondan, y un `type` que dice por dónde entra cada una:
 | `membrilla` | `source_name` de Membrilla | tools `search_images` y `search_videos` (parámetro `topic`) |
 | `spotify` | ids de playlist | tool `get_playlist_track` (parámetro `topic`) |
 | `youtube` | canales (`@handle`, `UC…`) o listas (`PL…`) | tool `share_video` (parámetro `topic`) |
+| `pinterest` | tableros `usuario/tablero` (RSS oficial, sin credenciales) | tool `get_latest_media` |
+| `tumblr` | blogs (`blog` o `blog#tag`, API v2 + `TUMBLR_API_KEY`) | tool `get_latest_media` |
+
+**Indexado vs en vivo (frontera a no confundir):** `membrilla` es contenido **indexado** —
+Membrilla lo baja, `catalog.py` lo describe con visión y entra al motor de búsqueda semántica,
+así que resuelve *"un meme de fútbol"*. `pinterest`/`tumblr` son conectores **en vivo**: traen
+*lo último* de un tablero o blog en el momento, sin descripción ni embedding, y por eso sirven
+para *"traeme lo nuevo de acá"* y no para buscar por significado. Conviven a propósito.
 
 Todo se resuelve **en query** (el tema se matchea contra category/name/description/fuentes),
 así editar el registro aplica en caliente sin reindexar. Permite varias playlists por tema,
@@ -476,6 +484,18 @@ Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
   para prod: Node 18+ si se activa el server `browser`.
 
 ## 16. Cómo extender el sistema (recetas)
+
+> **Regla que manda sobre las demás: lo que pueda ser una TOOL, que sea una tool; lo que
+> pueda ser una SKILL, que sea una skill.** Antes de escribir una feature, ubicarla en este
+> orden: ¿es una **capacidad** que el bot ejerce (traer datos, actuar sobre el mundo)? → tool
+> del registry, con schema y scopes. ¿Es **saber cómo comportarse** ante un tema? → skill
+> (markdown de la instancia). ¿Es algo que hace **por iniciativa propia cada tanto**? → rutina.
+> Recién si no entra en ninguna de las tres se agrega superficie nueva (tarea del motor, nodo
+> del grafo, sección de UI), y hay que poder justificar por qué. Tools y skills son
+> componibles, configurables por el admin (enable/scopes/grupos), testeables de a una y
+> editables en caliente; el código nuevo no. El proyecto ya pagó esa lección: heartbeat,
+> rooms, public_reflection, playlist_share y el posteo de RSS nacieron como features de
+> código y terminaron colapsando en rutinas + tools.
 
 - **Tool nueva**: handler `(args, ctx) → ToolResult` en botata.py + `reg.register(...)`
   en `build_tool_registry` (schema + scopes) + entrada en `settings.json → TOOLS`. Test.

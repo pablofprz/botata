@@ -49,7 +49,7 @@ ENV_KEYS = [
     "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "DISCORD_BOT_TOKEN",
     "OPENROUTER_API_KEY", "LLM_API_KEY",
     "BRAVE_API_KEY",
-    "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY",
+    "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY", "TUMBLR_API_KEY",
     "IG_USERNAME", "IG_PASSWORD", "GOOGLE_OAUTH_ID", "GOOGLE_OAUTH_SECRET",
 ]
 
@@ -252,7 +252,7 @@ def validate_mcp(mcp: dict) -> list[str]:
     return errs
 
 
-SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube")
+SOURCE_TYPES = ("rss", "membrilla", "spotify", "youtube", "pinterest", "tumblr")
 
 
 def validate_sources(sources: list) -> list[str]:
@@ -279,6 +279,10 @@ def validate_sources(sources: list) -> list[str]:
             for u in srcs:
                 if not u.startswith(("http://", "https://")):
                     errs.append(f"{tag}: '{u}' no es una URL de feed válida")
+        if kind == "pinterest":
+            for s in srcs:
+                if not s.startswith("http") and s.count("/") != 1:
+                    errs.append(f"{tag}: '{s}' tiene que ser 'usuario/tablero' o la URL del tablero")
         if not (entry.get("category") or "").strip() and not (entry.get("name") or "").strip():
             errs.append(f"{tag}: poné al menos un tema (category) o un nombre")
     return errs

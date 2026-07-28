@@ -409,7 +409,7 @@ para un bot comunitario.**
 
 ---
 
-### T42 · Pinterest y Tumblr como conectores nativos (fetch en vivo)  `infra` `M`  `P3`
+### T42 · Pinterest y Tumblr como conectores nativos (fetch en vivo)  `infra` `M`  `P3`  ✅ **HECHO** (2026-07-27)
 Idea del admin (2026-07-27): *"si Pinterest te permite integración natural sin peligro de
 bloqueo, podría vivir fuera de Membrilla y agregarse como un tipo de conector más. Lo mismo
 con Tumblr."*
@@ -417,7 +417,7 @@ con Tumblr."*
 - **Es viable, y es el tier correcto:** Pinterest (gallery-dl, boards públicos sin credenciales) y Tumblr (API v2 oficial con consumer key) son los dos **clientes de API estables** de Membrilla — no tienen el riesgo de bloqueo de IG/X. Encajarían como `type: "pinterest"` / `type: "tumblr"` del registro de fuentes (T38b), igual que se sumó `youtube`.
 - **El límite real a entender antes de hacerlo:** un conector en vivo trae **frescura**, no **búsqueda temática**. El índice semántico (vision + embeddings) es lo que permite resolver "un meme de fútbol"; una foto recién traída de un board no está descripta, así que solo sirve para "traeme lo último de este board". Es exactamente la frontera ya documentada en T36 (*fetch en vivo = lo último de fuente conocida; búsqueda por significado = retrieval sobre el índice*).
 - **Además:** para postear en Bluesky hay que subir el blob igual, así que el conector descarga de todos modos — la ventaja sobre Membrilla no es evitar la descarga sino evitar el ciclo batch.
-- **Acept.:** tipos nuevos en el registro + tool `get_latest_from_source(topic)` que trae lo último de esas fuentes, **sin pasar por el catálogo**; documentar en la UI que esas fuentes no participan de la búsqueda temática hasta que Membrilla las indexe. Se solapa con **T36**: conviene hacerlos juntos y decidir si el conector en vivo alimenta el índice (describe y guarda) o es efímero.
+- **Impl. (2026-07-27):** tipos `pinterest` y `tumblr` en el registro + tool **`get_latest_media(topic)`** (scopes admin+feed_reflection: baja archivos, jamás reply). **Pinterest** sale por el **RSS oficial del tablero** (`https://www.pinterest.com/usuario/tablero.rss`) — sin credenciales, sin scraping y sin dependencias nuevas; la URL de la imagen viene en el HTML **escapado** de la descripción (bug que cazó un test: había que desescapar antes de buscar el `<img>`). **Tumblr** por la **API v2** con `TUMBLR_API_KEY` (consumer key gratis), soportando `blog#tag`. La media se baja a `scrape/live/` de la instancia — carpeta aparte del contenido de Membrilla a propósito: es efímera y **no entra al catálogo**. Anti-repetición contra los links ya posteados. **Decisión del admin: NO se saca de Membrilla** — son usos distintos y conviven (indexado vs en vivo). Tests: `test_live_sources.py` (11). Suite: 578.
 
 ### T43 · Reddit: ¿MCP server o tipo de fuente?  `infra` `S`  `P3`
 Duda del admin (2026-07-27) al ver el registro unificado: *"no me queda claro qué es ese MCP de Reddit y en qué se diferencia de RSS."*

@@ -384,7 +384,9 @@
       <code>membrilla</code> (cuentas/boards scrapeados → <code>search_images</code> y
       <code>search_videos</code>) o
       <code>spotify</code> (playlists → <code>get_playlist_track</code>) o
-      <code>youtube</code> (canales y listas → <code>share_video</code>).
+      <code>youtube</code> (canales y listas → <code>share_video</code>), o los conectores
+      <b>en vivo</b> <code>pinterest</code> y <code>tumblr</code> (tableros y blogs →
+      <code>get_latest_media</code>).
       Podés tener <b>varias playlists</b> (rock, cumbia), varios grupos de cuentas por tema y
       varios diarios por sección: cuando alguien pide "un meme de fútbol" o la rutina pide
       música de rock, el bot resuelve el tema contra este registro en vez de adivinar.
@@ -398,6 +400,8 @@
       <button class="ghost" onclick="addSource('rss')">+ feed RSS</button>
       <button class="ghost" onclick="addSource('spotify')">+ playlist de Spotify</button>
       <button class="ghost" onclick="addSource('youtube')">+ canal de YouTube</button>
+      <button class="ghost" onclick="addSource('pinterest')">+ tablero de Pinterest</button>
+      <button class="ghost" onclick="addSource('tumblr')">+ blog de Tumblr</button>
     </div>
     <p class="hint" style="margin-top:10px">
       📺 <b>YouTube</b>: registrá canales (<code>@handle</code> o <code>UC…</code>) y listas
@@ -405,6 +409,13 @@
       por default; con un tema, solo de los de ese tema; y <b>siempre conserva la búsqueda
       abierta</b> cuando el pedido no encaja con lo registrado (o si no registrás nada, cae
       en lo más popular de tu región). Solo necesita <code>YOUTUBE_API_KEY</code> en Credenciales.
+      <br>📌 <b>Pinterest y Tumblr son conectores EN VIVO</b>: traen <b>lo último</b> de un
+      tablero o blog en el momento, sin pasar por Membrilla (Pinterest usa el RSS oficial del
+      tablero, sin credenciales; Tumblr necesita <code>TUMBLR_API_KEY</code> en Credenciales).
+      Ojo con la diferencia: lo que traen <b>no está indexado</b> —no lo describió el modelo de
+      visión— así que sirve para "traeme lo nuevo de acá", no para "buscame un meme de fútbol".
+      Para eso está 🍐 Membrilla, que indexa y permite buscar por significado. Las dos cosas
+      conviven: son usos distintos.
       <br>🎵 <b>Spotify</b> necesita además una autorización única del admin:
       <code>python core/src/spotify_auth.py --instance &lt;tu-bot&gt;</code>. Las recomendaciones
       de usuarios (<code>add_music_recommendation</code>) se agregan siempre a la
@@ -1373,6 +1384,8 @@ const SOURCE_TYPE_INFO = {
   rss:     {label: "feed RSS", ph: "https://diario.com/rss.xml", tool: "get_news"},
   spotify: {label: "playlist de Spotify", ph: "37i9dQZF1DX... (id de la playlist)", tool: "get_playlist_track"},
   youtube: {label: "canal o lista de YouTube", ph: "@canal, UCxxxx (canal) o PLxxxx (lista)", tool: "share_video"},
+  pinterest: {label: "tablero de Pinterest (en vivo)", ph: "usuario/tablero, otrousuario/otro", tool: "get_latest_media"},
+  tumblr: {label: "blog de Tumblr (en vivo)", ph: "unblog, otro#tag", tool: "get_latest_media"},
 };
 
 function sourceList(entry) {

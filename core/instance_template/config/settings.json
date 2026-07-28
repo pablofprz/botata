@@ -70,5 +70,32 @@
 			"enabled": false,
 			"interval_hours": 6.0
 		}
+	},
+	"MCP": {
+		"browser": {
+			"transport": "stdio",
+			"command": "npx",
+			"args": [
+				"@playwright/mcp@latest",
+				"--headless",
+				"--isolated",
+				"--blocked-origins",
+				"http://localhost:*;https://localhost:*;http://127.0.0.1:*;https://127.0.0.1:*;http://0.0.0.0:*;http://[::1]:*;http://169.254.169.254:*"
+			],
+			"tool_filter": {
+				"include": [
+					"browser_navigate",
+					"browser_navigate_back",
+					"browser_snapshot",
+					"browser_close"
+				]
+			},
+			"scopes": [
+				"admin"
+			],
+			"connect_timeout_s": 120,
+			"call_timeout_s": 60,
+			"enabled": true
+		}
 	}
 }

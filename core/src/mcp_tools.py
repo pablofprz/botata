@@ -35,8 +35,10 @@ import asyncio
 import atexit
 import fnmatch
 import logging
+import sys
 import threading
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession
@@ -46,6 +48,44 @@ from mcp.client.streamable_http import streamablehttp_client
 from tools import ALL_SCOPES, ToolContext, ToolRegistry, ToolResult
 
 log = logging.getLogger("botata.mcp")
+
+# Raíz del motor (core/), para resolver los servers que viven en core/mcp_servers/.
+_ENGINE_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_server_command(command: str) -> str:
+    """`python`/`python3` → el intérprete que está corriendo el bot.
+
+    Un `command: "python"` pelado spawnea lo que haya en el PATH, que en general
+    NO es el venv del proyecto: el server arrancaba y moría con
+    `ModuleNotFoundError: No module named 'mcp'`. Usar `sys.executable` garantiza
+    que el server corra con las mismas dependencias que el motor.
+    """
+    if isinstance(command, str) and command.lower() in ("python", "python3", "python.exe"):
+        return sys.executable
+    return command
+
+
+def _resolve_server_arg(arg: str) -> str:
+    """Resuelve un arg que sea un script del motor, sin depender del cwd.
+
+    Los settings declaran el server como `mcp_servers/reddit_server.py` (relativo).
+    Eso solo funcionaba si el bot se lanzaba desde `core/`; desde la reorg v2 el
+    proceso corre en la raíz del workspace y el spawn fallaba en silencio (el
+    server quedaba omitido con un log de error). Si el path relativo no existe
+    desde el cwd pero sí bajo la raíz del motor, se usa el absoluto.
+    """
+    if not isinstance(arg, str) or not arg.endswith(".py"):
+        return arg
+    p = Path(arg)
+    if p.is_absolute() or p.exists():
+        return arg
+    candidato = _ENGINE_ROOT / arg
+    if candidato.exists():
+        log.debug("MCP: '%s' resuelto a %s", arg, candidato)
+        return str(candidato)
+    return arg
+
 
 _DEFAULT_SCOPES: frozenset[str] = frozenset({"admin"})
 _DEFAULT_CALL_TIMEOUT_S = 30.0
@@ -127,7 +167,8 @@ class MCPBridge:
                 if transport == "stdio":
                     env = {**get_default_environment(), **(cfg.get("env") or {})}
                     params = StdioServerParameters(
-                        command=cfg["command"], args=list(cfg.get("args") or []),
+                        command=_resolve_server_command(cfg["command"]),
+                        args=[_resolve_server_arg(a) for a in (cfg.get("args") or [])],
                         env=env, cwd=cfg.get("cwd"),
                     )
                     read, write = await stack.enter_async_context(stdio_client(params))
