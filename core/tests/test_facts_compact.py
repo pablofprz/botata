@@ -317,3 +317,64 @@ def test_si_se_equivoca_dos_veces_no_se_aplica_nada(hechos):
     res = mc.compactar_facts(hechos, llm, prompt="P", dbmod=d, max_usuarios=1)
     assert llm.n == 2 and not res.aplicado and res.rechazos
     assert len(_vivos(hechos, "ppolci.com")) == 6
+
+
+# ─── 📌: lo que la persona pidió que recuerde (T49c) ────────────────────────
+# La distinción es INDEDUCIBLE después: una vez escrito, "acordate de que soy de
+# Racing" y el bot anotándolo por su cuenta quedan idénticos. Por eso la marca la
+# pone quien escribe, en el momento.
+def test_lo_fijado_entra_siempre_y_no_pasa_por_la_busqueda(hechos):
+    fid = d.upsert_user_fact(hechos, "panchi.test", "es de Racing, no de Boca",
+                             source_uri="/remember", pinned=True)
+    assert fid is not None
+    # sale por el camino directo, sin depender de la consulta
+    assert fid in {i for i, _ in d.pinned_user_facts(hechos, "panchi.test")}
+    # y NO compite por los k lugares de la búsqueda
+    for consulta in ("de que cuadro sos", "hola que tal"):
+        assert fid not in {i for i, _ in d.hybrid_search_user_facts(
+            hechos, "panchi.test", consulta, k=20)}
+
+
+def test_pedir_que_recuerde_algo_que_ya_sabia_fija_lo_que_estaba(hechos):
+    """Si el dedup lo descartara en silencio, el pedido se perdería: el bot ya
+    sabía el dato pero nadie le había dicho que era importante."""
+    d.upsert_user_fact(hechos, "panchi.test", "le gusta el asado")
+    previo = {i for i, _ in d.pinned_user_facts(hechos, "panchi.test")}
+    assert d.upsert_user_fact(hechos, "panchi.test", "le gusta el asado",
+                              pinned=True) is None      # dedup: no inserta
+    ahora = {i for i, _ in d.pinned_user_facts(hechos, "panchi.test")}
+    assert len(ahora) == len(previo) + 1                # pero fija el que estaba
+
+
+def test_la_compactacion_no_toca_lo_fijado(hechos):
+    ids = [f["id"] for f in d.facts_compactables(hechos)[0]["filas"]]
+    d.set_user_fact_pinned(hechos, ids[0], True)
+
+    class _Avaro:
+        """Intenta fusionar el 📌 con los demás."""
+        def __init__(self): self.prompts = []
+
+        def complete(self, s, u, schema):
+            self.prompts.append(u)
+            return PlanCompactacion(operaciones=[Operacion(
+                accion="fusionar", ids=ids[:3], texto="todo junto")])
+
+    llm = _Avaro()
+    res = mc.compactar_facts(hechos, llm, prompt="P", dbmod=d, max_usuarios=1)
+    assert not res.aplicado and any("fijada" in r for r in res.rechazos)
+    # se le mostró como contexto, pero fuera de la lista de compactables
+    assert "FIJADOS" in llm.prompts[0]
+    assert hechos.execute("SELECT superseded_by FROM user_facts WHERE id = ?",
+                          (ids[0],)).fetchone()[0] is None
+
+
+def test_los_fijados_no_cuentan_para_el_minimo(hechos):
+    """Un usuario cuyos hechos son casi todos 📌 no tiene material que fusionar,
+    así que no vale gastarle una llamada al modelo."""
+    for f in d.facts_compactables(hechos, min_por_usuario=1):
+        if f["handle"] != "panchi.test":
+            continue
+        for fila in f["filas"][:4]:
+            d.set_user_fact_pinned(hechos, fila["id"], True)
+    assert not any(g["handle"] == "panchi.test"
+                   for g in d.facts_compactables(hechos, min_por_usuario=5))

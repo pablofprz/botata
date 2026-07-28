@@ -882,6 +882,14 @@ async function pickUserMem(handle) {
   catch (e) { USERMEM_DETAIL = null; toast(e.message, false); }
   renderUserMem();
 }
+async function pinUserFact(id, pinned) {
+  try {
+    await api("/api/memory/user/pin", {id, pinned});
+    if (USERMEM_SEL) USERMEM_DETAIL = await api("/api/memory/user", {handle: USERMEM_SEL});
+    renderUserMem();
+    toast(pinned ? "fijado: entra en todas las respuestas" : "ya no está fijado");
+  } catch (e) { toast("error: " + e.message, true); }
+}
 async function delUserMem(kind, id) {
   if (!confirm("¿Borrar este registro de la memoria? No hay vuelta atrás.")) return;
   try {
@@ -902,10 +910,17 @@ function renderUserMem() {
   const d = USERMEM_DETAIL;
   if (USERMEM_SEL && d) {
     const facts = d.facts ?? [], inter = d.interactions ?? [];
-    html += `<b>Hechos (${facts.length})</b><table>${facts.map(f =>
+    const nFij = facts.filter(f => f.pinned).length;
+    html += `<b>Hechos (${facts.length}${nFij ? `, ${nFij} 📌` : ""})</b>
+      <p class="hint" style="margin:2px 0 6px">Los <b>📌</b> son los que esta persona pidió
+      que el bot recuerde: entran en <b>todas</b> las respuestas que le da y la compactación
+      no los toca. El resto se trae por búsqueda, solo si viene al caso.</p>
+      <table>${facts.map(f =>
       `<tr><td class="hint" style="white-space:nowrap">${esc((f.created_at ?? "").slice(0, 10))}</td>
-       <td>${esc(f.fact_text)}</td>
-       <td><button class="danger" onclick="delUserMem('fact',${f.id})">borrar</button></td></tr>`).join("")
+       <td>${f.pinned ? "📌 " : ""}${esc(f.fact_text)}</td>
+       <td style="white-space:nowrap"><button title="${f.pinned ? "dejar de fijarlo" : "fijarlo: entra siempre"}"
+         onclick="pinUserFact(${f.id}, ${f.pinned ? "false" : "true"})">📌</button>
+       <button class="danger" onclick="delUserMem('fact',${f.id})">borrar</button></td></tr>`).join("")
       || "<tr><td class='hint'>sin hechos guardados</td></tr>"}</table>
       <div class="row" style="margin-top:6px;align-items:center">
         <div style="flex:1"><input id="fact-new" placeholder="nuevo hecho sobre @${esc(USERMEM_SEL)} (ej. 'vive en Rosario')"></div>
@@ -1645,11 +1660,35 @@ function renderRoutines() {
 // ─── Flags avanzados sueltos ─────────────────────────────────────────────
 function renderAdvFlags() {
   const mc = (S.MEMORY_COMPACT ??= {});
+  const rt = (S.RETRIEVAL ??= {});
   $("c-adv-flags").innerHTML =
     check(S, "READ_THREAD_MEDIA",
           "leer la media de los hilos (vision: describe imágenes/GIFs/videos del contexto de cada mención — cuesta 1 llamada al modelo de imagen por pieza)",
           true)
     + `<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
+       <p class="hint" style="margin-top:0"><b>🔎 Cuánta memoria trae en cada respuesta.</b>
+       La memoria general entra <b>entera</b> siempre, y de cada persona entran siempre sus
+       hechos <b>📌</b> (los que pidió que recuerde). El resto no: el bot <b>busca</b> lo que
+       tenga que ver con lo que le están diciendo y trae solo eso. Estos números son cuántos
+       trae <b>además</b> de los 📌. Más = se acuerda de más y gasta más contexto en cada
+       mención; menos = más olvidadizo pero más barato. <b>0</b> deja solo los 📌. Si los
+       subís, conviene tener la compactación de abajo prendida: traer 10 hechos no sirve de
+       nada si tres son el mismo repetido.</p>
+       <div class="row"><div style="max-width:220px">`
+    + textInput(rt, "user_facts", "hechos no fijados de la persona", "number")
+    + `</div><div style="max-width:220px">`
+    + textInput(rt, "interactions", "charlas anteriores con ella", "number")
+    + `</div><div style="max-width:220px">`
+    + textInput(rt, "lessons", "lecciones de conducta", "number")
+    + `</div></div>
+       <p class="hint">Y de los <b>otros</b> que estén en el mismo hilo (para no hablarle a
+       alguien como si no lo conociera):</p>
+       <div class="row"><div style="max-width:220px">`
+    + textInput(rt, "thread_users", "cuántas personas del hilo mira", "number")
+    + `</div><div style="max-width:220px">`
+    + textInput(rt, "thread_facts", "hechos de cada una", "number")
+    + `</div></div>
+       <hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
        <p class="hint" style="margin-top:0"><b>🧠 Compactar memoria.</b> La memoria general
        entra <b>entera</b> en cada respuesta, así que su largo es contexto gastado en todas
        las conversaciones. Cuando pasa el tope, el bot usa su modelo de razonamiento para

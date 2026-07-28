@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS user_facts (
     fact_text     TEXT NOT NULL,            -- ej. "Vive en Rosario"
     source_uri    TEXT,                     -- URI del post de origen (auditoría)
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    pinned        INTEGER NOT NULL DEFAULT 0,  -- 📌 lo pedido explícitamente: entra SIEMPRE
     superseded_by INTEGER REFERENCES user_facts(id) ON DELETE SET NULL  -- dedup/merge soft
 );
 CREATE INDEX IF NOT EXISTS idx_user_facts_handle  ON user_facts(handle);
@@ -418,6 +419,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
                      "REFERENCES bot_memory(id) ON DELETE SET NULL")
         log.info("migración: bot_memory.superseded_by agregada")
 
+    # user_facts: 📌 (T49c, 2026-07-28). Lo que alguien pidió recordar
+    # explícitamente entra siempre y no lo toca la compactación. No se puede
+    # inferir para lo ya guardado —"acordate de que soy de Racing" y el bot
+    # anotándolo por su cuenta quedaron idénticos—, así que nadie nace fijado:
+    # se marca de acá en adelante, y el admin puede fijar a mano lo viejo.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(user_facts)")}
+    if "pinned" not in cols:
+        conn.execute("ALTER TABLE user_facts ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        log.info("migración: user_facts.pinned agregada")
+
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(interactions)")}
     if "superseded_by" not in cols:
         conn.execute("ALTER TABLE interactions ADD COLUMN superseded_by INTEGER "
@@ -466,6 +477,7 @@ def upsert_user_fact(
     source_uri: str | None = None,
     *,
     threshold: float = DEDUP_THRESHOLD,
+    pinned: bool = False,
 ) -> int | None:
     """Inserta un hecho para `handle` salvo que exista uno semánticamente duplicado.
 
@@ -486,12 +498,21 @@ def upsert_user_fact(
         (q, handle),
     ).fetchone()
     if hit is not None and (1.0 - hit["distance"]) >= threshold:
-        log.debug("user_facts dedup skip (handle=%s sim=%.3f)", handle, 1.0 - hit["distance"])
+        # Si lo pidieron explícitamente, el duplicado no se descarta en silencio:
+        # se FIJA el que ya estaba. "Acordate de que soy de Racing" tiene que
+        # dejar marca aunque el bot ya lo supiera, o el pedido se pierde.
+        if pinned:
+            conn.execute("UPDATE user_facts SET pinned = 1 WHERE id = ?", (hit["id"],))
+            conn.commit()
+            log.info("user_facts: ya lo sabía, fijo el existente 📌 (@%s id=%s)",
+                     handle, hit["id"])
+        else:
+            log.debug("user_facts dedup skip (handle=%s sim=%.3f)", handle, 1.0 - hit["distance"])
         return None
 
     cur = conn.execute(
-        "INSERT INTO user_facts(handle, fact_text, source_uri) VALUES (?, ?, ?)",
-        (handle, fact_text, source_uri),
+        "INSERT INTO user_facts(handle, fact_text, source_uri, pinned) VALUES (?, ?, ?, ?)",
+        (handle, fact_text, source_uri, 1 if pinned else 0),
     )
     fid = cur.lastrowid
     conn.execute(
@@ -580,6 +601,12 @@ def hybrid_search_user_facts(
     Los hechos archivados (`superseded_by`) quedan afuera de las DOS ramas. Sin
     ese filtro, compactar sería peor que no compactar: el hecho fusionado se
     sumaría a los originales en vez de reemplazarlos.
+
+    Los 📌 tampoco entran acá: van SIEMPRE y por separado
+    (`pinned_user_facts`). Si compitieran por los k lugares, fijar un hecho
+    podría dejar afuera otro relevante — y encima el que alguien pidió recordar
+    quedaría sujeto a que la búsqueda lo encuentre, que es justo lo que fijarlo
+    viene a evitar.
     """
     q = embed(query)
     pool = max(k * 3, 15)
@@ -588,7 +615,7 @@ def hybrid_search_user_facts(
         "SELECT v.rowid AS id, f.fact_text AS text "
         "FROM user_facts_vec v JOIN user_facts f ON f.id = v.rowid "
         "WHERE v.embedding MATCH ? AND k = ? AND v.partition_key = ? "
-        "AND f.superseded_by IS NULL "
+        "AND f.superseded_by IS NULL AND f.pinned = 0 "
         "ORDER BY v.distance",
         (q, pool, handle),
     ).fetchall()
@@ -596,6 +623,7 @@ def hybrid_search_user_facts(
         "SELECT f.id AS id, f.fact_text AS text "
         "FROM user_facts_fts JOIN user_facts f ON f.id = user_facts_fts.rowid "
         "WHERE user_facts_fts MATCH ? AND f.handle = ? AND f.superseded_by IS NULL "
+        "AND f.pinned = 0 "
         "ORDER BY rank LIMIT ?",
         (_fts_query(query), handle, pool),
     ).fetchall()
@@ -1496,6 +1524,23 @@ def supersede_interactions(conn: sqlite3.Connection, viejas: list[int],
 
 # ─── user_facts: compactación por usuario (T49) ─────────────────────────────
 
+def pinned_user_facts(conn: sqlite3.Connection, handle: str,
+                      limit: int = 50) -> list[tuple[int, str]]:
+    """Los 📌 de una persona: entran a la respuesta SIEMPRE, sin pasar por la
+    búsqueda. Son los que pidió recordar textualmente."""
+    return [(r["id"], r["fact_text"]) for r in conn.execute(
+        "SELECT id, fact_text FROM user_facts "
+        "WHERE handle = ? AND pinned = 1 AND superseded_by IS NULL "
+        "ORDER BY id LIMIT ?", (handle, limit)).fetchall()]
+
+
+def set_user_fact_pinned(conn: sqlite3.Connection, fact_id: int, pinned: bool) -> bool:
+    cur = conn.execute("UPDATE user_facts SET pinned = ? WHERE id = ?",
+                       (1 if pinned else 0, fact_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def facts_compactables(conn: sqlite3.Connection, *,
                        min_por_usuario: int = 5) -> list[dict]:
     """Usuarios cuya memoria semántica vale la pena revisar, más cargados primero.
@@ -1508,18 +1553,22 @@ def facts_compactables(conn: sqlite3.Connection, *,
 
     La cola larga de gente con dos o tres hechos se deja quieta: no hay nada que
     fusionar y cada grupo cuesta una llamada al modelo.
+
+    Los 📌 vienen en el grupo (marcados) pero NO cuentan para el mínimo: son
+    contexto para que el modelo no los contradiga, no material para fusionar.
     """
     filas = conn.execute(
-        "SELECT id, handle, fact_text, created_at FROM user_facts "
+        "SELECT id, handle, fact_text, created_at, pinned FROM user_facts "
         "WHERE superseded_by IS NULL ORDER BY handle, id"
     ).fetchall()
     por_handle: dict[str, list[dict]] = {}
     for r in filas:
         por_handle.setdefault(r["handle"], []).append(
-            {"id": r["id"], "text": r["fact_text"], "created_at": r["created_at"]})
+            {"id": r["id"], "text": r["fact_text"], "created_at": r["created_at"],
+             "pinned": bool(r["pinned"])})
     return sorted(
         ({"handle": h, "filas": fs} for h, fs in por_handle.items()
-         if len(fs) >= min_por_usuario),
+         if sum(1 for f in fs if not f["pinned"]) >= min_por_usuario),
         key=lambda g: (-len(g["filas"]), g["handle"]))
 
 

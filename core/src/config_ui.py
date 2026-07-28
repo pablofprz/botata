@@ -920,9 +920,9 @@ class ConfigStore:
             # `superseded_by` y ya no lo lee el bot. Mostrarlo acá haría creer
             # que la compactación no corrió.
             facts = conn.execute(
-                "SELECT id, fact_text, source_uri, created_at FROM user_facts "
+                "SELECT id, fact_text, source_uri, created_at, pinned FROM user_facts "
                 "WHERE handle = ? AND superseded_by IS NULL "
-                "ORDER BY id DESC", (handle,)).fetchall()
+                "ORDER BY pinned DESC, id DESC", (handle,)).fetchall()
             inter = conn.execute(
                 "SELECT id, summary, source_uri, created_at FROM interactions "
                 "WHERE handle = ? AND superseded_by IS NULL "
@@ -956,6 +956,23 @@ class ConfigStore:
             if vec:
                 conn.execute(f"DELETE FROM {vec} WHERE rowid = ?", (rid,))
             conn.commit()
+            return []
+        finally:
+            conn.close()
+
+    def pin_user_fact(self, body: dict) -> list[str]:
+        """Fija o desfija un hecho. Lo fijado entra en TODAS las respuestas a esa
+        persona y la compactación no lo toca. Es la contraparte manual del flag
+        `explicit` que el bot setea cuando alguien pide que lo recuerde: para lo
+        guardado antes de que existiera 📌, esta es la única forma de marcarlo."""
+        try:
+            rid = int(body.get("id", 0))
+        except (TypeError, ValueError):
+            return ["id inválido"]
+        dbmod, conn = self._db()
+        try:
+            if not dbmod.set_user_fact_pinned(conn, rid, bool(body.get("pinned"))):
+                return ["id inexistente"]
             return []
         finally:
             conn.close()
@@ -1512,6 +1529,8 @@ def make_handler(store: ConfigStore):
                     errs = store.delete_user_memory(body)
                 elif self.path == "/api/memory/user/add":
                     errs = store.add_user_memory(body)
+                elif self.path == "/api/memory/user/pin":
+                    errs = store.pin_user_fact(body)
                 elif self.path == "/api/behavior-file":
                     self._send(200, store.edit_behavior_file(body))
                     return

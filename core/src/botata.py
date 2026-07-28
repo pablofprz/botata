@@ -36,7 +36,7 @@ from atproto.exceptions import NetworkError as BskyNetworkError, RequestExceptio
 from atproto_client.request import Request as AtprotoRequest
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing_extensions import TypedDict
 
 # `--init <nombre>`: pipeline de alta de instancia (crea bots/<nombre> + abre la UI).
@@ -364,6 +364,24 @@ _MEDIA_SEARCH        : dict  = settings.get("MEDIA_SEARCH") or {}
 CATALOG_MAX_DISTANCE : float = float(_MEDIA_SEARCH.get("catalog_max_distance", 0.47))
 SOURCE_WEIGHT        : float = float(_MEDIA_SEARCH.get("source_weight", 0.5))
 MEDIA_PREFER_DEFAULT : str   = str(_MEDIA_SEARCH.get("prefer", "auto")).lower()
+
+# Cuánta memoria RECUPERADA entra en cada respuesta. Es el otro lado del corte
+# completa-vs-retrieval: la memoria general entra entera y se compacta por
+# tamaño; esto entra por búsqueda y el largo lo fija este número. Subirlo le da
+# más contexto al bot y le cuesta tokens en cada mención; bajarlo lo hace más
+# olvidadizo. Cinco es lo que había hardcodeado desde el principio.
+_RETRIEVAL   : dict = settings.get("RETRIEVAL") or {}
+def _k(clave: str, default: int) -> int:
+    try:
+        return max(0, int(_RETRIEVAL.get(clave, default)))
+    except (TypeError, ValueError):
+        log.warning("RETRIEVAL.%s no es un número — uso %d", clave, default)
+        return default
+K_USER_FACTS    = _k("user_facts", 5)
+K_LESSONS       = _k("lessons", 5)
+K_INTERACTIONS  = _k("interactions", 5)
+K_THREAD_FACTS  = _k("thread_facts", 3)
+K_THREAD_USERS  = _k("thread_users", 3)
 
 # Palabras que no dicen NADA del tema: envoltorio del pedido ("una foto de…") y
 # muletillas. Sin sacarlas, "foto de mapaches" matchea contra cualquier fuente
@@ -3111,8 +3129,10 @@ def run_mood_loop() -> None:
 
 def _tool_save_to_user_profile(args: dict, ctx: ToolContext) -> ToolResult:
     content = args["content"]
-    dbmod.upsert_user_fact(ctx.conn, ctx.state["author_handle"], content, source_uri="/remember")
-    log.info("/remember → user_facts @%s: %s", ctx.state["author_handle"], content)
+    # /remember ES el pedido explícito: nace 📌 sin preguntarle al modelo.
+    dbmod.upsert_user_fact(ctx.conn, ctx.state["author_handle"], content,
+                           source_uri="/remember", pinned=True)
+    log.info("/remember → user_facts 📌 @%s: %s", ctx.state["author_handle"], content)
     return ToolResult(text=f"anotado en tu perfil: {content}")
 
 
@@ -5445,7 +5465,8 @@ class GenerateReplyNode:
         self.registry = registry
 
     def _other_participants_facts(self, thread: str, *, author: str, query: str,
-                                  max_users: int = 3, k: int = 3) -> str:
+                                  max_users: int = K_THREAD_USERS,
+                                  k: int = K_THREAD_FACTS) -> str:
         """Facts de los demás participantes del hilo (excluye autor y bot).
         Barato: una hybrid_search local por participante, sin LLM. Best-effort."""
         if not thread:
@@ -5476,9 +5497,14 @@ class GenerateReplyNode:
         current = f"{handle}: {state['mention_text']}"
         query   = f"{thread}\n{current}" if thread else current
 
-        facts   = dbmod.hybrid_search_user_facts(self.conn, handle, query, k=5)
-        lessons = dbmod.hybrid_search_lessons(self.conn, query, k=5)
-        recent  = dbmod.recent_interactions(self.conn, handle, limit=5)
+        # Los 📌 van SIEMPRE y primero: son lo que la persona pidió que recuerde,
+        # así que no pueden depender de que la búsqueda los encuentre ni competir
+        # por los k lugares con lo que el bot anotó por su cuenta.
+        fijados = dbmod.pinned_user_facts(self.conn, handle)
+        facts   = fijados + dbmod.hybrid_search_user_facts(
+            self.conn, handle, query, k=K_USER_FACTS)
+        lessons = dbmod.hybrid_search_lessons(self.conn, query, k=K_LESSONS)
+        recent  = dbmod.recent_interactions(self.conn, handle, limit=K_INTERACTIONS)
 
         parts = [soul, f"\n---\n{current_datetime_line()}"]
         mood = mood_line(self.conn)
@@ -5496,7 +5522,10 @@ class GenerateReplyNode:
             if block:
                 parts.append(block)
         if facts:
-            parts.append("\n---\nHechos que sabés del usuario:\n" + "\n".join(f"- {t}" for _, t in facts))
+            ids_fijados = {i for i, _ in fijados}
+            parts.append("\n---\nHechos que sabés del usuario:\n" + "\n".join(
+                f"- {t}" + (" (te pidió que te acuerdes de esto)" if i in ids_fijados else "")
+                for i, t in facts))
         if recent:
             parts.append(
                 "\n---\nTus últimas conversaciones con este usuario (de más nueva a más vieja):\n"
@@ -5830,9 +5859,27 @@ class PostReplyNode:
         return {"posted_reply_uri": posted_uri}
 
 
+class HechoDeUsuario(BaseModel):
+    """Un hecho aprendido, con la distinción que el código no puede deducir."""
+    fact: str = Field(description="El hecho, frase corta en tercera persona.")
+    explicit: bool = Field(
+        default=False,
+        description="true SOLO si la persona pidió textualmente que lo recuerdes "
+                    "('acordate de que…', 'no te olvides', 'guardate esto'). false si lo "
+                    "estás anotando por iniciativa propia porque surgió en la charla. "
+                    "Lo pedido explícitamente se le muestra siempre y no se compacta.")
+
+    # El modelo devuelve tanto "un hecho" como {"fact": …}: las dos son la misma
+    # respuesta. Mismo criterio que el schema de compactación con la lista pelada.
+    @model_validator(mode="before")
+    @classmethod
+    def _texto_pelado(cls, data):
+        return {"fact": data} if isinstance(data, str) else data
+
+
 class ProfileUpdate(BaseModel):
     """Salida estructurada del post-reply: hechos duraderos + nota de interacción."""
-    facts: list[str] = Field(
+    facts: list[HechoDeUsuario] = Field(
         default_factory=list,
         description="Hechos duraderos que el usuario reveló sobre sí mismo. Vacío si no hubo.",
     )
@@ -5877,17 +5924,22 @@ class UpdateProfileNode:
             log.error("UpdateProfileNode failed for @%s: %s", handle, e)
             return {}
 
-        new_facts = 0
-        for fact in result.facts:
-            fact = fact.strip().lstrip("-").strip()
-            if fact and dbmod.upsert_user_fact(self.conn, handle, fact, source_uri="reply") is not None:
+        new_facts = fijados = 0
+        for item in result.facts:
+            fact = item.fact.strip().lstrip("-").strip()
+            if not fact:
+                continue
+            if dbmod.upsert_user_fact(self.conn, handle, fact, source_uri="reply",
+                                      pinned=item.explicit) is not None:
                 new_facts += 1
+                fijados += 1 if item.explicit else 0
         summary = (result.interaction_summary or "").strip()
         if summary:
             dbmod.log_interaction(self.conn, handle, summary,
                                   source_uri=state.get("mention_uri"))
         if new_facts or summary:
-            log.info("@%s: %d hecho(s) nuevo(s), interacción %s", handle, new_facts,
+            log.info("@%s: %d hecho(s) nuevo(s)%s, interacción %s", handle, new_facts,
+                     f" ({fijados} 📌 a pedido)" if fijados else "",
                      "anotada" if summary else "sin nota")
         return {}
 

@@ -463,8 +463,18 @@ def compactar_facts(conn, llm, *, prompt: str, dbmod,
     res.chars_antes = sum(len(f["text"]) for g in grupos for f in g["filas"])
     hechos = 0
     for g in grupos:
+        # Mismo trato que en bot_memory: los 📌 se muestran para que el plan no
+        # los contradiga, pero no se ofrecen para compactar. Si igual aparecen
+        # en el plan, `verificar` lo rechaza — se comprueba contra la base, no
+        # contra lo que el prompt pidió.
+        libres = [f for f in g["filas"] if not f.get("pinned")]
+        fijadas = [f for f in g["filas"] if f.get("pinned")]
         usuario = (f"Hechos que el bot recuerda de @{g['handle']} "
-                   f"({len(g['filas'])}):\n" + bloque_para_el_modelo(g["filas"]))
+                   f"({len(libres)}):\n" + bloque_para_el_modelo(libres)
+                   + ("\n\nHechos FIJADOS 📌 (esta persona pidió que los recuerde; "
+                      "son contexto para no contradecirlos, NO los toques ni los "
+                      "menciones en el plan):\n" + bloque_para_el_modelo(fijadas)
+                      if fijadas else ""))
         plan, errs = _plan_de_facts(llm, prompt, usuario, g)
         if plan is None:
             continue

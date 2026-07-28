@@ -98,6 +98,29 @@ def test_facts_y_nota_juntos(conn, spy_facts):
     assert len(d.recent_interactions(conn, U1)) == 1
 
 
+def test_el_hecho_pedido_explicitamente_nace_fijado(conn, monkeypatch):
+    """La distinción es INDEDUCIBLE después: una vez escrito, "acordate de que
+    soy de Racing" y el bot anotándolo por su cuenta quedan idénticos. Por eso
+    la marca la pone quien escribe, en el momento."""
+    vistos: list[tuple[str, bool]] = []
+    monkeypatch.setattr(b.dbmod, "upsert_user_fact",
+                        lambda c, h, t, source_uri=None, pinned=False, **kw:
+                        (vistos.append((t, pinned)), 1)[1])
+    node = b.UpdateProfileNode(FakeLLM({"facts": [
+        {"fact": "Es de Racing", "explicit": True},
+        {"fact": "Ayer fue a la cancha", "explicit": False},
+    ], "interaction_summary": "hablamos de fútbol"}), conn)
+    node.run(_state())
+    assert vistos == [("Es de Racing", True), ("Ayer fue a la cancha", False)]
+
+
+def test_el_schema_acepta_el_hecho_como_texto_pelado():
+    """El modelo devuelve tanto "un hecho" como {"fact": …}: son la misma
+    respuesta, y absorberla sale más barato que pelearla."""
+    p = b.ProfileUpdate(facts=["Vive en Rosario"], interaction_summary="x")
+    assert p.facts[0].fact == "Vive en Rosario" and p.facts[0].explicit is False
+
+
 def test_summary_vacio_no_inserta(conn, spy_facts):
     node = b.UpdateProfileNode(FakeLLM({"facts": [], "interaction_summary": "  "}), conn)
     node.run(_state())
@@ -130,3 +153,46 @@ def test_reply_context_incluye_interacciones(conn, monkeypatch):
     out = node.run(_state("che bot"))
     assert out["reply_text"] == "ok"
     assert "hablamos del mundial" in captured["system"]
+
+
+def test_lo_fijado_entra_aunque_la_busqueda_no_traiga_nada(conn, monkeypatch):
+    """El 📌 no puede depender de que la búsqueda lo encuentre: fijarlo es
+    justamente lo que viene a evitar eso."""
+    captured = {}
+
+    class CaptureLLM:
+        def complete(self, system, user, model_cls=None):
+            captured["system"] = system
+            return b.BotReply(text="ok")
+
+    monkeypatch.setattr(b.dbmod, "pinned_user_facts",
+                        lambda c, h, **k: [(1, "es de Racing, no de Boca")])
+    monkeypatch.setattr(b.dbmod, "hybrid_search_user_facts", lambda *a, **k: [])
+    monkeypatch.setattr(b.dbmod, "hybrid_search_lessons", lambda *a, **k: [])
+    b.GenerateReplyNode(CaptureLLM(), conn, registry=None).run(_state("che bot"))
+    assert "es de Racing, no de Boca" in captured["system"]
+    # y se le avisa POR QUÉ está ahí, para que no lo trate como un dato más
+    assert "te pidió que te acuerdes" in captured["system"]
+
+
+def test_los_parametros_de_recuperacion_llegan_a_la_busqueda(conn, monkeypatch):
+    """Los k estaban hardcodeados en 5; ahora salen de settings.RETRIEVAL."""
+    pedidos = {}
+
+    class CaptureLLM:
+        def complete(self, system, user, model_cls=None):
+            return b.BotReply(text="ok")
+
+    monkeypatch.setattr(b, "K_USER_FACTS", 9)
+    monkeypatch.setattr(b, "K_INTERACTIONS", 2)
+    monkeypatch.setattr(b.dbmod, "pinned_user_facts", lambda c, h, **k: [])
+    def _anotar(clave, valor):
+        pedidos[clave] = valor
+        return []
+    monkeypatch.setattr(b.dbmod, "hybrid_search_user_facts",
+                        lambda c, h, q, k=5: _anotar("facts", k))
+    monkeypatch.setattr(b.dbmod, "hybrid_search_lessons", lambda *a, **k: [])
+    monkeypatch.setattr(b.dbmod, "recent_interactions",
+                        lambda c, h, limit=5: _anotar("inter", limit))
+    b.GenerateReplyNode(CaptureLLM(), conn, registry=None).run(_state("che bot"))
+    assert pedidos == {"facts": 9, "inter": 2}

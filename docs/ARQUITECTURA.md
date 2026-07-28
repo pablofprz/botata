@@ -281,6 +281,34 @@ No todas las memorias entran igual, y la diferencia decide qué crece y qué no:
 Confundir los dos lleva a optimizar lo que no duele. Un pase de compactación sobre
 `user_facts` no ahorra un solo token de contexto; sobre `bot_memory`, todos.
 
+**Cuánto trae el retrieval es config, no código** (`settings.RETRIEVAL`, T49c): `user_facts`,
+`interactions`, `lessons` y los del hilo. Estaban hardcodeados en 5 y 3. Es la perilla que
+gobierna el costo por mención del lado del retrieval, igual que `max_chars` lo gobierna del
+lado de lo que entra completo.
+
+### Los 📌 de cada persona (T49c)
+
+`user_facts.pinned` marca lo que alguien **pidió** que el bot recuerde. Un hecho fijado:
+
+* entra en **todas** las respuestas a esa persona, por afuera de la búsqueda;
+* **no** compite por los k lugares del retrieval — `hybrid_search_user_facts` lo excluye a
+  propósito. Si compitiera, fijar un hecho podría dejar afuera otro relevante, y encima lo
+  que alguien pidió recordar quedaría sujeto a que la búsqueda lo encuentre, que es justo
+  lo que fijarlo viene a evitar;
+* no lo toca la compactación (se le muestra como contexto para no contradecirlo, y el plan
+  que lo toque se rechaza).
+
+Quién lo marca: `/remember` nace 📌 sin preguntar (es el pedido explícito en persona), y el
+pase post-reply lo decide con el flag `explicit` de cada hecho, definido por el **acto de
+pedir** ("acordate de que…") y no por la importancia aparente. Es la misma distinción
+**indeducible después** que motivó el `explicit` de `save_to_memory`: una vez escrito, lo
+que pidieron recordar y lo que el bot anotó por su cuenta son la misma fila.
+
+Detalle que parece menor y no lo es: si el pedido cae sobre algo que el bot **ya sabía**, el
+dedup no lo descarta en silencio — **fija el hecho que ya estaba**. Si no, "acordate de que
+soy de Racing" se perdía justo cuando el dato ya existía pero nadie había dicho que
+importaba.
+
 ### Compactación de la memoria (T48, `memory_compact.py`)
 
 Cuando `bot_memory` pasa `MEMORY_COMPACT.max_chars`, una tarea del motor le pide al

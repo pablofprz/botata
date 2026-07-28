@@ -28,6 +28,13 @@
 		"min_por_usuario": 5,
 		"max_usuarios": 3
 	},
+	"RETRIEVAL": {
+		"user_facts": 5,
+		"interactions": 5,
+		"lessons": 5,
+		"thread_users": 3,
+		"thread_facts": 3
+	},
 	"MEDIA_SEARCH": {
 		"catalog_max_distance": 0.47,
 		"source_weight": 0.5,

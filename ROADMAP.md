@@ -495,6 +495,17 @@ Reporte del admin mirando la UI: *"veo que están todos los datos de la memoria 
 - **Efecto colateral:** `build_router` ahora completa los roles del motor con los defaults (el settings de la instancia gana). Antes, una instancia creada antes de que existiera un rol andaba igual —`_chain` cae al default desde T48— pero el rol **no aparecía en la UI** para cambiarlo, que es peor que no tenerlo.
 - Tests: `test_facts_compact.py` (18) + router. Suite: **778**.
 
+### T49c · 📌 en los hechos de usuario + cuánta memoria trae en cada respuesta  `infra` `M`  `P1`  ✅ **HECHO** (2026-07-28)
+Pedido del admin: *"se debería agregar como parámetro en la UI cuántas memorias no pineadas trae sobre el usuario"* y, al señalar que el pin no existía ahí, *"el pin tiene que estar y tiene que forzarse cuando el usuario le pide que recuerde algo"*.
+
+- **`RETRIEVAL` en settings + UI** (⚠️ Avanzado, al lado de la compactación porque son las dos caras de lo mismo): `user_facts`, `interactions`, `lessons`, `thread_users`, `thread_facts`. Estaban **hardcodeados en 5 y 3** desde el principio. `0` apaga esa fuente.
+- **`user_facts.pinned`**: lo fijado entra en **todas** las respuestas a esa persona, por afuera de la búsqueda, y la compactación no lo toca. Por eso `hybrid_search_user_facts` los **excluye**: si compitieran por los k lugares, fijar un hecho podría dejar afuera otro relevante — y el hecho que alguien pidió recordar quedaría sujeto a que la búsqueda lo encuentre, que es justo lo que fijarlo viene a evitar. Al inyectarlo se le aclara al bot *por qué* está ahí ("te pidió que te acuerdes de esto").
+- **Se fuerza en el pedido explícito**, con el mismo criterio que `save_to_memory` (T48): `/remember` nace 📌 sin preguntar, y `ProfileUpdate.facts` pasó de `list[str]` a items con flag `explicit`, que el prompt define por el **acto de pedir** ("acordate de que…"), no por la importancia aparente. Es la distinción **indeducible después**: una vez escrito, lo que pidieron recordar y lo que el bot anotó solo son idénticos.
+- **Un pedido sobre algo que ya sabía FIJA lo que estaba** en vez de descartarse por dedup. Si no, "acordate de que soy de Racing" se perdía en silencio cuando el bot ya lo tenía anotado — el dato estaba, pero nadie le había dicho que importaba.
+- **Nadie nace fijado en la migración**: para lo guardado antes no hay forma de saber si lo pidieron. Se marca de acá en adelante, y el admin fija lo viejo a mano desde 🗂️ Memoria por usuario.
+- Los 📌 **no cuentan para el mínimo** de la compactación: son contexto para no contradecirlos, no material para fusionar. Si el plan igual los toca, se rechaza (se verifica contra la base, no contra lo que el prompt pidió).
+- Tests: +8 (`test_facts_compact`, `test_interactions`). Suite: **791**.
+
 ### T45 · Búsqueda directa en Pinterest (no solo fuentes declaradas)  `infra` `M`  `P3`
 Pedido del admin (2026-07-27): *"yo puedo poner tableros con fotos de mapaches, pero ¿por qué el bot no podría buscar mapaches directamente en Pinterest?"*
 
