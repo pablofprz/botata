@@ -60,10 +60,15 @@ class _LLM:
 
 
 # ─── Selección de candidatas ────────────────────────────────────────────────
-def test_las_fijadas_no_son_candidatas(memoria):
+def test_las_fijadas_si_son_candidatas_pero_solo_para_fusionar(memoria):
+    """Excluirlas del todo parecía prudente y resultó una trampa: medido en
+    producción, el 59% de los hechos terminó fijado y la compactación se quedó
+    sin material (35 usuarios compactables → 4), con duplicados congelados para
+    siempre porque una de las puntas estaba 📌. Fusionar no pierde nada;
+    descartar sí, y sigue prohibido."""
     ids = {m["id"] for m in mc.candidatas(memoria)}
     fijada = next(m["id"] for m in memoria if m["pinned"])
-    assert fijada not in ids and len(ids) == 5
+    assert fijada in ids and len(ids) == 6
 
 
 def test_el_bloque_lleva_la_fecha(memoria):
@@ -77,10 +82,24 @@ def test_el_bloque_lleva_la_fecha(memoria):
 def _plan(*ops): return PlanCompactacion(operaciones=list(ops))
 
 
-def test_rechaza_tocar_una_fijada(memoria):
+def test_rechaza_descartar_una_fijada(memoria):
     fijada = next(m["id"] for m in memoria if m["pinned"])
     errs = mc.verificar(_plan(Operacion(accion="descartar", ids=[fijada])), memoria)
-    assert any("fijada" in e for e in errs)
+    assert any("descarta" in e for e in errs)
+
+
+def test_permite_fusionar_una_fijada_y_la_sucesora_hereda_el_pin(conn, memoria):
+    """El caso que motivó el cambio: tres filas diciendo lo mismo, dos 📌, que
+    ningún pase podía tocar."""
+    fijada = next(m["id"] for m in memoria if m["pinned"])
+    otra = next(m["id"] for m in memoria if not m["pinned"])
+    assert mc.verificar(_plan(Operacion(
+        accion="fusionar", ids=[fijada, otra], texto="una sola")), memoria) == []
+
+    mc.compactar(conn, _LLM(_plan(Operacion(
+        accion="fusionar", ids=[fijada, otra], texto="una sola"))), prompt="P", dbmod=d)
+    nueva = [m for m in d.list_bot_memory(conn) if m["text"] == "una sola"]
+    assert len(nueva) == 1 and nueva[0]["pinned"]   # fusionar no puede desfijar
 
 
 def test_rechaza_ids_inventados(memoria):
@@ -193,10 +212,15 @@ def test_no_hace_nada_si_no_hay_material(conn):
     assert res.ok and not res.plan and not res.aplicado
 
 
-def test_las_fijadas_van_al_prompt_como_contexto(conn, memoria):
+def test_el_prompt_marca_cuales_estan_fijadas(conn, memoria):
+    """El modelo tiene que verlas para poder fusionarlas y para saber que no
+    puede tirarlas."""
     llm = _LLM(_plan())
     mc.compactar(conn, llm, prompt="P", dbmod=d)
-    assert "FIJADAS" in llm.user and "El 19/7 te mataron" in llm.user
+    fijada = next(m for m in memoria if m["pinned"])
+    assert f"📌 {fijada['text']}" in llm.user
+    libre = next(m for m in memoria if not m["pinned"])
+    assert f"📌 {libre['text']}" not in llm.user
 
 
 # ─── Lo archivado deja de entrar al contexto, pero se puede recuperar ───────

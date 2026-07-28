@@ -26,8 +26,10 @@ entradas rotas o incomprensibles, y datos de un usuario que ya no participa.
 
 ## Qué NO hacer
 
-- **No toques las entradas marcadas como FIJADAS.** Son la identidad del bot o
-  decisiones del admin. Te las paso solo para que no las contradigas.
+- **Nunca descartes una entrada marcada con 📌.** Son la identidad del bot o
+  cosas que el admin pidió que queden. Sí podés **fusionarlas** si están
+  repetidas o se contradicen: la entrada resultante conserva todo lo que decían
+  y sigue siendo 📌. Ante la duda con una 📌, dejala como está.
 - **No elimines instrucciones vigentes.** "No postear memes del mundial", "tratá
   bien a fulana", "pará con tal chiste" son órdenes que siguen valiendo: se
   pueden fusionar si están repetidas, nunca descartar. Ante la duda de si una

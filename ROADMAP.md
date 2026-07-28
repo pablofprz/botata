@@ -506,6 +506,15 @@ Pedido del admin: *"se debería agregar como parámetro en la UI cuántas memori
 - Los 📌 **no cuentan para el mínimo** de la compactación: son contexto para no contradecirlos, no material para fusionar. Si el plan igual los toca, se rechaza (se verifica contra la base, no contra lo que el prompt pidió).
 - Tests: +8 (`test_facts_compact`, `test_interactions`). Suite: **791**.
 
+### T49d · El 📌 no puede ser un trinquete  `infra` `S`  `P1`  ✅ **HECHO** (2026-07-28)
+Reporte del admin la misma noche que salió T49c: *"el bot está pineando memorias como muy importantes y repetidas, además son memorias duplicadas"*.
+
+- **El bot no fijó nada** — verificado por tres lados: el proceso venía corriendo código anterior a T49c (nunca logueó la migración), las dos líneas de log que lo delatarían aparecen 0 veces, y el modelo marca `explicit` bien (5 de 5 casos, incluido "dato fuerte sin pedido" → false). Los 182 pines salieron del botón de la UI.
+- **Pero la UI sí fijaba sola**: `add_bot_memory(source="admin", pinned=True)` desde T48. Una sesión de carga de lore dejó **15 de 15** memorias generales fijadas. **Cargar no es priorizar** → ya no nace 📌.
+- **El problema real era el trinquete.** Con el 59% de los hechos fijados e inmunes, la compactación se quedó sin material: **35 usuarios compactables → 4**. Y los duplicados peores eran justo los congelados, porque tener una punta 📌 bastaba para bloquear la fusión: @sirdemian con **cuatro** filas diciendo que es de Chacarita, tres fijadas.
+- **Regla nueva:** un 📌 **se fusiona, no se descarta**. La sucesora hereda el pin y el contenido, y `superseded_by` mantiene el undo; descartar sigue prohibido. Los 📌 vuelven a contar para el mínimo (excluirlos dejaba afuera justo los casos peores). Efecto medido: **4 → 31** usuarios compactables.
+- Tests: +3, ajustados los 4 que codificaban la inmunidad total. Suite: **794**.
+
 ### T45 · Búsqueda directa en Pinterest (no solo fuentes declaradas)  `infra` `M`  `P3`
 Pedido del admin (2026-07-27): *"yo puedo poner tableros con fotos de mapaches, pero ¿por qué el bot no podría buscar mapaches directamente en Pinterest?"*
 

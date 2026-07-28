@@ -346,12 +346,14 @@ def test_pedir_que_recuerde_algo_que_ya_sabia_fija_lo_que_estaba(hechos):
     assert len(ahora) == len(previo) + 1                # pero fija el que estaba
 
 
-def test_la_compactacion_no_toca_lo_fijado(hechos):
+def test_un_fijado_se_puede_fusionar_y_la_sucesora_hereda_el_pin(hechos):
+    """El caso real: @sirdemian tenía TRES filas diciendo que es de Chacarita,
+    dos de ellas 📌. Con las fijadas intocables, ese duplicado quedaba congelado
+    para siempre. Fusionar no pierde nada; la sucesora sigue entrando siempre."""
     ids = [f["id"] for f in d.facts_compactables(hechos)[0]["filas"]]
     d.set_user_fact_pinned(hechos, ids[0], True)
 
-    class _Avaro:
-        """Intenta fusionar el 📌 con los demás."""
+    class _Fusiona:
         def __init__(self): self.prompts = []
 
         def complete(self, s, u, schema):
@@ -359,22 +361,39 @@ def test_la_compactacion_no_toca_lo_fijado(hechos):
             return PlanCompactacion(operaciones=[Operacion(
                 accion="fusionar", ids=ids[:3], texto="todo junto")])
 
-    llm = _Avaro()
+    llm = _Fusiona()
     res = mc.compactar_facts(hechos, llm, prompt="P", dbmod=d, max_usuarios=1)
-    assert not res.aplicado and any("fijada" in r for r in res.rechazos)
-    # se le mostró como contexto, pero fuera de la lista de compactables
-    assert "FIJADOS" in llm.prompts[0]
+    assert res.aplicado and not res.rechazos
+    assert "📌" in llm.prompts[0]            # el modelo ve cuál está fijada
+    nueva = hechos.execute("SELECT pinned FROM user_facts WHERE fact_text = 'todo junto'"
+                           ).fetchone()[0]
+    assert nueva == 1
+
+
+def test_un_fijado_no_se_puede_descartar(hechos):
+    ids = [f["id"] for f in d.facts_compactables(hechos)[0]["filas"]]
+    d.set_user_fact_pinned(hechos, ids[0], True)
+
+    class _Tirador:
+        def complete(self, s, u, schema):
+            return PlanCompactacion(operaciones=[
+                Operacion(accion="fusionar", ids=ids[1:3], texto="ok"),
+                Operacion(accion="descartar", ids=[ids[0]])])
+
+    res = mc.compactar_facts(hechos, _Tirador(), prompt="P", dbmod=d, max_usuarios=1)
+    assert not res.aplicado and any("descarta" in r for r in res.rechazos)
     assert hechos.execute("SELECT superseded_by FROM user_facts WHERE id = ?",
                           (ids[0],)).fetchone()[0] is None
 
 
-def test_los_fijados_no_cuentan_para_el_minimo(hechos):
-    """Un usuario cuyos hechos son casi todos 📌 no tiene material que fusionar,
-    así que no vale gastarle una llamada al modelo."""
-    for f in d.facts_compactables(hechos, min_por_usuario=1):
-        if f["handle"] != "panchi.test":
+def test_los_fijados_cuentan_para_el_minimo(hechos):
+    """Antes no contaban, y eso dejaba afuera justo los casos peores: alguien
+    con tres filas diciendo lo mismo, dos de ellas 📌, no llegaba al umbral y
+    su duplicado quedaba congelado."""
+    for g in d.facts_compactables(hechos, min_por_usuario=1):
+        if g["handle"] != "panchi.test":
             continue
-        for fila in f["filas"][:4]:
+        for fila in g["filas"][:4]:
             d.set_user_fact_pinned(hechos, fila["id"], True)
-    assert not any(g["handle"] == "panchi.test"
-                   for g in d.facts_compactables(hechos, min_por_usuario=5))
+    assert any(g["handle"] == "panchi.test"
+               for g in d.facts_compactables(hechos, min_por_usuario=5))

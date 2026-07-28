@@ -295,8 +295,16 @@ lado de lo que entra completo.
   propósito. Si compitiera, fijar un hecho podría dejar afuera otro relevante, y encima lo
   que alguien pidió recordar quedaría sujeto a que la búsqueda lo encuentre, que es justo
   lo que fijarlo viene a evitar;
-* no lo toca la compactación (se le muestra como contexto para no contradecirlo, y el plan
-  que lo toque se rechaza).
+* **se puede fusionar, nunca descartar** (T49d). La inmunidad total duró un día: medido en
+  producción, el 59% de los hechos terminó fijado y la compactación se quedó sin material —
+  de 35 usuarios compactables a **4**—, con los duplicados peores congelados justamente por
+  tener una punta 📌 (un usuario con **cuatro** filas diciendo que es de Chacarita, tres de
+  ellas fijadas). Fusionar no pierde nada: la sucesora hereda el 📌 y el contenido, y
+  `superseded_by` mantiene el undo. Descartar sí perdería, y sigue prohibido.
+
+**Fijar es una decisión, no un efecto de cargar.** Por eso el alta manual del admin **no**
+nace 📌 (nacía, y una sesión de carga de lore dejó 15 de 15 memorias inmunes para siempre).
+Se carga primero y se fija después lo poco que tiene que entrar sí o sí.
 
 Quién lo marca: `/remember` nace 📌 sin preguntar (es el pedido explícito en persona), y el
 pase post-reply lo decide con el flag `explicit` de cada hecho, definido por el **acto de

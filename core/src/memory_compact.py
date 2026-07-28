@@ -116,9 +116,20 @@ class Resultado:
 
 
 def candidatas(memorias: list[dict]) -> list[dict]:
-    """Las que el pase puede tocar: vigentes y no fijadas."""
-    return [m for m in memorias
-            if not m.get("pinned") and m.get("superseded_by") is None]
+    """Las que el pase puede tocar: las vigentes, fijadas incluidas.
+
+    Las 📌 entran, pero solo para FUSIONARSE (ver `verificar`). Excluirlas del
+    todo parecía lo prudente y resultó ser una trampa: medido en producción, el
+    59% de los hechos terminó fijado y la compactación se quedó sin material —
+    de 35 usuarios compactables a 4. Peor, los duplicados con una punta fijada
+    quedaban congelados para siempre: tres filas diciendo que alguien es de
+    Chacarita, dos de ellas 📌, que ningún pase podía tocar.
+
+    Fusionar no pierde nada —la sucesora nace 📌 y conserva lo que decían— y
+    sigue habiendo undo por `superseded_by`. Descartar sí perdería, y por eso
+    sigue prohibido.
+    """
+    return [m for m in memorias if m.get("superseded_by") is None]
 
 
 def bloque_para_el_modelo(memorias: list[dict]) -> str:
@@ -129,6 +140,15 @@ def bloque_para_el_modelo(memorias: list[dict]) -> str:
     return "\n".join(
         f"[{m['id']}] ({str(m.get('created_at') or '')[:10]}) {m['text']}"
         for m in memorias)
+
+
+def _bloque_con_pin(filas: list[dict]) -> str:
+    """Como `bloque_para_el_modelo`, marcando cuáles están fijadas. El modelo
+    necesita verlas para poder fusionarlas y para saber que no puede tirarlas."""
+    return "\n".join(
+        f"[{m['id']}] ({str(m.get('created_at') or '')[:10]}) "
+        f"{'📌 ' if m.get('pinned') else ''}{m['text']}"
+        for m in filas)
 
 
 def verificar(plan: PlanCompactacion, memorias: list[dict]) -> list[str]:
@@ -150,8 +170,10 @@ def verificar(plan: PlanCompactacion, memorias: list[dict]) -> list[str]:
         for i in op.ids:
             if i not in por_id:
                 errores.append(f"id {i} inexistente (¿inventado?)")
-            elif i in fijadas:
-                errores.append(f"id {i} está fijada 📌 y el plan la toca")
+            elif i in fijadas and op.accion == "descartar":
+                # Fusionarla sí (la sucesora hereda el 📌 y el contenido);
+                # tirarla no. Lo que alguien pidió recordar no se pierde.
+                errores.append(f"id {i} está fijada 📌 y el plan la descarta")
             elif i in archivadas:
                 errores.append(f"id {i} ya estaba archivada")
             if i in vistos:
@@ -190,12 +212,8 @@ def compactar(conn, llm, *, prompt: str, dbmod, dry_run: bool = False) -> Result
         log.info("compactación: %d filas tocables, no hay nada que hacer", len(libres))
         return res
 
-    fijadas = [m for m in todas if m.get("pinned")]
-    usuario = (
-        "Memorias que podés compactar:\n" + bloque_para_el_modelo(libres)
-        + ("\n\nMemorias FIJADAS (contexto para no contradecirlas; NO las toques "
-           "ni las menciones en el plan):\n" + bloque_para_el_modelo(fijadas)
-           if fijadas else ""))
+    usuario = "Memorias que podés compactar (las 📌 se fusionan, nunca se descartan):\n" \
+        + _bloque_con_pin(libres)
     try:
         plan = llm.complete(prompt, usuario, PlanCompactacion)
     except Exception as e:
@@ -226,12 +244,14 @@ def compactar(conn, llm, *, prompt: str, dbmod, dry_run: bool = False) -> Result
     # Todo o nada: si algo explota a mitad, la memoria no queda a medio reescribir.
     try:
         with conn:
+            fijado = {m["id"] for m in todas if m.get("pinned")}
             for op in plan.operaciones:
                 nueva = None
                 if op.accion == "fusionar":
                     cur = conn.execute(
-                        "INSERT INTO bot_memory (text, source) VALUES (?, ?)",
-                        (op.texto.strip(), "compact"))
+                        "INSERT INTO bot_memory (text, source, pinned) VALUES (?, ?, ?)",
+                        (op.texto.strip(), "compact",
+                         1 if fijado & set(op.ids) else 0))
                     nueva = int(cur.lastrowid)
                 for vid in op.ids:
                     conn.execute("UPDATE bot_memory SET superseded_by = ? WHERE id = ?",
@@ -467,14 +487,8 @@ def compactar_facts(conn, llm, *, prompt: str, dbmod,
         # los contradiga, pero no se ofrecen para compactar. Si igual aparecen
         # en el plan, `verificar` lo rechaza — se comprueba contra la base, no
         # contra lo que el prompt pidió.
-        libres = [f for f in g["filas"] if not f.get("pinned")]
-        fijadas = [f for f in g["filas"] if f.get("pinned")]
         usuario = (f"Hechos que el bot recuerda de @{g['handle']} "
-                   f"({len(libres)}):\n" + bloque_para_el_modelo(libres)
-                   + ("\n\nHechos FIJADOS 📌 (esta persona pidió que los recuerde; "
-                      "son contexto para no contradecirlos, NO los toques ni los "
-                      "menciones en el plan):\n" + bloque_para_el_modelo(fijadas)
-                      if fijadas else ""))
+                   f"({len(g['filas'])}):\n" + _bloque_con_pin(g["filas"]))
         plan, errs = _plan_de_facts(llm, prompt, usuario, g)
         if plan is None:
             continue
@@ -494,11 +508,15 @@ def compactar_facts(conn, llm, *, prompt: str, dbmod,
         # porque falló la de otro.
         try:
             with conn:
+                fijado = {f["id"] for f in g["filas"] if f.get("pinned")}
                 for op in plan.operaciones:
                     nueva = None
                     if op.accion == "fusionar":
+                        # Si alguna de las que reemplaza estaba 📌, la sucesora
+                        # también: fusionar no puede desfijar por la ventana.
                         nueva = dbmod.insert_user_fact(
-                            conn, g["handle"], op.texto.strip(), "compact")
+                            conn, g["handle"], op.texto.strip(), "compact",
+                            pinned=bool(fijado & set(op.ids)))
                     dbmod.supersede_user_facts(conn, op.ids, nueva)
             hechos += 1
         except Exception as e:

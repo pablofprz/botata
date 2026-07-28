@@ -1554,8 +1554,10 @@ def facts_compactables(conn: sqlite3.Connection, *,
     La cola larga de gente con dos o tres hechos se deja quieta: no hay nada que
     fusionar y cada grupo cuesta una llamada al modelo.
 
-    Los 📌 vienen en el grupo (marcados) pero NO cuentan para el mínimo: son
-    contexto para que el modelo no los contradiga, no material para fusionar.
+    Los 📌 cuentan como cualquier otro: se pueden fusionar entre sí o con los
+    demás (nunca descartar), así que son material. Excluirlos del mínimo dejaba
+    afuera justo los casos peores — alguien con tres filas diciendo lo mismo,
+    dos de ellas fijadas, no llegaba nunca al umbral.
     """
     filas = conn.execute(
         "SELECT id, handle, fact_text, created_at, pinned FROM user_facts "
@@ -1568,12 +1570,12 @@ def facts_compactables(conn: sqlite3.Connection, *,
              "pinned": bool(r["pinned"])})
     return sorted(
         ({"handle": h, "filas": fs} for h, fs in por_handle.items()
-         if sum(1 for f in fs if not f["pinned"]) >= min_por_usuario),
+         if len(fs) >= min_por_usuario),
         key=lambda g: (-len(g["filas"]), g["handle"]))
 
 
 def insert_user_fact(conn: sqlite3.Connection, handle: str, fact_text: str,
-                     source_uri: str | None = None) -> int:
+                     source_uri: str | None = None, *, pinned: bool = False) -> int:
     """Inserta un hecho SIN dedup semántico y devuelve su id.
 
     `upsert_user_fact` no sirve para la compactación: el texto fusionado se
@@ -1582,8 +1584,8 @@ def insert_user_fact(conn: sqlite3.Connection, handle: str, fact_text: str,
     poder correr dentro de la transacción todo-o-nada del pase.
     """
     cur = conn.execute(
-        "INSERT INTO user_facts(handle, fact_text, source_uri) VALUES (?, ?, ?)",
-        (handle, fact_text, source_uri))
+        "INSERT INTO user_facts(handle, fact_text, source_uri, pinned) VALUES (?, ?, ?, ?)",
+        (handle, fact_text, source_uri, 1 if pinned else 0))
     fid = int(cur.lastrowid)
     conn.execute(
         "INSERT INTO user_facts_vec(rowid, embedding, partition_key) VALUES (?, ?, ?)",

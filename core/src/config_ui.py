@@ -896,7 +896,13 @@ class ConfigStore:
                     return ["falta el texto"]
                 # Lo que carga el admin a mano nace 📌: lo escribió una persona
                 # con intención, no lo dedujo el bot de una conversación.
-                dbmod.add_bot_memory(conn, text, source="admin", pinned=True)
+                # NO nace fijada. Nacía 📌 (T48) suponiendo que lo que el admin
+                # escribe a mano es decisión deliberada; medido en producción,
+                # una sesión de carga de lore dejó 15 de 15 memorias fijadas y
+                # por lo tanto inmunes para siempre a la deduplicación. Cargar
+                # no es priorizar: se fija después, con el botón, lo poco que
+                # tiene que entrar sí o sí.
+                dbmod.add_bot_memory(conn, text, source="admin")
             elif body.get("action") == "delete":
                 if not dbmod.delete_bot_memory(conn, int(body.get("id", 0))):
                     return ["id inexistente"]

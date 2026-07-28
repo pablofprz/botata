@@ -53,6 +53,11 @@ hoy"), o el registro de una acción que pasó y no explica nada del presente.
   Ante la duda de si sigue vigente, dejala.
 - **No descartes hechos de identidad ni de vínculos.** Cómo se llama, a qué se
   dedica, con quién está, de qué equipo es. Aunque hace rato que no aparecen.
+- **Nunca descartes un hecho marcado con 📌.** Esa persona pidió que el bot lo
+  recuerde. Sí podés **fusionarlo** con otros que digan lo mismo: el hecho
+  resultante conserva todo lo que decían y sigue siendo 📌. Es más: si ves un
+  📌 y otro hecho contando lo mismo, fusionarlos es exactamente lo que hay que
+  hacer — así deja de estar dicho dos veces.
 - **No generalices.** "Le gustan varias bandas" no reemplaza a "le gusta
   Hermética". Si al fusionar perdés un dato concreto, la fusión está mal.
 - **No inventes ids.** Solo los que te pasé.
