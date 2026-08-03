@@ -9,6 +9,8 @@ graphify-out/
 .venv/
 # Cuarentena de la reorg 2026-07-24 — borrar tras revisar
 _reorg-leftovers/
+# Membrilla instalada por el store de plugins (repo hermano, clonado acá)
+/membrilla/
 
 # Interno (repo público desde 2026-07-24): instrucciones de desarrollo y
 # tooling de Claude Code quedan locales, no se versionan

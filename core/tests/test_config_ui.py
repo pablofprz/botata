@@ -902,3 +902,97 @@ def test_tool_rounds_valido_pasa():
     s = json.loads(json.dumps(_SETTINGS))
     s["TOOL_ROUNDS"] = 3
     assert cu.validate_settings(s) == []
+
+
+# ─── Store de plugins (/plugins) ─────────────────────────────────────────────
+def test_plugins_catalog(store):
+    cat = store.plugins_catalog()
+    ids = [c["id"] for c in cat["connectors"]]
+    assert "rss" in ids and "membrilla" in ids
+    assert cat["mcp"] == [{"name": "reddit", "enabled": False, "transport": "stdio"}]
+    assert cat["membrilla"]["installed"] is False
+    assert "BSKY_PASSWORD" in cat["env_keys"]
+
+
+def test_plugin_toggle_connector_persiste(store):
+    assert store.set_plugin_enabled({"kind": "connector", "id": "rss", "enabled": False}) == []
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    assert s["CONNECTORS"]["rss"]["enabled"] is False
+    rss = next(c for c in store.plugins_catalog()["connectors"] if c["id"] == "rss")
+    assert rss["enabled"] is False
+
+
+def test_plugin_toggle_core_rechazado(store):
+    errs = store.set_plugin_enabled(
+        {"kind": "connector", "id": "membrilla", "enabled": False})
+    assert errs and "motor" in errs[0]
+
+
+def test_plugin_toggle_mcp_persiste(store):
+    assert store.set_plugin_enabled({"kind": "mcp", "id": "reddit", "enabled": True}) == []
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    assert s["MCP"]["reddit"]["enabled"] is True
+    assert s["MCP"]["reddit"]["transport"] == "stdio"   # no pisó el resto
+
+
+def test_plugin_toggle_desconocido(store):
+    assert store.set_plugin_enabled({"kind": "mcp", "id": "nope", "enabled": True})
+    assert store.set_plugin_enabled({"kind": "banana", "id": "rss", "enabled": True})
+
+
+def test_membrilla_install_clona_y_configura(store, tmp_path, monkeypatch):
+    dest = tmp_path / "ws" / "membrilla"
+    monkeypatch.setattr(cu.ConfigStore, "_membrilla_default_dir",
+                        staticmethod(lambda: dest))
+
+    def _fake_clone(cmd, **kw):
+        assert cmd[:2] == ["git", "clone"] and cmd[-1] == str(dest)
+        dest.mkdir(parents=True)
+
+        class R:
+            returncode = 0
+            stdout = "Cloning...\n"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(cu.subprocess, "run", _fake_clone)
+    r = store.install_membrilla()
+    assert r["ok"] and r["installed"]
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    assert s["MEMBRILLA"]["repo"] == str(dest)
+    # segunda vez: idempotente, sin volver a clonar
+    monkeypatch.setattr(cu.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no debía clonar")))
+    r2 = store.install_membrilla()
+    assert r2["ok"] and "ya está" in r2["output"]
+
+
+def test_membrilla_install_conserva_commands(store, tmp_path, monkeypatch):
+    # Carpeta ya clonada a mano pero sin configurar: instala sin git y sin
+    # pisar los commands que ya estaban.
+    dest = tmp_path / "ws2" / "membrilla"
+    dest.mkdir(parents=True)
+    monkeypatch.setattr(cu.ConfigStore, "_membrilla_default_dir",
+                        staticmethod(lambda: dest))
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    s["MEMBRILLA"] = {"commands": ["python x.py run"]}
+    store.settings_path.write_text(json.dumps(s), encoding="utf-8")
+    monkeypatch.setattr(cu.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no debía clonar")))
+    r = store.install_membrilla()
+    assert r["ok"]
+    s2 = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    assert s2["MEMBRILLA"] == {"commands": ["python x.py run"], "repo": str(dest)}
+
+
+def test_api_plugins(server):
+    data = _get(server + "/api/plugins")
+    assert data["membrilla"]["installed"] is False
+    with urllib.request.urlopen(server + "/plugins", timeout=10) as r:
+        assert r.status == 200
+        assert "Store de plugins" in r.read().decode("utf-8")
+
+
+def test_api_plugins_install_id_invalido(server):
+    code, body = _post(server + "/api/plugins/install", {"id": "banana"})
+    assert code == 400 and body["errors"]

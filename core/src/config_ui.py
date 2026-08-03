@@ -45,6 +45,11 @@ from instance import instance_dir
 REPO_DIR = Path(__file__).resolve().parent.parent  # src/ -> raíz del repo
 BASE_DIR = instance_dir()      # T28c: la instancia a editar (default = raíz del repo)
 UI_HTML = REPO_DIR / "ui" / "config.html"  # asset del motor, no de la instancia
+UI_PLUGINS = REPO_DIR / "ui" / "plugins.html"  # 🛒 store de plugins (pestaña aparte)
+
+# De dónde se instala Membrilla y a dónde: hermana del motor, dentro del
+# workspace (gitignored). Una constante y no config: es LA suite hermana.
+MEMBRILLA_GIT_URL = "https://github.com/pablofprz/membrilla.git"
 
 ENV_KEYS = [
     "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "DISCORD_BOT_TOKEN",
@@ -53,6 +58,7 @@ ENV_KEYS = [
     # xAI (Grok), que es el camino si se quiere un generador poco filtrado.
     "XAI_API_KEY",
     "BRAVE_API_KEY",
+    "ELEVENLABS_API_KEY",   # generar audio (tool generate_audio, notas de voz)
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY", "TUMBLR_API_KEY",
     "IG_USERNAME", "IG_PASSWORD", "GOOGLE_OAUTH_ID", "GOOGLE_OAUTH_SECRET",
 ]
@@ -281,6 +287,23 @@ def validate_settings(s: dict) -> list[str]:
             size = ig.get("size")
             if size is not None and not re.fullmatch(r"\d{3,5}x\d{3,5}", str(size)):
                 errs.append("IMAGE_GEN.size debe tener la forma ANCHOxALTO (ej. 1024x1024)")
+
+    ag = s.get("AUDIO_GEN")
+    if ag is not None:
+        if not isinstance(ag, dict):
+            errs.append("AUDIO_GEN debe ser un objeto {voice_id, model_id, max_per_day, "
+                        "max_per_thread, max_chars}")
+        else:
+            # voice_id vacío NO es error: es el estado normal antes de elegir la
+            # voz en la UI (la tool avisa en runtime que falta). Solo el tipo.
+            if not isinstance(ag.get("voice_id", ""), str):
+                errs.append("AUDIO_GEN.voice_id debe ser un string (el ID de la voz "
+                            "de ElevenLabs — elegila en la sección Tools)")
+            for campo, default in (("max_per_day", 20), ("max_per_thread", 3),
+                                   ("max_chars", 600)):
+                v = ag.get(campo, default)
+                if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                    errs.append(f"AUDIO_GEN.{campo} debe ser un entero >= 0 (0 = sin tope)")
 
     for name, cfg in s.get("TASKS", {}).items():
         if "interval_hours" in cfg and not isinstance(cfg["interval_hours"], (int, float)):
@@ -803,6 +826,12 @@ class ConfigStore:
             return self._run_membrilla()
         if action == "whatsapp_status":
             return self._whatsapp_status()
+        if action == "whatsapp_bridge_restart":
+            return self._whatsapp_bridge_restart()
+        if action == "elevenlabs_voices":
+            return self._elevenlabs_voices()
+        if action == "elevenlabs_test":
+            return self._elevenlabs_test()
         src = Path(__file__).resolve().parent
         cmds = {
             "parse_memory": [sys.executable, str(src / "parse_memory.py"),
@@ -863,6 +892,113 @@ class ConfigStore:
         # legítimo). Devolverlos también sería tener dos verdades.
         return {"ok": True, "status": estado, "groups": grupos, "qr_url": base + "/qr.png"}
 
+    def _env_valor(self, key: str) -> str:
+        """Valor de UNA clave del .env de la instancia, para uso del SERVER.
+        Jamás viaja al navegador (la API de credenciales es write-only)."""
+        if not self.env_path.exists():
+            return ""
+        for line in self.env_path.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, _, v = line.partition("=")
+                if k.strip() == key:
+                    return v.strip()
+        return ""
+
+    def _elevenlabs_voices(self) -> dict:
+        """Las voces que la cuenta puede usar por API, para el selector de la UI.
+
+        Existe porque el ID no se puede adivinar: un voice_id de la library se
+        guarda sin queja y después el TTS devuelve 402 en el tier gratis. La
+        lista real de la cuenta es la única fuente que no miente.
+        """
+        import elevenlabs_client
+        key = self._env_valor("ELEVENLABS_API_KEY")
+        if not key:
+            return {"ok": False, "errors": [
+                "falta ELEVENLABS_API_KEY — cargala en la sección Credenciales "
+                "(la key sale de elevenlabs.io → perfil → API keys)"]}
+        try:
+            return {"ok": True, "voices": elevenlabs_client.list_voices(key)}
+        except Exception as e:
+            return {"ok": False, "errors": [elevenlabs_client.error_legible(e)]}
+
+    def _elevenlabs_test(self) -> dict:
+        """Genera un audio corto con la config GUARDADA y lo devuelve en base64
+        para escucharlo en la UI. Elegir voz sin poder oírla es elegir a ciegas
+        (y cada prueba gasta ~40 caracteres de la cuota — por eso es un botón y
+        no algo automático)."""
+        import base64
+
+        import elevenlabs_client
+        key = self._env_valor("ELEVENLABS_API_KEY")
+        if not key:
+            return {"ok": False, "errors": ["falta ELEVENLABS_API_KEY en Credenciales"]}
+        try:
+            s = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {"ok": False, "errors": [f"no pude leer settings.json: {e}"]}
+        cfg = s.get("AUDIO_GEN") or {}
+        if not str(cfg.get("voice_id") or "").strip():
+            return {"ok": False, "errors": [
+                "AUDIO_GEN.voice_id vacío — elegí una voz arriba y GUARDÁ antes de probar"]}
+        nombre = str(s.get("BOT_NAME") or "botata")
+        try:
+            blob = elevenlabs_client.tts(
+                f"hola, soy {nombre}, y así suena mi voz",
+                voice_id=str(cfg["voice_id"]).strip(),
+                model_id=cfg.get("model_id") or elevenlabs_client.DEFAULT_MODEL,
+                api_key=key)
+        except Exception as e:
+            return {"ok": False, "errors": [elevenlabs_client.error_legible(e)]}
+        return {"ok": True, "audio_b64": base64.b64encode(blob).decode("ascii"),
+                "mime": "audio/ogg"}
+
+    def _whatsapp_bridge_restart(self) -> dict:
+        """(Re)arranca el bridge con la config guardada. Es EL botón que hace
+        instalable el canal: sin esto, "levantá un binario Go en otra terminal"
+        es un paso que solo puede dar quien ya sabe.
+
+        Siempre reinicia (no "arranca si no está"): el caso típico de apretar
+        el botón con el bridge ya vivo es que cambió WHATSAPP_CHAT_IDS, y el
+        allowlist del lado Go solo se aplica relanzando. Solo se mata el bridge
+        que lanzamos nosotros (pid file); uno ajeno se respeta y se avisa.
+        """
+        import wa_bridge
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {"ok": False, "errors": [f"no pude leer settings.json: {e}"]}
+        url = str(settings.get("WHATSAPP_BRIDGE_URL") or "").strip()
+        if not url:
+            return {"ok": False, "errors": [
+                "falta WHATSAPP_BRIDGE_URL en settings.json (guardá la sección Canal primero)"]}
+        # El allowlist del bridge = chats configurados + canales de rutinas
+        # (mismo criterio que build_channel: una rutina con channel también
+        # tiene que poder escribir ahí).
+        chats = [str(c) for c in settings.get("WHATSAPP_CHAT_IDS") or []]
+        try:
+            import routines as routinesmod
+            for r in routinesmod.load_routines(self.base / "routines"):
+                if r.channel and str(r.channel) not in chats:
+                    chats.append(str(r.channel))
+        except Exception:
+            log.debug("no pude leer rutinas para el allowlist del bridge", exc_info=True)
+        data_dir = self.base / "whatsapp"
+        ajeno = (wa_bridge.bridge_status(url) is not None
+                 and not wa_bridge._pid_file(data_dir).exists())
+        if ajeno:
+            return {"ok": True, "output": (
+                "hay un bridge respondiendo que no lancé yo — lo dejo como está. "
+                "Si necesitás aplicarle otra lista de chats, reinicialo vos donde lo hayas lanzado.")}
+        wa_bridge.stop_bridge(data_dir)
+        st, err = wa_bridge.ensure_bridge(url, data_dir, chats)
+        if err:
+            return {"ok": False, "errors": [err]}
+        nota = "" if chats else (" ⚠ Sin chats configurados: modo vinculación — elegí "
+                                 "los grupos abajo, guardá y volvé a apretar este botón.")
+        return {"ok": True, "output": f"bridge arriba en {url}.{nota}",
+                "status": st}
+
     def _run_membrilla(self) -> dict:
         """Lanza el scraper Membrilla (suite hermana) según settings.MEMBRILLA:
         {"repo": ruta del repo membrilla, "commands": ["python scrape_ig.py api-run", ...]}.
@@ -914,6 +1050,104 @@ class ConfigStore:
                 chunks.append("✗ timeout (30 min) — comando cortado")
         return {"ok": ok, "output": "\n\n".join(chunks)[-8000:],
                 "errors": [] if ok else ["algún comando falló — mirá el output"]}
+
+    # ── Store de plugins (página /plugins) ──────────────────────────────────
+    def plugins_catalog(self) -> dict:
+        """Todo lo prendible/apagable en un solo lugar: conectores (built-in +
+        plugins de la instancia), servers MCP y el estado de Membrilla."""
+        settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        connectorsmod.load_instance_plugins(self.base / "connectors")
+        mcp = [{"name": n, "enabled": bool((cfg or {}).get("enabled", True)),
+                "transport": str((cfg or {}).get("transport", ""))}
+               for n, cfg in (settings.get("MCP") or {}).items()]
+        return {"connectors": connectorsmod.catalog(settings), "mcp": mcp,
+                "env_keys": self._env_status(),
+                "membrilla": self._membrilla_status(settings)}
+
+    def _membrilla_status(self, settings: dict) -> dict:
+        cfg = settings.get("MEMBRILLA") or {}
+        repo = Path(str(cfg.get("repo") or "")).expanduser()
+        scrape = self.base / "scrape"
+        try:
+            scrape_items = sum(1 for _ in scrape.rglob("*.json")) if scrape.is_dir() else 0
+        except OSError:
+            scrape_items = 0
+        return {"installed": bool(cfg.get("repo")) and repo.is_dir(),
+                "repo": str(cfg.get("repo") or ""),
+                "commands": [str(c) for c in (cfg.get("commands") or [])],
+                "scrape_items": scrape_items,
+                "default_dir": str(self._membrilla_default_dir())}
+
+    @staticmethod
+    def _membrilla_default_dir() -> Path:
+        return REPO_DIR.parent / "membrilla"   # core/.. = raíz del workspace
+
+    def set_plugin_enabled(self, body: dict) -> list[str]:
+        """Toggle de un plugin. Muta SOLO la clave pedida releyendo settings del
+        disco (mismo criterio que T30: no pisar lo que otro editor guardó)."""
+        kind = str(body.get("kind") or "")
+        pid = str(body.get("id") or "")
+        on = bool(body.get("enabled"))
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return [f"no pude leer settings.json: {e}"]
+        if kind == "connector":
+            con = connectorsmod.by_id(pid)
+            if con is None:
+                return [f"conector desconocido: {pid}"]
+            if con.core:
+                return [f"'{con.label}' es parte del motor y no se puede apagar"]
+            settings.setdefault("CONNECTORS", {}).setdefault(pid, {})["enabled"] = on
+        elif kind == "mcp":
+            mcp = settings.get("MCP") or {}
+            if pid not in mcp:
+                return [f"server MCP desconocido: {pid}"]
+            mcp[pid]["enabled"] = on
+        else:
+            return ["kind inválido (connector|mcp)"]
+        self._atomic_write(self.settings_path,
+                           json.dumps(settings, ensure_ascii=False, indent="\t") + "\n")
+        return []
+
+    def install_membrilla(self) -> dict:
+        """Instala la suite hermana: git clone al workspace + settings.MEMBRILLA.repo.
+        Idempotente: repo ya configurado y presente = ya instalado; carpeta ya
+        clonada pero sin configurar = solo escribe el setting."""
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {"ok": False, "errors": [f"no pude leer settings.json: {e}"]}
+        cfg = settings.get("MEMBRILLA") or {}
+        repo = Path(str(cfg.get("repo") or "")).expanduser()
+        if cfg.get("repo") and repo.is_dir():
+            return {"ok": True, "installed": True,
+                    "output": f"Membrilla ya está instalado en {repo}"}
+        dest = self._membrilla_default_dir()
+        salida = ""
+        if not dest.is_dir():
+            try:
+                r = subprocess.run(["git", "clone", MEMBRILLA_GIT_URL, str(dest)],
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=600)
+            except FileNotFoundError:
+                return {"ok": False, "errors": [
+                    "no encontré `git` en el PATH — instalalo o cloná "
+                    f"{MEMBRILLA_GIT_URL} a mano y poné la ruta en MEMBRILLA.repo"]}
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "errors": ["timeout clonando Membrilla (10 min)"]}
+            salida = ((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip()
+            if r.returncode != 0:
+                return {"ok": False, "output": salida[-4000:],
+                        "errors": [f"git clone falló (exit {r.returncode})"]}
+        # Conserva commands que ya hubiera: instalar no borra configuración.
+        settings["MEMBRILLA"] = {**cfg, "repo": str(dest)}
+        self._atomic_write(self.settings_path,
+                           json.dumps(settings, ensure_ascii=False, indent="\t") + "\n")
+        return {"ok": True, "installed": True, "output": (salida + (
+            f"\n\nMembrilla quedó en {dest} y la ruta ya está en settings. "
+            "Faltan dos pasos a mano (ver su README): crear su venv con las deps, "
+            "y definir en MEMBRILLA.commands qué scrapers correr.")).strip()}
 
     def debug_chat(self, text: str, author: str | None = None) -> dict:
         """Mensaje al pipeline REAL del bot (como mención del admin), sin red
@@ -1814,6 +2048,10 @@ def make_handler(store: ConfigStore):
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 self._send(200, UI_HTML.read_bytes(), ctype="text/html")
+            elif self.path in ("/plugins", "/plugins.html"):
+                self._send(200, UI_PLUGINS.read_bytes(), ctype="text/html")
+            elif self.path == "/api/plugins":
+                self._send(200, store.plugins_catalog())
             elif self.path == "/botata_200.png":
                 logo = REPO_DIR / "ui" / "botata_200.png"
                 if logo.exists():
@@ -1883,6 +2121,15 @@ def make_handler(store: ConfigStore):
                                        body.get("mode", "open"))
                 elif self.path == "/api/run":
                     self._send(200, store.run_action(body.get("action", "")))
+                    return
+                elif self.path == "/api/plugins/toggle":
+                    errs = store.set_plugin_enabled(body)
+                elif self.path == "/api/plugins/install":
+                    if body.get("id") != "membrilla":
+                        self._send(400, {"ok": False,
+                                         "errors": ["solo membrilla es instalable por ahora"]})
+                    else:
+                        self._send(200, store.install_membrilla())
                     return
                 elif self.path == "/api/hello":
                     self._send(200, store.hello_world(body))

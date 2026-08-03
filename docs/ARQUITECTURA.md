@@ -611,6 +611,22 @@ los generadores devuelven PNG de ~1,5 MB — se recomprime a JPEG con Pillow **s
 instalada** (dependencia opcional; sin ella la tool avisa en vez de mandar algo que el canal
 va a rechazar). WhatsApp no tiene ese límite, por eso el tope es por instancia.
 
+**Generar audio (2026-08-03).** `generate_audio` convierte texto en **nota de voz**
+(ElevenLabs, TTS) y la adjunta por la misma plomería que las imágenes
+(`ToolResult.image_path` → `media_path` del canal). No pasa por el router — ElevenLabs no
+habla OpenAI: endpoint propio con `ELEVENLABS_API_KEY` en el `.env`. Sale en **Ogg/Opus**
+porque es lo que WhatsApp exige para nota de voz (`PTT`) y lo que Telegram va a pedir en
+`sendVoice`. El canal declara **`SUPPORTS_AUDIO`** (hoy solo `WhatsAppChannel`); sin el
+flag la tool se niega — Bluesky trataría el .ogg como imagen y rompería el reply. En el
+bridge Go, `/send` decide por extensión y sube `MediaAudio`; como `AudioMessage` no tiene
+caption, el texto va en un mensaje aparte antes del audio. `AUDIO_GEN` =
+`{voice_id, model_id, max_per_day, max_per_thread, max_chars}` — `max_chars` rechaza (no
+trunca) textos largos porque ElevenLabs cobra por carácter. Nace scope `admin`, como todo
+lo que se paga. El cliente HTTP está en **`elevenlabs_client.py`**, compartido con la UI
+de config: la tarjeta "Voz del bot" (sección Tools) lista las voces de la cuenta real y
+reproduce una prueba de la voz guardada — el `voice_id` no se adivina: uno de la library
+se guarda sin queja y el TTS después devuelve 402 en el tier gratis.
+
 **Buscar ≠ leer (2026-08-01).** `web_search` devuelve solo los snippets de Brave, que
 muy seguido no contienen el dato (medido: "dólar blue hoy" → tres resúmenes que dicen
 "acá seguí la cotización" y ni un número). `read_url` cierra el ciclo: baja una página,
@@ -775,6 +791,19 @@ sino con el **bridge en Go** (`core/bridges/whatsapp/`, whatsmeow, HTTP en
 `127.0.0.1:8899`), con `WHATSAPP_CHAT_IDS` obligatorio como allowlist de grupos — de los
 dos lados, Python y Go.
 
+**El bridge no se lanza a mano** (2026-08-03): `wa_bridge.py` maneja su ciclo de vida —
+si `/status` no responde, lo levanta (compilándolo con `go build` la primera vez, si hay
+Go instalado) y espera; el pid queda en `<instancia>/whatsapp/bridge.pid` y su salida en
+`bridge.log`. Lo usan **el motor** (`build_channel` con `CHANNEL=whatsapp`) y **la UI**
+(botón "Arrancar / reiniciar bridge" en el panel de vinculación — reiniciar es lo que
+aplica un cambio de `WHATSAPP_CHAT_IDS` al allowlist del lado Go). El proceso queda
+desacoplado (sobrevive al bot: la sesión vive en él) y un bridge que ya respondía se
+respeta — puede ser uno lanzado a mano o compartido con otro bot del mismo número; solo
+se mata el que registró su pid. Gotcha que ya mordió: el proceso corre con
+`cwd=core/bridges/whatsapp`, así que `data_dir` se resuelve a absoluto SIEMPRE — relativo,
+el bridge crearía una sesión nueva vacía ahí y pediría QR teniendo la sesión buena en
+la instancia.
+
 ### BskyClient
 
 Único punto de contacto con Bluesky (dentro de botata.py). Métodos clave:
@@ -890,10 +919,17 @@ es `/sleep`.
   `--fetch-feeds [--backfill]` · `--hello-world [--publicar]`. Satélites: `mem_admin.py`,
   `catalog.py`, `scrape_ig.py`, `migrate_maripobot.py`.
 - **Panel de configuración** (`python config_ui.py`, T22): UI web solo-localhost (stdlib,
-  cero deps) sobre settings.json/.env/news_sites.json/skills. Credenciales write-only
+  cero deps) sobre settings.json/.env/fuentes/skills. Credenciales write-only
   (la API nunca devuelve valores), validación server-side, escrituras atómicas con `.bak`.
-  Settings/.env/news requieren reiniciar el bot; el toggle de skills es hot-reload.
+  Settings/.env/fuentes requieren reiniciar el bot; el toggle de skills es hot-reload.
   Es la UI del núcleo: las futuras UIs por canal serán interfaces separadas.
+- **Store de plugins** (`/plugins`, `ui/plugins.html`): página aparte del panel con todo
+  lo prendible en un lugar — conectores (built-in + plugins de la instancia), servers MCP
+  y **Membrilla como instalable** (`POST /api/plugins/install` = `git clone` de la suite
+  hermana a `<workspace>/membrilla`, gitignored, + `MEMBRILLA.repo` en settings;
+  idempotente, y una carpeta ya clonada a mano solo escribe el setting). Los toggles
+  (`POST /api/plugins/toggle`) releen settings del disco y mutan SOLO la clave pedida —
+  mismo criterio anti-pisado que T30; los conectores `core` no se pueden apagar.
 - **Presentación inicial (hello world)**: último paso de la puesta en marcha. `POST
   /api/hello` (sección «Presentación» de la UI) o `python -m botata --hello-world
   [--publicar]`. `hello_world_pendientes()` corta ANTES de escribir nada si falta identidad,

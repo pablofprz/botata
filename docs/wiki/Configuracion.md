@@ -14,6 +14,15 @@ escrituras son atómicas y con backup `.bak`.
 La mayoría de los cambios de settings requieren reiniciar el bot; el toggle de skills y la
 edición de archivos markdown (skills, moods, rutinas) aplican **en caliente**.
 
+## El store de plugins
+
+Desde la nav del panel, «🛒 Store de plugins» abre una página aparte (`/plugins`) con todo
+lo prendible del bot en un solo lugar: los **conectores** de contenido (con aviso de
+credencial faltante), los **servers MCP**, y **Membrilla** — la suite hermana de scraping —
+como plugin instalable: un botón la clona del repo oficial y la deja configurada
+(quedan dos pasos a mano que la card explica: su venv y qué scrapers correr). Los cambios
+de activación aplican al reiniciar el bot.
+
 ## Las secciones de `settings.json`
 
 | Sección | Qué controla |

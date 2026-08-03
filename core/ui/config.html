@@ -149,6 +149,7 @@
   <a href="#plugins">🧩 Plugins</a>
   <a href="#mcp">🔌 MCP</a>
   <a href="#membrilla">🍐 Membrilla</a>
+  <a href="/plugins" target="_blank" title="se abre en su propia pestaña">🛒 Store de plugins ↗</a>
   <div class="navsep">Operación</div>
   <a href="#tareas">⚙️ Motor (deberes fijos)</a>
   <a href="#debug">🐛 Debug (chat)</a>
@@ -234,7 +235,14 @@
       <br>· <b>todos</b> ⚠️ = la puede disparar <b>cualquier usuario</b> que le hable al bot.
       <br>· <b>proactividad</b> = disponible en las ⏰ Rutinas (los pases donde el bot
       postea solo), sin que nadie la pida.</p>
-    <div class="card" id="c-tools"></div></section>
+    <div class="card" id="c-tools"></div>
+    <h3 style="margin-top:18px">🎙️ Voz del bot (generate_audio · ElevenLabs)</h3>
+    <p class="hint">La tool <code>generate_audio</code> convierte texto en <b>nota de voz</b>
+      (por ahora solo en WhatsApp). Se prende/apaga y se decide quién la usa en la tabla de
+      arriba, como cualquier tool; acá se elige <b>con qué voz habla</b> y los topes de gasto —
+      ElevenLabs cobra <b>por carácter</b> (el tier gratis da ~10k/mes). Necesita
+      <code>ELEVENLABS_API_KEY</code> en la sección Credenciales.</p>
+    <div class="card" id="c-audio"></div></section>
 
   <section id="skills"><h2>Skills (saberes temáticos)</h2>
     <p class="hint">Una skill es un archivo markdown en <code>skills/</code> de la instancia
@@ -734,14 +742,16 @@ function render() {
     <div class="card" style="margin-top:10px">
       <div class="row" style="align-items:center">
         <div><b>Bridge</b> <span id="wa-badge" class="badge off">sin consultar</span></div>
-        <div><button class="ghost" onclick="waStatus(this)">🔄 Consultar bridge</button></div>
+        <div><button onclick="waBridgeRestart(this)">▶ Arrancar / reiniciar bridge</button>
+        <button class="ghost" onclick="waStatus(this)">🔄 Consultar</button></div>
       </div>
       <p class="hint" id="wa-hint">El bridge es un <b>proceso aparte</b> que habla el protocolo de
-        WhatsApp (el motor no puede). Levantalo con el comando de acá abajo, desde
-        <code>core/bridges/whatsapp/</code>, y volvé acá.</p>
-      <p class="hint">Comando para levantarlo (<code>-chats</code> hace que ni siquiera reciba
-        los mensajes de tus chats personales — si cambiás la lista de arriba, reiniciá el bridge
-        con el comando nuevo):</p>
+        WhatsApp (el motor no puede), pero no te ocupás vos: este botón lo levanta —y lo compila
+        la primera vez, si tenés Go instalado— y el bot también lo levanta solo al arrancar.
+        <b>Si cambiás la lista de chats, apretá el botón de nuevo</b>: el filtro del lado del
+        bridge solo se aplica al relanzarlo.</p>
+      <p class="hint">Equivalente manual, por si preferís verlo en una terminal
+        (desde <code>core/bridges/whatsapp/</code>):</p>
       <pre class="out" id="wa-cmd" style="user-select:all"></pre>
       <div id="wa-qr" style="display:none;margin:10px 0">
         <img id="wa-qr-img" alt="QR de vinculación" style="width:260px;height:260px;background:#fff;padding:8px;border-radius:8px">
@@ -805,7 +815,7 @@ function render() {
 
   $("rt-discord-hint").style.display = isDiscord ? "" : "none";
 
-  renderBudget(); renderModels(); renderFeeds(); renderTools(); renderGroups();
+  renderBudget(); renderModels(); renderFeeds(); renderTools(); renderAudio(); renderGroups();
   renderTasks(); renderMcp(); renderSources(); renderPlugins(); renderSkills(); renderMoods();
   renderPrefsMode(); renderData(); renderUserMem(); renderRoutines(); renderAdvFlags();
   $("prompt-file").innerHTML = PROMPTS.map(f => `<option>${esc(f)}</option>`).join("");
@@ -1586,6 +1596,82 @@ function renderTools() {
       html += `<tr><td colspan="${nCols}" class="hint" style="border-bottom-width:2px;padding-top:0">${esc(t.description)}</td></tr>`;
   }
   $("c-tools").innerHTML = html + "</table>";
+}
+
+// ─── Voz del bot (AUDIO_GEN · ElevenLabs) ────────────────────────────────
+// El voice_id no se puede adivinar (y uno de la library da 402 en el tier
+// gratis): la lista real de la cuenta se pide al server, que es quien tiene la
+// key. VOICES cachea la respuesta para no pegarle a ElevenLabs en cada render.
+let VOICES = null;
+
+function renderAudio() {
+  const a = S.AUDIO_GEN ?? (S.AUDIO_GEN = {});
+  const sinKey = ENV_KEYS.ELEVENLABS_API_KEY === false;
+  const opts = (VOICES ?? []).map(v =>
+    `<option value="${esc(v.id)}" ${v.id === a.voice_id ? "selected" : ""}>${esc(v.name)}${v.category ? " · " + esc(v.category) : ""}</option>`).join("");
+  const conocida = (VOICES ?? []).some(v => v.id === a.voice_id);
+  $("c-audio").innerHTML = `
+    ${sinKey ? `<p class="warn">⚠️ falta <code>ELEVENLABS_API_KEY</code> — cargala en
+      <a href="#credenciales">Credenciales</a> (sale de elevenlabs.io → perfil → API keys) y
+      recargá. Sin la key la tool contesta "no tengo generación de audio configurada".</p>` : ""}
+    <div class="row">
+    <div style="flex:2"><label>Voz
+      ${VOICES ? `<select id="i-audio-voice">
+          ${conocida || !a.voice_id ? "" : `<option value="${esc(a.voice_id)}" selected>${esc(a.voice_id)} (no está en tu cuenta ⚠️)</option>`}
+          ${a.voice_id ? "" : `<option value="" selected>— elegí una voz —</option>`}${opts}
+        </select>`
+      : `<input id="i-audio-voice" value="${esc(a.voice_id ?? "")}" placeholder="voice_id de ElevenLabs">`}
+    </label></div>
+    <div style="padding-top:16px"><button class="ghost" onclick="audioLoadVoices(this)">🔄 Traer las voces de tu cuenta</button>
+    <button onclick="audioTest(this)">▶ Probar la voz guardada</button></div></div>
+    <div class="row">
+    <div style="max-width:230px">${textInput(a, "model_id", "modelo", "text", "eleven_multilingual_v2")}</div>
+    <div style="max-width:150px">${textInput(a, "max_per_day", "audios por día", "number", 20)}</div>
+    <div style="max-width:150px">${textInput(a, "max_per_thread", "por conversación", "number", 3)}</div>
+    <div style="max-width:170px">${textInput(a, "max_chars", "caracteres por audio", "number", 600)}</div></div>
+    <p class="hint">Los topes son la billetera: cada carácter se cobra, y en un grupo la tool
+      queda al alcance de cualquiera que escriba "mandame otro". <b>Por conversación</b> evita
+      que encadene audios cuando el tema son los audios (la lección de las imágenes).
+      0 = sin tope. Probar la voz también gasta (~40 caracteres).</p>
+    <audio id="audio-preview" controls style="display:none;margin-top:6px"></audio>`;
+  $("i-audio-voice").addEventListener("change", e => {
+    a.voice_id = e.target.value.trim();
+    markDirty();
+  });
+}
+
+async function audioLoadVoices(btn) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "consultando…";
+  let r;
+  try { r = await api("/api/run", {action: "elevenlabs_voices"}); }
+  catch (e) { r = {ok: false, errors: [e.message]}; }
+  if (!r.ok) {
+    toast((r.errors || ["no pude traer las voces"]).join("; "), false);
+    btn.disabled = false; btn.textContent = label;
+    return;
+  }
+  VOICES = r.voices || [];
+  renderAudio();
+  toast(`${VOICES.length} voces disponibles ✓`);
+}
+
+async function audioTest(btn) {
+  if (dirty) { toast("guardá primero: la prueba usa la config guardada", false); return; }
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "generando…";
+  let r;
+  try { r = await api("/api/run", {action: "elevenlabs_test"}); }
+  catch (e) { r = {ok: false, errors: [e.message]}; }
+  if (r.ok) {
+    const el = $("audio-preview");
+    el.src = `data:${r.mime};base64,${r.audio_b64}`;
+    el.style.display = "";
+    try { await el.play(); } catch { /* autoplay bloqueado: queda el control visible */ }
+  } else {
+    toast((r.errors || ["no pude generar la prueba"]).join("; "), false);
+  }
+  btn.disabled = false; btn.textContent = label;
 }
 
 function renderGroups() {
@@ -2385,6 +2471,20 @@ async function waStatus(btn) {
   waRenderGroups(r.groups || []);
   waAutoRefresh(!st.connected);
   return st.connected;
+}
+
+// El botón que hace instalable el canal: lanza (o relanza) el bridge del lado
+// del server, con la config GUARDADA — por eso avisa si hay cambios sin guardar.
+async function waBridgeRestart(btn) {
+  if (dirty) { toast("guardá primero: el bridge arranca con la config guardada", false); return; }
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "arrancando… (la primera vez compila)";
+  let r;
+  try { r = await api("/api/run", {action: "whatsapp_bridge_restart"}); }
+  catch (e) { r = {ok: false, errors: [e.message]}; }
+  btn.disabled = false; btn.textContent = label;
+  toast(r.ok ? (r.output || "bridge arriba ✓") : (r.errors || []).join("; "), r.ok);
+  await waStatus(null);
 }
 
 // El comando sale de la config real: escribirlo a mano es donde se pierde el
