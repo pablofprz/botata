@@ -7,7 +7,8 @@
 	"MASTODON_BASE_URL": "",
 	"DISCORD_CHANNEL_IDS": [],
 	"WHATSAPP_CHAT_IDS": [],
-	"WHATSAPP_BRIDGE_URL": "http://127.0.0.1:8787",
+	"WHATSAPP_BRIDGE_URL": "http://127.0.0.1:8899",
+	"WHATSAPP_CONTEXT_MESSAGES": 20,
 	"BOT_HANDLE": "",
 	"ADMIN_HANDLE": "",
 	"ADMIN_HANDLES": [],
@@ -16,6 +17,7 @@
 	"LITE_MODEL": "deepseek/deepseek-v4-flash",
 	"IMAGE_MODEL": "google/gemini-2.5-flash",
 	"POLL_INTERVAL_SECONDS": 60,
+	"TOOL_ROUNDS": 1,
 	"MEMBRILLA": {
 		"repo": "",
 		"commands": []
@@ -90,10 +92,6 @@
 		"reflection": {
 			"enabled": true,
 			"interval_hours": 24.0
-		},
-		"bio": {
-			"enabled": false,
-			"interval_hours": 6.0
 		}
 	},
 	"MCP": {

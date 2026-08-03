@@ -14,17 +14,28 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 log = logging.getLogger("botata.tools")
 
 
 # ─── Scopes ──────────────────────────────────────────────────────────────────
 class Scope:
-    """Contextos donde una tool puede ofrecerse al LLM."""
-    REPLY = "reply"                    # respondiendo una mention
-    FEED_REFLECTION = "feed_reflection"  # loop proactivo leyendo el feed
-    ADMIN = "admin"                   # comandos del admin
+    """Quién puede hacer que una tool se ejecute.
+
+    - REPLY: cualquiera de la comunidad, mencionando al bot.
+    - FEED_REFLECTION: el bot solo, en sus pases proactivos (no hay solicitante).
+    - ADMIN: el admin. Los DOS caminos por los que habla — el comando (`/debug`)
+      y la mención común — ofrecen las tools admin, porque el scope describe el
+      permiso, no la puerta. Antes solo valía en el grafo de comandos: el admin
+      pedía en criollo algo que existía como tool admin, el modelo no la tenía a
+      mano y contestaba cualquier cosa (medido: pidió un post de Reddit y el bot
+      prometió traerlo sin poder). Un scope llamado `admin` que el admin no puede
+      usar es una trampa para quien configura el bot.
+    """
+    REPLY = "reply"
+    FEED_REFLECTION = "feed_reflection"
+    ADMIN = "admin"
 
 
 ALL_SCOPES: frozenset[str] = frozenset({Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN})
@@ -200,19 +211,26 @@ class ToolRegistry:
             if "groups" in cfg:
                 tool.groups = frozenset(cfg["groups"]) if cfg["groups"] else None
 
-    def available(self, scope: str, handle: str | None = None) -> list[Tool]:
-        """Tools habilitadas cuyo scope incluye `scope`.
+    def available(self, scope: "str | Iterable[str]",
+                  handle: str | None = None) -> list[Tool]:
+        """Tools habilitadas que caen en `scope`.
+
+        `scope` puede ser uno o varios: con varios, una tool entra si cae en
+        CUALQUIERA (unión). Lo usa el flujo de reply cuando quien habla es admin
+        — ahí valen reply + admin a la vez.
 
         Con `handle` (flujo reply: hay un usuario pidiendo) se filtran además las
         tools restringidas por grupo a las que ese handle no pertenece. Sin handle
-        (contextos sin solicitante: feed_reflection, admin) no hay filtro de grupo.
+        (contextos sin solicitante: feed_reflection) no hay filtro de grupo.
         """
-        out = [t for t in self._tools.values() if t.enabled and scope in t.scopes]
+        wanted = {scope} if isinstance(scope, str) else set(scope)
+        out = [t for t in self._tools.values() if t.enabled and (t.scopes & wanted)]
         if handle is not None:
             out = [t for t in out if self.allowed_for(t, handle)]
         return out
 
-    def openai_schemas(self, scope: str, handle: str | None = None) -> list[dict]:
+    def openai_schemas(self, scope: "str | Iterable[str]",
+                       handle: str | None = None) -> list[dict]:
         """Schemas OpenAI de las tools disponibles en `scope` (lista para tool-calling)."""
         return [t.to_openai() for t in self.available(scope, handle)]
 

@@ -173,3 +173,70 @@ def test_registro_vacio_no_rompe(catalogo, monkeypatch):
     ctx = ToolContext(state={}, conn=catalogo)
     out = b._tool_search_images({"query": "gol", "topic": "futbol"}, ctx)
     assert "el admin no cargó fuentes de contenido" in out.text
+
+
+# ─── La playlist suelta de settings es SOLO migración ───────────────────────
+def _load_con_playlist(tmp_path, monkeypatch, sources_json):
+    """Instancia con SPOTIFY_PLAYLIST_ID en settings; `sources_json=None` = todavía
+    sin registro (instancia vieja)."""
+    import json
+    cfg = tmp_path / "config"
+    cfg.mkdir(exist_ok=True)
+    if sources_json is not None:
+        (cfg / "sources.json").write_text(json.dumps(sources_json), encoding="utf-8")
+    monkeypatch.setattr(b, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(b, "settings", {**b.settings, "SPOTIFY_PLAYLIST_ID": "AJENA"})
+    return [e for e in b._load_sources() if e["type"] == "spotify"]
+
+
+def test_sin_registro_la_playlist_de_settings_se_migra(tmp_path, monkeypatch):
+    """Instancia que nunca abrió la UI: sin esto se quedaría sin playlist."""
+    sp = _load_con_playlist(tmp_path, monkeypatch, None)
+    assert [s for e in sp for s in e["sources"]] == ["AJENA"]
+
+
+def test_con_registro_manda_el_registro_y_no_settings(tmp_path, monkeypatch):
+    """El bug de botata-rancher (2026-08-01): heredó el SPOTIFY_PLAYLIST_ID de la
+    instancia de la que se clonó, el motor se lo sumaba a su propia playlist y
+    terminó leyendo Y ESCRIBIENDO en la playlist de la otra comunidad. La UI
+    muestra sources.json, así que esa fuente era invisible e imborrable."""
+    sp = _load_con_playlist(tmp_path, monkeypatch,
+                            [{"type": "spotify", "name": "la mía", "sources": ["PROPIA"]}])
+    assert [s for e in sp for s in e["sources"]] == ["PROPIA"]
+
+
+# ─── YouTube: lo que pega un humano vs lo que acepta la API ─────────────────
+import youtube_auth as ya  # noqa: E402
+
+
+@pytest.mark.parametrize("pegado, esperado", [
+    ("https://www.youtube.com/playlist?list=PLL5QXRk91MYY&jct=-SLfRFPeLgR3", "PLL5QXRk91MYY"),
+    ("https://www.youtube.com/watch?v=abc&list=PLxyz", "PLxyz"),
+    ("https://www.youtube.com/channel/UCabc123", "UCabc123"),
+    ("https://www.youtube.com/@lanacion", "@lanacion"),
+    ("PLL5QXRk91MYY", "PLL5QXRk91MYY"),          # id pelado: no se toca
+    ("@lanacion", "@lanacion"),
+])
+def test_la_fuente_de_youtube_se_normaliza_a_id(pegado, esperado):
+    """El bug de 2026-08-01: la URL entera viajaba como id de playlist y la API
+    devolvía 400, así que la fuente quedaba muda sin decir por qué."""
+    assert ya.source_id(pegado) == esperado
+
+
+@pytest.mark.parametrize("link, esperado", [
+    ("https://www.youtube.com/watch?v=-HJwbxVe8Rg", "-HJwbxVe8Rg"),
+    ("https://youtu.be/-HJwbxVe8Rg?si=abc", "-HJwbxVe8Rg"),
+    ("https://www.youtube.com/shorts/-HJwbxVe8Rg", "-HJwbxVe8Rg"),
+    ("-HJwbxVe8Rg", "-HJwbxVe8Rg"),
+    ("https://www.youtube.com/playlist?list=PLxyz", None),   # una lista no es un video
+    ("cualquier cosa", None),
+])
+def test_el_video_se_saca_de_cualquier_forma_de_link(link, esperado):
+    assert ya.video_id(link) == esperado
+
+
+def test_el_id_de_playlist_llega_a_la_api(tmp_path, monkeypatch):
+    """La fuente registrada como URL tiene que resolver igual que el id pelado."""
+    assert b._youtube_uploads_playlist(
+        "https://www.youtube.com/playlist?list=PLL5QXRk91MYY&jct=x") == "PLL5QXRk91MYY"
+    assert b._youtube_uploads_playlist("https://www.youtube.com/channel/UCabc") == "UUabc"

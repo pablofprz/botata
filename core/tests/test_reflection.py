@@ -115,3 +115,66 @@ def test_lecciones_existentes_van_al_prompt(env):
     conn.commit()
     llm, _ = run({"lessons": []})
     assert "vieja" in llm.last_system
+
+
+# ─── la reflexión corre DENTRO del pase silencioso (ya no es tarea propia) ───
+class _GrafoMudo:
+    def invoke(self, state):
+        return {}
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    return d.init_db(tmp_path / "silencioso.db")
+
+
+def _sin_moods(monkeypatch):
+    monkeypatch.setattr(b, "MOODS_CONFIG", {"enabled": False})
+    monkeypatch.setattr(b, "FEEDS_CONFIG", [])
+
+
+def test_el_pase_silencioso_destila_lecciones(conn, monkeypatch):
+    _sin_moods(monkeypatch)
+    monkeypatch.setattr(b, "TASKS_CONFIG", {"reflection": {"enabled": True,
+                                                          "interval_hours": 24}})
+    corridas = []
+    monkeypatch.setattr(b, "run_reflection_pass", lambda *a, **k: corridas.append(1))
+    b._pase_silencioso(_GrafoMudo(), None, conn, None)
+    assert corridas == [1]
+    # el cursor quedó grabado: no vuelve a correr en el mismo día
+    b._pase_silencioso(_GrafoMudo(), None, conn, None)
+    assert corridas == [1]
+
+
+def test_el_intervalo_de_reflection_se_sigue_respetando(conn, monkeypatch):
+    """Cambió dónde corre, no cómo se configura: TASKS.reflection sigue mandando."""
+    _sin_moods(monkeypatch)
+    monkeypatch.setattr(b, "TASKS_CONFIG", {"reflection": {"enabled": True,
+                                                           "interval_hours": 0}})
+    corridas = []
+    monkeypatch.setattr(b, "run_reflection_pass", lambda *a, **k: corridas.append(1))
+    b._pase_silencioso(_GrafoMudo(), None, conn, None)
+    b._pase_silencioso(_GrafoMudo(), None, conn, None)
+    assert len(corridas) == 2               # intervalo 0 = cada pase
+
+
+def test_reflection_apagada_no_corre(conn, monkeypatch):
+    _sin_moods(monkeypatch)
+    monkeypatch.setattr(b, "TASKS_CONFIG", {"reflection": {"enabled": False}})
+    corridas = []
+    monkeypatch.setattr(b, "run_reflection_pass", lambda *a, **k: corridas.append(1))
+    b._pase_silencioso(_GrafoMudo(), None, conn, None)
+    assert corridas == []
+
+
+def test_usa_el_cursor_viejo_del_scheduler(conn, monkeypatch):
+    """Migración sin reset: el cursor es el mismo `task:reflection` de antes, así
+    que un bot que reflexionó hace una hora no vuelve a hacerlo al actualizar."""
+    _sin_moods(monkeypatch)
+    monkeypatch.setattr(b, "TASKS_CONFIG", {"reflection": {"enabled": True,
+                                                           "interval_hours": 24}})
+    b.save_feed_last_run(conn, "task:reflection")
+    corridas = []
+    monkeypatch.setattr(b, "run_reflection_pass", lambda *a, **k: corridas.append(1))
+    b._pase_silencioso(_GrafoMudo(), None, conn, None)
+    assert corridas == []

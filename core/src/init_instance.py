@@ -81,6 +81,8 @@ def run_init(argv: list[str]) -> None:
     subprocess.run(cmd, check=False)
     print(f"\nCuando termines de configurar, arrancá el bot con:")
     print(f"  python -m botata --instance {target}")
+    print("Y si querés que se presente a la comunidad (una sola vez), usá la sección "
+          "«Presentación» de la UI.")
 
 
 if __name__ == "__main__":

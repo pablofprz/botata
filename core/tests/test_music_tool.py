@@ -29,14 +29,14 @@ def _creds(monkeypatch):
 
 
 def test_returns_tracks_with_links(monkeypatch):
-    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=5: _TRACKS)
+    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=5, artist=None: _TRACKS)
     out = b._tool_search_music({"query": "calamaro"}, _CTX).text
     assert "Flaca" in out and "Andrés Calamaro" in out
     assert "https://open.spotify.com/track/1" in out
 
 
 def test_empty_query(monkeypatch):
-    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=5: _TRACKS)
+    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=5, artist=None: _TRACKS)
     assert "necesito una canción" in b._tool_search_music({"query": "  "}, _CTX).text
 
 
@@ -46,7 +46,7 @@ def test_missing_credentials(monkeypatch):
 
 
 def test_no_results(monkeypatch):
-    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=5: [])
+    monkeypatch.setattr(b, "search_spotify_tracks", lambda q, limit=5, artist=None: [])
     assert "no encontré temas" in b._tool_search_music({"query": "zzzzzz"}, _CTX).text
 
 

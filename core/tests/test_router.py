@@ -115,9 +115,9 @@ def test_un_rol_nuevo_del_motor_no_rompe_una_instancia_vieja(caplog):
 def test_run_uses_first_target_on_success():
     r = _make_router()
     seen = []
-    def fn(client, model):
-        seen.append(model)
-        return f"ok:{model}"
+    def fn(t):
+        seen.append(t.model)
+        return f"ok:{t.model}"
     assert r._run("r_dual", fn) == "ok:m1"
     assert seen == ["m1"]  # no tocó el fallback
 
@@ -125,18 +125,18 @@ def test_run_uses_first_target_on_success():
 def test_run_falls_back_on_failure():
     r = _make_router()
     seen = []
-    def fn(client, model):
-        seen.append(model)
-        if model == "m1":
+    def fn(t):
+        seen.append(t.model)
+        if t.model == "m1":
             raise RuntimeError("boom")
-        return f"ok:{model}"
+        return f"ok:{t.model}"
     assert r._run("r_dual", fn) == "ok:m2"
     assert seen == ["m1", "m2"]  # probó el primero, cayó al segundo
 
 
 def test_run_raises_when_all_fail():
     r = _make_router()
-    def fn(client, model):
+    def fn(t):
         raise RuntimeError("siempre falla")
     try:
         r._run("r_dual", fn)

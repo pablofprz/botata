@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -69,3 +70,37 @@ def test_scopes_default():
     reg = b.build_tool_registry(b.TOOLS_CONFIG)
     for sc in (Scope.REPLY, Scope.FEED_REFLECTION, Scope.ADMIN):
         assert "web_search" in [t.name for t in reg.available(sc)]
+
+
+# ─── 429: el tier gratuito de Brave es ~1 req/s y el loop de tools busca 2 veces ──
+def _http429():
+    return urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
+
+
+def test_429_reintenta_una_vez(monkeypatch):
+    intentos = []
+    def _flaky(q, c=5):
+        intentos.append(q)
+        if len(intentos) == 1:
+            raise _http429()
+        return _FAKE
+    monkeypatch.setattr(b, "_brave_search", _flaky)
+    monkeypatch.setattr(b.time, "sleep", lambda s: None)
+    out = b._tool_web_search({"query": "dólar blue"}, _CTX).text
+    assert len(intentos) == 2 and "Python 3.13" in out
+
+
+def test_429_persistente_avisa(monkeypatch):
+    monkeypatch.setattr(b, "_brave_search", lambda q, c=5: (_ for _ in ()).throw(_http429()))
+    monkeypatch.setattr(b.time, "sleep", lambda s: None)
+    assert "limitado" in b._tool_web_search({"query": "x"}, _CTX).text
+
+
+def test_otro_http_no_reintenta(monkeypatch):
+    intentos = []
+    def _500(q, c=5):
+        intentos.append(q)
+        raise urllib.error.HTTPError("u", 500, "boom", {}, None)
+    monkeypatch.setattr(b, "_brave_search", _500)
+    assert "no pude buscar" in b._tool_web_search({"query": "x"}, _CTX).text
+    assert len(intentos) == 1

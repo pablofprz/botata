@@ -24,6 +24,11 @@ tiene que haber Telegram y WhatsApp**. Mastodon queda relegado (poco y nada de c
 3. **T40 · Canal Telegram** `P0` — el canal nuevo más barato: Bot API oficial, gratis, y su modelo de menciones calza casi 1:1 con el de Discord. Después de WhatsApp.
 4. **T38 + T36** `P2` — contenido por tema y refresh a demanda. No bloquean el lanzamiento pero son el diferenciador de contenido; en curso.
 
+**Intercalado (2026-08-01/02):** el bloque **M11** — loop de tools, `read_url`, generación
+de imágenes, `similar_artists` y el guard de links inventados. No estaba planificado: cada
+tarea salió de algo que el bot hizo mal en producción mientras se probaba WhatsApp. Deja
+**T55** de deuda abierta (tope de reintentos, budget apagado, tests flaky).
+
 **Explícitamente postergado** (decisión del admin, mismo día): T28b ProviderRegistry ·
 validación de Mastodon en vivo · multi-canal simultáneo · T37 character cards · T21 · T20.
 
@@ -542,3 +547,132 @@ Pedido del admin: *"acordate de que estoy pensando en cuando esto lo instale otr
 - **Credenciales:** `ENV_KEYS` era una whitelist fija, así que una clave nueva no se podía guardar desde la UI y el conector no habría servido para ninguna API con token. Ahora se aceptan además las claves **referenciadas con `{env:…}` desde `sources.json`** — permiso acotado (nunca un nombre arbitrario del navegador) y con denylist de las que gobiernan el proceso (`PATH`, `BOTATA_INSTANCE`…).
 - **Verificado en vivo** contra la PokéAPI (`/pokemon/{source}`, objeto único, sprite de official-artwork) desde el motor y desde el botón de la UI, con miniatura y camino de error. Tests: `test_api_connector.py` (20) + 9 en `test_config_ui`. Suite: **665**.
 - **Límites conocidos** (para eso queda el `.py`): sin OAuth, sin paginado, y una sola llamada — una API que devuelve una lista de links y exige un segundo fetch por item no entra.
+
+---
+
+## M11 · Multimodal y razonamiento encadenado  `P1`  *(2026-08-01/02)*
+
+Bloque nacido de casos reales en producción, no de una planificación previa: cada tarea
+sale de algo que el bot hizo mal delante de la comunidad. El hilo común es que el motor
+ya podía **hacer** las cosas pero no **encadenarlas**, y que pedirle comportamiento por
+prompt tiene un techo — cuando el prompt falla tres veces, la guarda va en código.
+
+### T50 · Loop de tools (razonamiento multi-paso)  `infra` `M`  `P0`  ✅ **HECHO** (2026-08-01)
+Caso real: *"traeme algo parecido a lo de tu playlist pero que no esté ahí"* → el bot
+contestaba *"ya fue pablo, no me hinchés"*. No era mala voluntad: la fase de tools daba
+**una sola vuelta**, así que el modelo tenía que decidir todas sus llamadas **a ciegas**,
+antes de ver ningún resultado. Un pedido con pasos era literalmente imposible.
+
+- `correr_rondas_de_tools()` mantiene una conversación con mensajes `role: "tool"`: el
+  modelo ve lo que trajo cada llamada antes de decidir la siguiente. `ModelRouter` y
+  `RoleLLM` sumaron `call_with_messages(messages, tools)`; `call_with_tools` delega.
+- **`TOOL_ROUNDS`** por instancia (1–5, default 1) — subirlo es opt-in porque cada ronda
+  es una llamada al modelo. Tope duro de 8 tool calls por ronda.
+- Prompts: bloque *"podés llamar tools en varias rondas — primero mirá, después actuá"*.
+- Tests: `test_tool_rounds.py` (14).
+- ⚠️ **El default de 1 es una trampa silenciosa**: `botata-arg` quedó en 1 hasta el 08-02
+  y por eso no encadenaba; peor, su `reply_tools_prompt.md` **nunca recibió el bloque de
+  rondas** (se agregó solo a rancher y a la plantilla). Una instancia puede tener la
+  capacidad y no enterarse. Al tocar prompts: **las tres copias, siempre**.
+
+### T51 · Buscar ≠ leer: la tool `read_url`  `infra` `S`  `P1`  ✅ **HECHO** (2026-08-01)
+Medido: `web_search("qué pasó con el dólar blue hoy")` devuelve tres resúmenes que dicen
+*"acá podés seguir la cotización"* y **ni un número**. El bot podía buscar pero no leer,
+así que no tenía con qué contestar. Bajando la primera página aparece
+`Dólar blue Compra $1540 Venta $1560`.
+
+- `read_url(url)`: baja, pasa a texto plano y recorta a 4000 caracteres. Sirve además
+  para un link que alguien pegó en la conversación — antes no había forma de abrirlo.
+- **Guarda de SSRF** (las URLs vienen de un grupo público): se resuelve el host y se
+  rechaza si *cualquiera* de sus IPs no es global, **revalidando cada redirect** — sin
+  eso, una URL pública que redirige a `127.0.0.1` esquivaba el control y el bot podía
+  leer el bridge de WhatsApp o la metadata de cloud y contarlo.
+- Topes (2 MB, 12s, solo content-type de texto) y `html.unescape` **después** de sacar
+  las etiquetas: al revés, un `&lt;script&gt;` escrito en el texto se convertía en tag.
+- El resultado va rotulado **dato, no instrucciones** (prompt injection en la página).
+- `web_search` reintenta una vez ante 429: el tier gratuito de Brave es ~1 req/s y con
+  T50 el bot puede buscar dos veces en una misma respuesta.
+- Tests: `test_read_url.py` (22) + 3 en `test_web_search`.
+
+### T52 · Generación de imágenes  `infra` `L`  `P1`  ✅ **HECHO** (2026-08-02)
+Tool `generate_image(prompt)` + rol `image_generate` en el router (alias `image_gen`), con
+la misma cadena de fallback que todo lo demás. **Dos formas de API** según `api` en el hop:
+`chat` (chat/completions con `modalities`, lo que habla OpenRouter) e `images`
+(`/v1/images/generations`: OpenAI, xAI/Grok, servidores locales) — cambiar de proveedor
+es config, no código. Si la instancia no declara el alias, `tiene_rol()` da False y la
+tool se apaga sola en vez de pedirle un PNG a un modelo de texto.
+
+- **Nace scope `admin`** (cada imagen se paga, el bot es público); ampliar es opt-in de la
+  instancia. Configurado: `arg` = solo admin · `rancher` = todos.
+- `IMAGE_GEN`: `max_per_day` · `max_bytes` · `max_per_thread` · `aviso` · `size`.
+- **`max_bytes` existe por Bluesky**: los generadores devuelven PNG de ~1,4 MB y el PDS
+  rechaza blobs > 1 MB — la primera imagen en arg habría hecho fallar el post entero. Se
+  recomprime a JPEG con **Pillow** (ahora dependencia declarada; sin ella la tool avisa
+  en vez de mandar algo que el canal va a rechazar). Medido: 1344 KB → 169 KB a q88.
+- **`aviso`**: mensaje corto ANTES de generar, porque generar tarda ~8s y en ese hueco no
+  se ve nada. Sale de la tool y no de un LLM (pedirle la frase agregaría la demora que se
+  quiere tapar); opt-in por settings; con dedup por kv para que un reintento no lo repita;
+  se registra en `bot_posts` como cualquier post, y si ese registro falla **no** voltea la
+  respuesta (`bot_posts.reply_to_handle` tiene FK a `users`).
+- **`max_per_thread` es la lección cara**: el bot encadenó retratos del admin como
+  respuesta a *"escribile una carta a panchitos"*, a *"el romance no murió"* y hasta al
+  chiste de que subía retratos sin parar. Se le pidió por prompt tres veces y falló las
+  tres. El tope por hilo **no se lo pide: no puede**.
+- Sobre el modelo: **OpenRouter no tiene ningún generador de imágenes de xAI** (los seis
+  modelos Grok son `output: ['text']`) — verificado contra su API. Configurado
+  `google/gemini-2.5-flash-image` (~US$0,04) con `openai/gpt-5-image-mini` de fallback.
+  Un generador poco filtrado exige salir de OpenRouter (xAI directo, o pesos propios con
+  LocalAI, que habla `/v1/images/generations`); los dos piden US$5 de mínimo.
+- Tests: `test_generate_image.py` (35).
+
+### T53 · `similar_artists` (MusicBrainz + ListenBrainz)  `infra` `M`  `P2`  ✅ **HECHO** (2026-08-02)
+Cierra el pedido que originó T50. **La tool no era el problema: era Spotify** — a la app
+le quedó solo `/search` (`related-artists` 403, `/recommendations` 404, `audio-features`
+403), así que *"algo parecido a X"* no puede salir de ahí por más que se mejore
+`search_music`. MusicBrainz identifica y desambigua; ListenBrainz Labs da los vecinos por
+escuchas reales. **Ninguna pide API key.**
+
+- **No reemplaza a `search_music`**: devuelve ARTISTAS y el link lo sigue dando
+  `search_music(artist=…)`. Son componibles y T50 las encadena.
+- Verificado en vivo: `Kyuss → QOTSA, Fu Manchu, Melvins` · `"Los Redondos" → Patricio Rey
+  (resolvió el apodo) → Charly, Divididos, Cerati` · `Sumo → desambiguó la banda argentina
+  del homónimo de 3 oyentes` · `Bandalos Chinos → LOUTA, Babasónicos, El Mató`. Cadena
+  completa hasta el link de Spotify.
+- Tres defensas, todas por algo medido: **1 req/s** hacia MusicBrainz + User-Agent
+  identificable (dos seguidas = 503) · **cache de 30 días** en la kv · **auto-reparación
+  del algoritmo**: el enum de Labs cambió entre el 08-01 y el 08-02, así que ante un 400
+  se sacan las opciones válidas del propio mensaje de error y se reintenta.
+- ⚠️ Sesgo al canon confirmado en consultas argentinas (Charly y Cerati en casi todas).
+  Pendiente menor: comparar contra Last.fm `artist.getSimilar` (necesita key gratuita).
+- Tests: `test_similar_artists.py` (15).
+
+### T54 · El bot no postea links que no leyó  `infra` `S`  `P0`  ✅ **HECHO** (2026-08-02)
+Caso real: le pidieron una canción, **no llamó a ninguna tool de música** y posteó igual
+`open.spotify.com/track/<id>` con el id fabricado — link roto, en público. El prompt ya
+decía *"nunca escribas una URL que no leíste ahí"*; inventar el dato faltante es
+exactamente lo que hace un modelo cuando no lo tiene.
+
+- `_sacar_links_inventados(texto, visto)` compara contra **todo lo que el modelo tuvo
+  delante** (system + user: resultados de tools, hilo, memoria). Lo que no esté, se saca.
+- Solo mira links **con path**: nombrar un dominio (`buscá en google.com`) no es citar una
+  fuente falsa y borrarlo rompería la frase. Un link que alguien pegó en el hilo vale.
+- Aplicado en el camino de replies **y en el de rutinas** (donde el bot postea solo).
+- Queda en el log (`saqué N link(s) inventado(s)`) para enterarse sin mirar la timeline.
+- Prompt, para la otra mitad que el código no puede ver: *no narres acciones que no
+  hiciste* — el bot había escrito `🎵 abriendo spotify...` con cero tools llamadas.
+- Tests: `test_links_inventados.py` (8).
+
+### T55 · Deuda abierta por este bloque  `infra` `M`  `P1`  ⬜ **PENDIENTE**
+Ninguna es teórica: las cuatro se manifestaron el 2026-08-02.
+
+- **Tope de reintentos para menciones `failed`.** Con los endpoints caídos, las mismas dos
+  menciones se reprocesaron cada 4 minutos durante **una hora y veinte**.
+  `retry_stuck_mentions` no tiene ventana ni contador: convierte cualquier caída en un loop.
+- **`BUDGET.enabled: false` en arg.** El guard **detectó** `QUEMADO — $3.08 de $3.00` a las
+  07:25 y no frenó nada porque está apagado. Además `budget_state` quedó en `"sleeping"` —
+  revisar si sale solo de ese estado.
+- **`Could not resolve handle https:`** — cientos de llamadas a la API de Bluesky
+  resolviendo un handle inexistente. Algo toma `https:` como handle al parsear texto.
+- **Tests sensibles a la fecha**: `test_events_today_ar`, `test_admin_creates_community_event`
+  y `test_user_creates_only_for_self_ignores_handle` tienen fechas hardcodeadas y fallan
+  según la hora del día. Aparecen y desaparecen, y enseñan a ignorar los rojos.

@@ -268,7 +268,10 @@ def test_rutina_con_tool_trae_resultado_real(conn, routines_dir, monkeypatch):
 
 
 def test_fase_de_tools_rota_no_frena_el_pase(conn, routines_dir, monkeypatch):
-    """Una tool que explota se loguea y el pase sigue sin su resultado."""
+    """Una tool que explota se loguea y el pase sigue sin su resultado.
+
+    Aislado por tool: el fallo no corta la ronda ni el pase (antes se comía la
+    fase entera con un try/except alrededor de todo)."""
     from tools import ToolRegistry, Scope
     reg = ToolRegistry()
 
@@ -283,7 +286,7 @@ def test_fase_de_tools_rota_no_frena_el_pase(conn, routines_dir, monkeypatch):
     llm = FakeToolLLM(decision, "search_music", {})
     monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
     b.run_routines_pass(FakeBsky(), router=None, conn=conn, registry=reg)  # no lanza
-    assert llm.calls == 1
+    assert llm.calls == 1                     # la decisión igual se pidió
 
 
 # ─── eventos como contexto + filtro anti-bypass ──────────────────────────────
@@ -399,3 +402,137 @@ def test_discord_post_con_target():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ─── el bug de "dice que comparte una canción y no pone nada" ────────────────
+# Mecanismo real (log de producción, 2026-07-28): la fase de tools era UN solo
+# llamado. El modelo lo gastaba en las tools de contexto (summarize_feed,
+# get_my_recent_posts) y después ya no tenía cómo traer el tema — pero igual
+# posteaba "este martes pide un tema de los redondos" sin link. 7 de 12 pases de
+# la rutina `canciones` nunca llamaron get_playlist_track.
+
+class LLMDosRondas(FakeLLM):
+    """Pide tools de CONTEXTO en la ronda 1 y la que trae el tema en la 2 —
+    exactamente lo que el modelo hacía y no podía completar."""
+
+    def __init__(self, decision, ronda1, ronda2):
+        super().__init__(decision)
+        self.rondas, self.systems = [ronda1, ronda2], []
+
+    def call_with_tools(self, system, user, tools):
+        self.systems.append(system)
+        pedido = self.rondas[min(len(self.systems), len(self.rondas)) - 1]
+        self.last_system = system
+        if not pedido:
+            return "", []
+        import json as _json
+        return "", [type("C", (), {"function": type("F", (), {
+            "name": pedido[0], "arguments": _json.dumps(pedido[1])})()})()]
+
+
+def _registry_musical():
+    from tools import ToolRegistry, ToolResult, Scope
+    reg = ToolRegistry()
+    reg.register("summarize_feed", "clima", {"type": "object", "properties": {}},
+                 lambda a, c: ToolResult(text="se habla de los redondos"),
+                 {Scope.FEED_REFLECTION})
+    reg.register("get_playlist_track", "un tema", {"type": "object", "properties": {}},
+                 lambda a, c: ToolResult(
+                     text="Tema: Juguetes Perdidos — Redondos\nLink (incluilo en el "
+                          "post): https://open.spotify.com/track/abc"),
+                 {Scope.FEED_REFLECTION})
+    return reg
+
+
+def test_segunda_ronda_le_deja_traer_la_cancion(conn, routines_dir, monkeypatch):
+    _routine_md(routines_dir, "canciones", body="compartí un tema de la playlist")
+    decision = b.FeedDecision(should_post=True, reason="clima musical",
+                              text="martes de redondos https://open.spotify.com/track/abc")
+    llm = LLMDosRondas(decision, ("summarize_feed", {}), ("get_playlist_track", {}))
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    bsky = FakeBsky()
+    b.run_routines_pass(bsky, router=None, conn=conn, registry=_registry_musical())
+    assert len(llm.systems) == 2                       # hubo segunda ronda
+    assert "Resultado de get_playlist_track" in llm.last_system
+    assert "spotify.com/track/abc" in bsky.posts[0][0]
+
+
+def test_sin_tools_en_la_primera_ronda_no_hay_segunda(conn, routines_dir, monkeypatch):
+    """Si no pidió nada, no se paga un llamado extra."""
+    _routine_md(routines_dir, "general", body="mirá el ambiente")
+    llm = LLMDosRondas(b.FeedDecision(should_post=False, reason="nada"), None, None)
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    b.run_routines_pass(FakeBsky(), router=None, conn=conn, registry=_registry_musical())
+    assert len(llm.systems) == 1
+
+
+def test_no_repite_la_misma_tool_con_los_mismos_args(conn, routines_dir, monkeypatch):
+    """La ronda 2 no vuelve a gastar la misma llamada (anti-loop)."""
+    _routine_md(routines_dir, "canciones", body="compartí un tema")
+    llamadas = []
+    from tools import ToolRegistry, ToolResult, Scope
+    reg = ToolRegistry()
+    reg.register("get_playlist_track", "un tema", {"type": "object", "properties": {}},
+                 lambda a, c: (llamadas.append(1),
+                               ToolResult(text="Tema: X — https://sp.fy/1"))[1],
+                 {Scope.FEED_REFLECTION})
+    decision = b.FeedDecision(should_post=True, reason="x", text="tema https://sp.fy/1")
+    llm = LLMDosRondas(decision, ("get_playlist_track", {}), ("get_playlist_track", {}))
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    b.run_routines_pass(FakeBsky(), router=None, conn=conn, registry=reg)
+    assert len(llamadas) == 1
+
+
+def test_rescata_el_link_que_el_post_se_comio(conn, routines_dir, monkeypatch):
+    """Trajo el tema pero escribió el post sin el link: se lo pega el código."""
+    _routine_md(routines_dir, "canciones", body="compartí un tema")
+    decision = b.FeedDecision(should_post=True, reason="x",
+                              text="martes de redondos, juguetes perdidos 🎵")
+    llm = LLMDosRondas(decision, ("get_playlist_track", {}), None)
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    bsky = FakeBsky()
+    b.run_routines_pass(bsky, router=None, conn=conn, registry=_registry_musical())
+    posteado = bsky.posts[0][0]
+    assert posteado.startswith("martes de redondos")
+    assert posteado.endswith("https://open.spotify.com/track/abc")
+
+
+def test_no_toca_el_post_si_ya_trae_un_link(conn, routines_dir, monkeypatch):
+    _routine_md(routines_dir, "canciones", body="compartí un tema")
+    texto = "escuchate esto https://open.spotify.com/track/abc"
+    decision = b.FeedDecision(should_post=True, reason="x", text=texto)
+    llm = LLMDosRondas(decision, ("get_playlist_track", {}), None)
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    bsky = FakeBsky()
+    b.run_routines_pass(bsky, router=None, conn=conn, registry=_registry_musical())
+    assert bsky.posts[0][0] == texto
+
+
+def test_con_varios_links_no_adivina(conn, routines_dir, monkeypatch):
+    """Con dos links no hay forma de saber cuál prometía: se deja como está."""
+    from tools import ToolRegistry, ToolResult, Scope
+    reg = ToolRegistry()
+    reg.register("get_news", "titulares", {"type": "object", "properties": {}},
+                 lambda a, c: ToolResult(text="uno https://a.com/1 · dos https://b.com/2"),
+                 {Scope.FEED_REFLECTION})
+    _routine_md(routines_dir, "noticias", body="contá una noticia")
+    decision = b.FeedDecision(should_post=True, reason="x", text="pasaron cosas hoy")
+    llm = LLMDosRondas(decision, ("get_news", {}), None)
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    bsky = FakeBsky()
+    b.run_routines_pass(bsky, router=None, conn=conn, registry=reg)
+    assert bsky.posts[0][0] == "pasaron cosas hoy"
+
+
+def test_el_rescate_deja_lugar_para_el_link(conn, routines_dir, monkeypatch):
+    """El texto se recorta ANTES de pegar el link: si no, el truncado del canal
+    se comía justo el link que estamos rescatando."""
+    _routine_md(routines_dir, "canciones", body="compartí un tema")
+    decision = b.FeedDecision(should_post=True, reason="x", text="ma " * 120)
+    llm = LLMDosRondas(decision, ("get_playlist_track", {}), None)
+    monkeypatch.setattr(b, "RoleLLM", lambda router, role: llm)
+    bsky = FakeBsky()
+    b.run_routines_pass(bsky, router=None, conn=conn, registry=_registry_musical())
+    posteado = bsky.posts[0][0]
+    assert len(posteado) <= b._POST_LIMIT
+    assert posteado.endswith("https://open.spotify.com/track/abc")

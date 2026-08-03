@@ -1,4 +1,7 @@
-"""Tests de /stop y /resume: pausa global explícita, solo admins, sin LLM."""
+"""Tests de /sleep y /wake: el bot entero se duerme, solo admins, sin LLM.
+
+(`/stop` es otra cosa: soltar UN hilo, lo puede pedir
+cualquiera — eso vive en test_hilo_soltado.py.)"""
 from __future__ import annotations
 
 import os
@@ -44,45 +47,45 @@ def env(tmp_path, monkeypatch):
     conn.close()
 
 
-def test_stop_pausa_y_confirma(env):
+def test_sleep_duerme_y_confirma(env):
     conn, graph, ch = env
-    b.process_mention(graph, conn, _mention("u1", "admin.test", "@bot.test /stop"),
+    b.process_mention(graph, conn, _mention("u1", "admin.test", "@bot.test /sleep"),
                       "open", channel=ch)
     assert b.bot_paused(conn)
     assert graph.invocations == []                    # no pasó por el LLM
-    assert "me pauso" in ch.replies[-1]["text"]
+    assert "me voy a dormir" in ch.replies[-1]["text"]
     assert b.has_replied(conn, "u1")                  # no se reprocesa
 
 
 def test_pausado_encola_no_admins_y_atiende_admins(env):
     conn, graph, ch = env
     b.set_bot_paused(conn, True, by="admin.test")
-    # no-admin: ni se procesa ni se marca (queda para después del /resume)
+    # no-admin: ni se procesa ni se marca (queda para después del /wake)
     b.process_mention(graph, conn, _mention("u2", "ana.test", "hola bot"),
                       "open", channel=ch)
     assert graph.invocations == [] and not b.has_replied(conn, "u2")
-    # admin: sigue entrando al grafo (por acá viaja el /resume y la config)
+    # admin: sigue entrando al grafo (por acá viaja el /wake y la config)
     b.process_mention(graph, conn, _mention("u3", "coadmin.test", "cómo venís"),
                       "open", channel=ch)
     assert graph.invocations == ["u3"]
 
 
-def test_resume_reanuda_y_responde_lo_encolado(env):
+def test_wake_despierta_y_responde_lo_encolado(env):
     conn, graph, ch = env
     b.set_bot_paused(conn, True, by="admin.test")
-    b.process_mention(graph, conn, _mention("u4", "coadmin.test", "@bot.test /resume"),
+    b.process_mention(graph, conn, _mention("u4", "coadmin.test", "@bot.test /wake"),
                       "open", channel=ch)
     assert not b.bot_paused(conn)
-    assert "de vuelta" in ch.replies[-1]["text"]
+    assert "me desperté" in ch.replies[-1]["text"]
     # la mención que había quedado en cola ahora sí se procesa
     b.process_mention(graph, conn, _mention("u2", "ana.test", "hola bot"),
                       "open", channel=ch)
     assert graph.invocations == ["u2"]
 
 
-def test_no_admin_no_puede_pausar(env):
+def test_no_admin_no_puede_dormirlo(env):
     conn, graph, ch = env
-    b.process_mention(graph, conn, _mention("u5", "ana.test", "@bot.test /stop"),
+    b.process_mention(graph, conn, _mention("u5", "ana.test", "@bot.test /sleep"),
                       "open", channel=ch)
     assert not b.bot_paused(conn)
     assert graph.invocations == ["u5"]                # sigue el flujo normal
@@ -91,20 +94,20 @@ def test_no_admin_no_puede_pausar(env):
 def test_comando_debe_ser_exacto(env):
     conn, graph, ch = env
     # texto extra → NO es el comando explícito: va al flujo normal
-    b.process_mention(graph, conn, _mention("u6", "admin.test", "@bot.test /stop por favor"),
+    b.process_mention(graph, conn, _mention("u6", "admin.test", "@bot.test /sleep por favor"),
                       "open", channel=ch)
     assert not b.bot_paused(conn)
     assert graph.invocations == ["u6"]
 
 
-def test_fallo_del_reply_no_impide_la_pausa(env):
+def test_fallo_del_reply_no_impide_que_se_duerma(env):
     conn, graph, _ = env
 
     class BrokenChannel:
         def reply(self, *a, **k):
             raise RuntimeError("red caída")
 
-    b.process_mention(graph, conn, _mention("u7", "admin.test", "/stop"),
+    b.process_mention(graph, conn, _mention("u7", "admin.test", "/sleep"),
                       "open", channel=BrokenChannel())
     assert b.bot_paused(conn)                         # el estado cambió igual
 

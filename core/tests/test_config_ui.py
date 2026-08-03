@@ -75,6 +75,49 @@ def test_settings_invalido_falla(mutacion, fragmento):
     assert errs and any(fragmento in e for e in errs)
 
 
+@pytest.mark.parametrize("extra, fragmento", [
+    # Sin chats el bot no tiene dónde vivir — y como el dispositivo vinculado
+    # recibe TODOS los mensajes del número, la lista vacía no es "default": es
+    # la diferencia entre atender un grupo y atender tus chats personales.
+    ({}, "WHATSAPP_CHAT_IDS"),
+    ({"WHATSAPP_CHAT_IDS": []}, "WHATSAPP_CHAT_IDS"),
+    ({"WHATSAPP_CHAT_IDS": ["x@g.us"], "WHATSAPP_BRIDGE_URL": ""}, "WHATSAPP_BRIDGE_URL"),
+    ({"WHATSAPP_CHAT_IDS": ["x@g.us"],
+      "WHATSAPP_BRIDGE_URL": "http://10.0.0.5:8787"}, "loopback"),
+])
+def test_whatsapp_incompleto_falla(extra, fragmento):
+    s = json.loads(json.dumps(_SETTINGS))
+    s["CHANNEL"] = "whatsapp"
+    s.update(extra)
+    errs = cu.validate_settings(s)
+    assert errs and any(fragmento in e for e in errs)
+
+
+def test_whatsapp_completo_pasa():
+    s = json.loads(json.dumps(_SETTINGS))
+    s.update(CHANNEL="whatsapp", WHATSAPP_CHAT_IDS=["5491111111111-1431400469@g.us"],
+             WHATSAPP_BRIDGE_URL="http://127.0.0.1:8787",
+             ADMIN_HANDLE="+54 9 11 1111-1111", ADMIN_HANDLES=["5491122222222"])
+    assert cu.validate_settings(s) == []
+
+
+@pytest.mark.parametrize("extra, fragmento", [
+    # El caso real: una instancia clonada de otra red se queda con el handle de
+    # allá y en WhatsApp no matchea con nadie — el bot pierde el admin y no lo
+    # dice. Si no se avisa acá, no se avisa en ningún lado.
+    ({"ADMIN_HANDLE": "ppolci.com"}, "ADMIN_HANDLE"),
+    ({"ADMIN_HANDLES": ["otro.bsky.social"]}, "ADMIN_HANDLES"),
+    ({"USER_GROUPS": {"power": ["fulano.com"]}}, "USER_GROUPS.power"),
+])
+def test_whatsapp_avisa_si_el_admin_no_es_un_telefono(extra, fragmento):
+    s = json.loads(json.dumps(_SETTINGS))
+    s.update(CHANNEL="whatsapp", WHATSAPP_CHAT_IDS=["1@g.us"],
+             WHATSAPP_BRIDGE_URL="http://127.0.0.1:8787",
+             ADMIN_HANDLE="5491111111111")
+    s.update(extra)
+    assert any(fragmento in e and "teléfono" in e for e in cu.validate_settings(s))
+
+
 def test_user_groups_validos_pasan():
     s = json.loads(json.dumps(_SETTINGS))
     s["USER_GROUPS"] = {"music_users": ["fulano.bsky.social", "feed:f1"]}
@@ -345,7 +388,7 @@ def test_api_settings_valido_escribe(server, store):
     ({"mode": "banana"}, "MOODS.mode"),
     ({"susceptibility": 1.5}, "susceptibility"),
     ({"hysteresis_hours": -1}, "hysteresis_hours"),
-    ({"manual": {"schedule": {"lun": "upbeat"}}}, "día(s) inválido(s)"),
+    ({"manual": {"schedule": {"mon": "upbeat"}}}, "ya no existe"),
 ])
 def test_validate_moods_invalido(moods, fragmento):
     s = json.loads(json.dumps(_SETTINGS)); s["MOODS"] = moods
@@ -355,7 +398,7 @@ def test_validate_moods_invalido(moods, fragmento):
 def test_validate_moods_y_prefs_validos():
     s = json.loads(json.dumps(_SETTINGS))
     s["MOODS"] = {"enabled": True, "mode": "auto", "susceptibility": 0.5,
-                  "hysteresis_hours": 2, "manual": {"fixed": "", "schedule": {"mon": "upbeat"}}}
+                  "hysteresis_hours": 2, "manual": {"fixed": "", "schedule": {}}}
     s["PREFS"] = {"mode": "add_only"}
     assert cu.validate_settings(s) == []
 
@@ -412,6 +455,65 @@ def test_event_edit_fecha_y_recurrencia(store):
                               "event_at": "mañana"}) != []
     assert store.edit_events({"action": "edit", "id": ev["id"],
                               "event_at": "2099-01-01T10:00", "recur": "cada tanto"}) != []
+
+
+# ─── Mood en vivo desde la UI ────────────────────────────────────────────────
+# El humor del bot es lo único de la UI que cambia SOLO mientras el panel está
+# abierto, así que la vista y la escritura tienen que hablar el mismo idioma:
+# la zona horaria de la instancia. Con un -3 hardcodeado (como estaba), en
+# cualquier instancia fuera de Argentina el mood elegido acá se guardaba con
+# otra fecha y current_mood() lo ignoraba: el admin lo cambiaba y no pasaba nada.
+def _con_moods(store, **cfg):
+    s = json.loads(store.settings_path.read_text(encoding="utf-8"))
+    s["MOODS"] = {"enabled": True, "mode": "auto", "default": "normal", **cfg}
+    s["TIMEZONE"] = "Asia/Tokyo"          # +9: nada que ver con el -3 de antes
+    store.settings_path.write_text(json.dumps(s), encoding="utf-8")
+    store.moods_dir.mkdir(exist_ok=True)
+    for n in ("normal", "snarky"):
+        (store.moods_dir / f"{n}.md").write_text(
+            f"---\nname: {n}\ndescription: d\n---\ncuerpo", encoding="utf-8")
+
+
+def test_mood_de_hoy_usa_la_zona_de_la_instancia(store):
+    """Tokio: +9. Con el -3 de antes, el estado quedaba fechado en otro día."""
+    _con_moods(store)
+    assert store.set_mood_today({"mood": "snarky"}) == []
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    data = store.read_data()
+    assert data["mood_today"] == "snarky"          # el motor lo vería vigente
+    assert data["mood_state"]["mode"] == "ui"
+    assert data["mood_state"]["date"] == datetime.now(
+        ZoneInfo("Asia/Tokyo")).date().isoformat()
+
+
+def test_mood_de_la_ui_deja_changed_at_para_la_histeresis(store):
+    """Sin changed_at el bot podía pisar el humor del admin en la reply siguiente."""
+    _con_moods(store)
+    store.set_mood_today({"mood": "snarky"})
+    from datetime import datetime
+    ca = store.read_data()["mood_state"]["changed_at"]
+    assert datetime.fromisoformat(ca).tzinfo is not None   # aware, como el motor
+
+
+def test_mood_today_respeta_apagado_y_modo_fijo(store):
+    _con_moods(store, enabled=False)
+    assert store.read_data()["mood_today"] is None
+    _con_moods(store, mode="manual", manual={"fixed": "snarky"})
+    assert store.read_data()["mood_today"] == "snarky"
+
+
+def test_mood_today_cae_al_default_sin_estado_de_hoy(store):
+    _con_moods(store)
+    assert store.read_data()["mood_today"] == "normal"
+    store.set_mood_today({"mood": "snarky"})
+    assert store.set_mood_today({"mood": ""}) == []        # soltar
+    assert store.read_data()["mood_today"] == "normal"
+
+
+def test_mood_inexistente_se_rechaza(store):
+    _con_moods(store)
+    assert store.set_mood_today({"mood": "eufórico"}) != []
 
 
 # ─── Importar calendario (CSV / ICS) ──────────────────────────────────────────
@@ -669,3 +771,122 @@ def test_bot_status_devuelve_la_cola_pedida(tmp_path):
                                       encoding="utf-8")
     assert len(cu.bot_status(tmp_path)["log_tail"].splitlines()) == 200   # default
     assert len(cu.bot_status(tmp_path, lineas=5)["log_tail"].splitlines()) == 5
+
+
+# ─── rutinas: interruptor y frecuencia desde la lista (frontmatter) ──────────
+@pytest.fixture
+def store_rutinas(store, tmp_path):
+    (tmp_path / "routines").mkdir()
+    (tmp_path / "routines" / "memes.md").write_text(
+        "---\ninterval_hours: 4\nenabled: true\n---\nposteá un meme\n", encoding="utf-8")
+    (tmp_path / "routines" / "sinflag.md").write_text(
+        "---\ninterval_hours: 2\n---\nposteá algo\n", encoding="utf-8")
+    return store
+
+
+def _rutina(tmp_path, name):
+    return (tmp_path / "routines" / name).read_text(encoding="utf-8")
+
+
+def test_routine_meta_apaga_sin_tocar_el_cuerpo(store_rutinas, tmp_path):
+    assert store_rutinas.set_routine_meta({"file": "memes.md", "enabled": False}) == []
+    texto = _rutina(tmp_path, "memes.md")
+    assert "enabled: false" in texto
+    assert "posteá un meme" in texto          # la conducta no se toca
+    assert "interval_hours: 4" in texto
+
+
+def test_routine_meta_inserta_el_flag_si_no_estaba(store_rutinas, tmp_path):
+    assert store_rutinas.set_routine_meta({"file": "sinflag.md", "enabled": False}) == []
+    meta, cuerpo = cu._parse_frontmatter(_rutina(tmp_path, "sinflag.md"))
+    assert meta["enabled"] == "false" and cuerpo.strip() == "posteá algo"
+
+
+def test_routine_meta_frecuencia(store_rutinas, tmp_path):
+    assert store_rutinas.set_routine_meta({"file": "memes.md", "interval_hours": 0.5}) == []
+    assert "interval_hours: 0.5" in _rutina(tmp_path, "memes.md")
+    # los enteros quedan enteros (nada de "6.0" en el archivo)
+    store_rutinas.set_routine_meta({"file": "memes.md", "interval_hours": 6})
+    assert "interval_hours: 6\n" in _rutina(tmp_path, "memes.md")
+
+
+@pytest.mark.parametrize("body,fragmento", [
+    ({"file": "../../evil.md", "enabled": True}, "inválido"),
+    ({"file": "fantasma.md", "enabled": True}, "no existe"),
+    ({"file": "memes.md", "interval_hours": "cada rato"}, "numérico"),
+    ({"file": "memes.md", "interval_hours": -3}, "negativo"),
+    ({"file": "memes.md"}, "nada que cambiar"),
+])
+def test_routine_meta_invalido(store_rutinas, body, fragmento):
+    errs = store_rutinas.set_routine_meta(body)
+    assert errs and fragmento in errs[0]
+
+
+# ─── presentación: status / descartar (el popup del primer arranque) ─────────
+def test_hello_status_y_descartar(store, tmp_path, monkeypatch):
+    (tmp_path / "posted").mkdir(exist_ok=True)
+    out = store.hello_world({"action": "status"})
+    assert out["ok"] and out["ya_posteado"] is None
+    assert out["errors"]                      # instancia sin configurar: dice qué falta
+    assert store.hello_world({"action": "descartar"})["ok"]
+    assert store.hello_world({"action": "status"})["ya_posteado"] == "descartado por el admin"
+
+
+def test_hello_action_invalida(store):
+    assert "action inválida" in store.hello_world({"action": "banana"})["errors"][0]
+
+
+# ─── La playlist vieja de settings no puede ser inmortal ────────────────────
+def test_guardar_fuentes_retira_la_playlist_legacy(store, tmp_path):
+    """`SPOTIFY_PLAYLIST_ID` se inyecta como fuente ("playlist comunitaria"),
+    así que mientras siga en settings reaparece por más que se borre en la UI —
+    y no hay campo para editarla. En una instancia clonada eso hace que la copia
+    herede la playlist de la original y le escriba temas (rancher con arg,
+    2026-08-01)."""
+    s = json.loads((tmp_path / "config" / "settings.json").read_text(encoding="utf-8"))
+    s["SPOTIFY_PLAYLIST_ID"] = "0dw6jEHMNM9JGBK5LPCWpz"
+    (tmp_path / "config" / "settings.json").write_text(
+        json.dumps(s, indent="\t"), encoding="utf-8")
+    # Sin sources.json todavía: la playlist suelta se ve, que es la migración.
+    assert any(e["type"] == "spotify" for e in store._read_sources(s))
+
+    # El admin guarda sus fuentes SIN la playlist heredada
+    assert store.write_sources([{"type": "spotify", "name": "la mía",
+                                 "sources": ["1sewYURqUwizDmY2CwvoAD"]}]) == []
+
+    final = json.loads((tmp_path / "config" / "settings.json").read_text(encoding="utf-8"))
+    assert "SPOTIFY_PLAYLIST_ID" not in final
+    ids = [i for e in store._read_sources(final)
+           if e["type"] == "spotify" for i in e["sources"]]
+    assert ids == ["1sewYURqUwizDmY2CwvoAD"]      # ya no reaparece la ajena
+
+
+# ─── Fuentes de YouTube: la UI guarda ids, no URLs ──────────────────────────
+def test_la_url_de_youtube_se_guarda_como_id(store, tmp_path):
+    """El admin pega lo que ve en la barra del browser. Si eso se guarda tal
+    cual, el motor se lo manda a la API como id y recibe un 400 (2026-08-01)."""
+    assert store.write_sources([{
+        "type": "youtube", "name": "la lista",
+        "sources": ["https://www.youtube.com/playlist?list=PLL5QXRk91MYY&jct=-SLfRFPeL"],
+    }]) == []
+    guardado = json.loads((tmp_path / "config" / "sources.json").read_text(encoding="utf-8"))
+    assert guardado[0]["sources"] == ["PLL5QXRk91MYY"]
+
+
+def test_una_fuente_de_youtube_que_no_sirve_se_rechaza():
+    errs = cu.validate_sources([{"type": "youtube", "name": "x",
+                                 "sources": ["https://vimeo.com/12345"]}])
+    assert errs and "YouTube" in errs[0]
+
+
+@pytest.mark.parametrize("valor", [0, 6, "tres", 2.5, True])
+def test_tool_rounds_invalido_falla(valor):
+    s = json.loads(json.dumps(_SETTINGS))
+    s["TOOL_ROUNDS"] = valor
+    assert any("TOOL_ROUNDS" in e for e in cu.validate_settings(s))
+
+
+def test_tool_rounds_valido_pasa():
+    s = json.loads(json.dumps(_SETTINGS))
+    s["TOOL_ROUNDS"] = 3
+    assert cu.validate_settings(s) == []

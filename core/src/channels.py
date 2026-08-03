@@ -14,6 +14,9 @@ en botata.py es la implementación original y de referencia):
                                               # target: destino opcional (rutinas con channel) —
                                               # Discord = id de canal; Bluesky y
                                               # Mastodon lo ignoran (un solo timeline)
+    .like_post(uri, cid) -> bool              # "me gusta" sobre un post ajeno
+                                              # (like en Bluesky, favourite en
+                                              # Mastodon, reacción en Discord/WhatsApp)
     .set_bio(text) -> bool                    # actualiza la bio del perfil del bot
     .get_profile(handle) -> obj(.did, .display_name, .description) | None
     .block_user(handle) -> bool
@@ -40,12 +43,19 @@ import logging
 import mimetypes
 import re
 import time
+from collections import deque
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 log = logging.getLogger("botata.channels")
+
+# Con qué gesto marca el bot que algo le gustó donde no hay "like" (Discord,
+# WhatsApp): una reacción. Uno solo y para todos los canales — el gesto es el
+# mismo, cambia la mecánica.
+LIKE_EMOJI = "❤️"
 
 _BR_RE = re.compile(r"<br\s*/?>", re.I)
 _P_RE = re.compile(r"</p>\s*<p[^>]*>", re.I)
@@ -260,6 +270,15 @@ class MastodonChannel:
             log.warning("upload de media falló (%s): %s — posteo sin media",
                         Path(media_path).name, e)
             return None
+
+    def like_post(self, uri: str, cid: str = "") -> bool:
+        """Favorito sobre un status. Idempotente del lado de Mastodon."""
+        try:
+            self._api.status_favourite(uri)
+            return True
+        except Exception as e:
+            log.warning("like_post (Mastodon) falló para %s: %s", uri, e)
+            return False
 
     def set_bio(self, text: str) -> bool:
         """Actualiza la bio (note) de la cuenta del bot. True si OK."""
@@ -642,6 +661,19 @@ class DiscordChannel:
                             p.name, e)
         return self._request("POST", path, json=payload)
 
+    def like_post(self, uri: str, cid: str = "") -> bool:
+        """"Me gusta" = reacción del bot al mensaje. Discord no tiene like: la
+        reacción es el gesto equivalente (y el único que la API le deja a un bot).
+        Idempotente: reaccionar dos veces con el mismo emoji no duplica nada."""
+        channel_id, _, message_id = uri.partition("/")
+        try:
+            self._request("PUT", f"/channels/{channel_id}/messages/{message_id}"
+                                 f"/reactions/{quote(LIKE_EMOJI)}/@me")
+            return True
+        except Exception as e:
+            log.warning("like_post (Discord) falló para %s: %s", uri, e)
+            return False
+
     def set_bio(self, text: str) -> bool:
         """Actualiza el "About Me" del bot (description de la application):
         único campo tipo bio que la API REST le deja tocar a un bot."""
@@ -757,6 +789,25 @@ class DiscordChannel:
 #
 # El cursor lo define el bridge (es su cola); acá solo se guarda y se devuelve.
 
+def wa_handle(valor: str | None) -> str:
+    """El "handle" de WhatsApp es el teléfono, en dígitos y nada más.
+
+    Acepta las tres formas en que el mismo número llega: el JID del bridge
+    (`5491111111111@s.whatsapp.net`, o `…@lid` si la otra punta tiene el modo
+    privado), lo que tipea el admin (`+54 9 11 1111-1111`) y el número pelado.
+    Devuelve siempre lo mismo, que es lo que el canal pone en `author_handle` —
+    así ADMIN_HANDLE y USER_GROUPS se escriben con el número y matchean.
+
+    Lo que no parece un número (un `feed:algo`, un handle de otra red que quedó
+    de arrastre) vuelve tal cual: normalizarlo sería inventar un match.
+    """
+    s = str(valor or "").strip()
+    if not s or ":" in s:
+        return s
+    digitos = re.sub(r"\D", "", s.split("@", 1)[0])
+    return digitos or s
+
+
 class WhatsAppChannel:
     """Canal WhatsApp a través de un bridge local (T41).
 
@@ -773,17 +824,25 @@ class WhatsAppChannel:
     - uri = "chat_id/message_id"; cid = message_id (igual que Discord).
     - Hilo: WhatsApp solo tiene citas de un nivel, no hilos. Se reconstruye
       subiendo por `quoted_id` mientras el bridge pueda resolverlo.
-    - Sin feed: `get_feed_posts` devuelve vacío. Lo que el bot sabe del grupo es
-      lo que fue acumulando en su propia DB.
-    - `author_handle` es el JID (el teléfono), no un @handle: es un id opaco
-      para la DB, como el user id de Discord.
-    - Sin bios de terceros: `get_profile` devuelve description vacía.
+    - Contexto: en un grupo la gente contesta sin citar, así que la cadena de
+      citas sola deja al bot sordo. El contexto es la CONVERSACIÓN RECIENTE del
+      chat (`context_messages`), que es lo que ve un humano al entrar.
+    - Feed: no hay timeline, pero el pase de feed sí aplica — la fuente es la
+      conversación del grupo (tipo `chat`). Leer cada tanto de qué se habla y
+      aprender de la gente es la misma idea que en Bluesky.
+    - `author_handle` es el teléfono, no un @handle (ver `wa_handle`).
+    - No aplican (decisión del admin, 2026-07-31): `block_user` —en un grupo
+      bloquear no saca a nadie— y el perfil de terceros, que es una frase de
+      estado y no dice quién es nadie. `get_profile` da el nombre visible y nada
+      más; lo que el bot sabe de alguien sale de su memoria.
     """
 
     THREAD_HOPS = 12       # tope al subir por citas
     POLL_LIMIT = 100       # mensajes por request al bridge
+    BUFFER_POR_CHAT = 300  # cuánto se recuerda por chat (techo de memoria)
 
-    def __init__(self, bridge_url: str, chat_ids: list[str], http=None):
+    def __init__(self, bridge_url: str, chat_ids: list[str], http=None,
+                 context_messages: int = 20):
         if http is None:
             import httpx  # lazy: simetría con los otros canales
             http = httpx.Client(base_url=bridge_url.rstrip("/"), timeout=30)
@@ -791,7 +850,11 @@ class WhatsAppChannel:
         self._chat_ids = [str(c) for c in chat_ids]
         self._cursor: str | None = None
         self._media_describer = None
+        self._context_messages = max(0, int(context_messages))
         self._msgs: dict[str, dict] = {}      # id → msg visto (citas y re-lectura)
+        # Conversación reciente por chat, en orden. Solo de los chats del
+        # allowlist: los personales del número no se guardan ni en memoria.
+        self._recientes: dict[str, deque] = {}
         estado = self._get("/status") or {}
         if not estado.get("connected"):
             raise SystemExit(
@@ -801,6 +864,11 @@ class WhatsAppChannel:
             )
         me = estado.get("me") or {}
         self._me_id = str(me.get("id") or "")
+        # El bot tiene DOS identidades y las dos aparecen: su número y su LID
+        # (los grupos nuevos direccionan por LID). Una cita a un mensaje suyo
+        # viene firmada con la que use ese grupo, así que hay que aceptar las
+        # dos o el bot no se entera de que le están contestando.
+        self._me_ids = {wa_handle(v) for v in (me.get("id"), me.get("lid")) if v}
         self.handle = me.get("name") or self._me_id
         log.info("WhatsApp vinculado como %s (escuchando %d chat(s))",
                  self.handle, len(self._chat_ids))
@@ -820,6 +888,12 @@ class WhatsAppChannel:
         text = msg.get("text") or ""
         for jid in msg.get("mentions") or []:
             text = text.replace(f"@{jid}", f"@{str(jid).split('@')[0]}")
+        # Arrobarlo deja en el texto el número CRUDO con el que ese grupo lo
+        # direcciona —el LID, que no es su teléfono ni su nombre—, así que el
+        # bot leía "@104913921159305 sobre esto qué opinás?" y no reconocía que
+        # ese número es él.
+        for propio in self._me_ids:
+            text = text.replace(f"@{propio}", f"@{self.handle}")
         return text.strip()
 
     def _media_note(self, msg: dict, *, describe: bool = False) -> str:
@@ -849,18 +923,42 @@ class WhatsAppChannel:
         return f"{text} {media}".strip() if media else text
 
     def _is_for_me(self, msg: dict) -> bool:
-        if msg.get("from_me") or str(msg.get("author_id") or "") == self._me_id:
+        if msg.get("from_me") or wa_handle(msg.get("author_id")) in self._me_ids:
             return False
-        if self._me_id and self._me_id in {str(j) for j in msg.get("mentions") or []}:
+        if self._me_ids & {wa_handle(j) for j in msg.get("mentions") or []}:
+            return True
+        if self._nombrado_en_texto(msg):
             return True
         return bool(msg.get("quoted_id")
-                    and str(msg.get("quoted_author_id") or "") == self._me_id)
+                    and wa_handle(msg.get("quoted_author_id")) in self._me_ids)
+
+    def _nombrado_en_texto(self, msg: dict) -> bool:
+        """Arrobado a mano, sin mención de verdad.
+
+        WhatsApp solo genera una mención si el que escribe elige al bot del
+        listado que aparece al tipear `@`. Escribir `@botata` a mano no genera
+        nada — y desde afuera se ve exactamente igual, así que el bot quedaba
+        mudo sin motivo visible. Se acepta el nombre y el número; el allowlist
+        de chats sigue siendo el que decide dónde vale."""
+        texto = (msg.get("text") or "").lower()
+        if "@" not in texto:
+            return False
+        candidatos = {c.lower() for c in (self.handle, *self._me_ids) if c}
+        for c in candidatos:
+            for hit in re.finditer(rf"@{re.escape(c)}\b", texto):
+                # El @ tiene que abrir palabra: si no, "juan@botata.com" sería
+                # un arrobado y el bot contestaría un mail ajeno.
+                if hit.start() == 0 or texto[hit.start() - 1].isspace():
+                    return True
+        return False
 
     def _to_mention(self, msg: dict) -> dict:
         return {
             "uri"           : f"{msg['chat_id']}/{msg['id']}",
             "cid"           : str(msg["id"]),
-            "author_handle" : str(msg.get("author_id") or ""),
+            # El teléfono, no el JID: es el id que el admin puede escribir a
+            # mano en ADMIN_HANDLE y en USER_GROUPS (ver wa_handle).
+            "author_handle" : wa_handle(msg.get("author_id")),
             "text"          : self._msg_text(msg),
         }
 
@@ -876,14 +974,30 @@ class WhatsAppChannel:
             self._cursor = str(data["cursor"])
         menciones = []
         for msg in data.get("messages") or []:
-            self._msgs[str(msg.get("id"))] = msg
             # El allowlist: acá vive la partición con cualquier otro cliente
-            # vinculado al mismo número.
-            if str(msg.get("chat_id")) not in self._chat_ids:
+            # vinculado al mismo número. Va PRIMERO: lo que no es de un chat
+            # del bot no se guarda ni en memoria (son chats personales).
+            chat = str(msg.get("chat_id"))
+            if chat not in self._chat_ids:
                 continue
+            self._msgs[str(msg.get("id"))] = msg
+            self._recordar(chat, msg)
             if self._is_for_me(msg):
                 menciones.append(self._to_mention(msg))
         return menciones
+
+    def _recordar(self, chat: str, msg: dict) -> None:
+        """Guarda el mensaje en la conversación reciente del chat.
+
+        Se guarda TODO lo del chat, no solo lo que le hablan al bot: el contexto
+        de un grupo son las charlas ajenas. El deque acota la memoria, y el
+        dedup por id evita que un mensaje releído aparezca dos veces (el bridge
+        puede reentregar si el cursor se reinicia)."""
+        cola = self._recientes.setdefault(chat, deque(maxlen=self.BUFFER_POR_CHAT))
+        mid = str(msg.get("id"))
+        if cola and any(str(m.get("id")) == mid for m in cola):
+            return
+        cola.append(msg)
 
     def mark_all_read(self) -> None:
         pass  # no existe el concepto; dedup por DB
@@ -901,30 +1015,79 @@ class WhatsAppChannel:
         return msg or None
 
     def get_thread_info(self, uri: str, cid: str) -> tuple[str, str, str, str]:
-        """Contexto subiendo por las citas.
+        """Contexto = la conversación reciente del chat, no el hilo.
 
-        WhatsApp no tiene hilos: la cadena se corta apenas alguien contesta sin
-        citar, que en un grupo es lo normal. Es límite del medio, no de la
-        implementación — por eso el bot se apoya más en su memoria que en el
-        contexto del hilo."""
-        _, _, message_id = uri.partition("/")
-        cadena: list[dict] = []
+        WhatsApp no tiene hilos: hay citas de un nivel, y en un grupo la gente
+        contesta sin citar. Reconstruir "el hilo" daba casi siempre una sola
+        línea —el mensaje mismo— y el bot terminaba contestando sin saber de qué
+        se estaba hablando. Lo que ve un humano cuando entra al grupo son los
+        últimos mensajes, así que eso es lo que se le pasa.
+
+        La cita no se pierde: se marca en la línea que la tiene, y si el mensaje
+        citado quedó fuera de la ventana se agrega igual (es lo más específico
+        que hay sobre qué le están contestando)."""
+        chat_id, _, message_id = uri.partition("/")
         actual = self._fetch_message(message_id)
-        saltos = 0
-        while actual and saltos < self.THREAD_HOPS:
-            cadena.append(actual)
-            quoted = actual.get("quoted_id")
+
+        # Raíz = la cabeza de la cadena de citas (lo que el motor usa para
+        # agrupar la conversación en su DB). Sigue valiendo aunque el contexto
+        # que se le pase al LLM sea la ventana.
+        cadena: list[dict] = []
+        cursor, saltos = actual, 0
+        while cursor and saltos < self.THREAD_HOPS:
+            cadena.append(cursor)
+            quoted = cursor.get("quoted_id")
             if not quoted:
                 break
-            actual = self._fetch_message(str(quoted))
+            cursor = self._fetch_message(str(quoted))
             saltos += 1
-        cadena.reverse()
-        lineas = [f"{m.get('author_name') or m.get('author_id')}: {self._full_text(m)}"
-                  for m in cadena]
-        raiz = cadena[0] if cadena else None
+        raiz = cadena[-1] if cadena else None
+
+        ventana = list(self._recientes.get(chat_id, ()))[-self._context_messages:]
+        if actual and not any(str(m.get("id")) == message_id for m in ventana):
+            ventana.append(actual)          # el mensaje que se contesta, siempre
+        citado_id = str((actual or {}).get("quoted_id") or "")
+        citado = self._fetch_message(citado_id) if citado_id else None
+        if citado and not any(str(m.get("id")) == citado_id for m in ventana):
+            ventana.insert(0, citado)
+
+        lineas = [self._linea(m) for m in ventana] if self._context_messages else []
         root_uri = f"{raiz['chat_id']}/{raiz['id']}" if raiz else uri
         root_cid = str(raiz["id"]) if raiz else cid
-        return "\n".join(lineas), root_uri, root_cid, ""
+        return "\n".join(lineas), root_uri, root_cid, self._media_a_mirar(actual, citado)
+
+    def _media_a_mirar(self, actual: dict | None, citado: dict | None) -> str:
+        """Qué imágenes MIRA de verdad (vision), no solo anota.
+
+        Dos mensajes y no más: el que le hablan y el que ese mensaje cita. En
+        WhatsApp el gesto natural es citar una foto y preguntar por ella —el
+        mensaje que menciona al bot es solo texto, la imagen está en el citado—,
+        así que describir únicamente la hoja dejaba al bot diciendo que no puede
+        ver imágenes con la imagen ahí al lado. El resto de la ventana queda con
+        la anotación barata: el costo es una llamada de vision por mensaje.
+        """
+        partes = []
+        if actual:
+            partes.append(self._media_note(actual, describe=True))
+        if citado is not None:
+            nota = self._media_note(citado, describe=True)
+            if nota:
+                partes.append(f"lo que cita: {nota}")
+        return " ".join(p for p in partes if p).strip()
+
+    def _linea(self, msg: dict) -> str:
+        """Una línea de conversación. La cita se anota inline: sin eso, en un
+        grupo no se entiende a quién le está contestando cada uno."""
+        quien = msg.get("author_name") or wa_handle(msg.get("author_id")) or "alguien"
+        if msg.get("from_me"):
+            quien = self.handle
+        cita = ""
+        if msg.get("quoted_id"):
+            citado = self._msgs.get(str(msg["quoted_id"]))
+            a_quien = (citado or {}).get("author_name") or "alguien"
+            frag = (self._msg_text(citado) if citado else "")[:40]
+            cita = f" [le contesta a {a_quien}" + (f": «{frag}»]" if frag else "]")
+        return f"{quien}{cita}: {self._full_text(msg)}"
 
     def get_mention_by_uri(self, uri: str) -> dict | None:
         _, _, message_id = uri.partition("/")
@@ -964,6 +1127,25 @@ class WhatsAppChannel:
         return self._send(chat_id, truncate_post(strip_fake_media(text), limit),
                           media_path=media_path)
 
+    def like_post(self, uri: str, cid: str = "") -> bool:
+        """"Me gusta" = reacción al mensaje (WhatsApp no tiene otra cosa).
+        El bridge necesita también el autor del mensaje: una reacción se firma
+        contra (chat, autor, id), no solo contra el id."""
+        chat_id, _, message_id = uri.partition("/")
+        original = self._msgs.get(message_id) or {}
+        try:
+            self._request("POST", "/react", json={
+                "chat_id"  : chat_id,
+                "message_id": message_id,
+                "author_id": str(original.get("author_id") or ""),
+                "emoji"    : LIKE_EMOJI,
+            })
+            return True
+        except Exception as e:
+            log.warning("like_post (WhatsApp) falló para %s: %s "
+                        "(¿el bridge es viejo y no tiene /react?)", uri, e)
+            return False
+
     # ── lo que WhatsApp no tiene ─────────────────────────────────────────
     def set_bio(self, text: str) -> bool:
         try:
@@ -974,27 +1156,83 @@ class WhatsAppChannel:
             return False
 
     def get_profile(self, handle: str):
-        """Sin bio: WhatsApp no expone el 'info' de terceros de forma confiable.
-        El nombre sale del pushName de algún mensaje ya visto."""
+        """El nombre que la persona muestra en el grupo, y nada más.
+
+        No hay perfil que traer: el "info" de WhatsApp es una frase de estado
+        que no dice quién es nadie (decisión del admin, 2026-07-31). Lo que el
+        bot sabe de alguien lo sabe por su memoria, no por su perfil."""
+        num = wa_handle(handle)
         visto = next((m for m in self._msgs.values()
-                      if str(m.get("author_id")) == str(handle)), None)
-        nombre = (visto or {}).get("author_name") or str(handle)
-        return SimpleNamespace(handle=str(handle), display_name=nombre, description="")
+                      if wa_handle(m.get("author_id")) == num), None)
+        nombre = (visto or {}).get("author_name") or num
+        # `did` va aunque no exista el concepto: el motor lo lee para cachearlo
+        # al conocer a alguien, y sin el campo eso explotaba con AttributeError
+        # en CADA mensaje de esa persona (se tragaba en el except, así que la
+        # fila nunca se completaba y el intento se repetía para siempre). Acá el
+        # id estable es el teléfono.
+        return SimpleNamespace(handle=num, did=num, display_name=nombre, description="")
 
     def resolve_did(self, handle: str) -> str | None:
-        return str(handle) or None     # el JID ya ES el id estable
+        return wa_handle(handle) or None   # el teléfono ya ES el id estable
 
     def block_user(self, handle: str) -> bool:
-        log.warning("block_user: no implementado en WhatsApp (no-op)")
+        """No aplica (decisión del admin, 2026-07-31): en un grupo bloquear no
+        hace nada útil — el bloqueado sigue en el grupo y sus mensajes siguen
+        llegando. Lo que corresponde ahí lo hace un admin del grupo, no el bot.
+        Devuelve False para que quien la pida se entere de que no pasó nada."""
+        log.info("block_user: en WhatsApp no aplica (bloquear no saca a nadie "
+                 "de un grupo) — pedido sobre %s ignorado", wa_handle(handle))
         return False
 
     def set_media_describer(self, fn) -> None:
         self._media_describer = fn
 
     def get_feed_posts(self, source_type: str, identifier: str | None,
-                       limit: int = 40) -> list[dict]:
-        log.warning("get_feed_posts: WhatsApp no tiene feed — el bot se sirve de su DB")
-        return []
+                       since: datetime | None = None, limit: int = 40) -> list[dict]:
+        """`chat` → la conversación reciente del grupo, como si fuera un feed.
+
+        No hay timeline que pedir: lo que hay es lo que el bot fue viendo pasar
+        (`_recientes`). Alcanza para lo que el pase de feed hace de verdad —
+        leer cada tanto de qué se está hablando y aprender de la gente — que es
+        la misma idea que en Bluesky aunque la fuente sea otra.
+
+        Límite honesto: no hay historial anterior a este proceso. Un pase que
+        corre cada 6 horas ve las últimas ~300 charlas, no el pasado del grupo.
+        """
+        if source_type != "chat":
+            log.warning("fuente de feed no soportada en WhatsApp: %s (usar 'chat')",
+                        source_type)
+            return []
+        chat_id = str(identifier) if identifier else (
+            self._chat_ids[0] if self._chat_ids else "")
+        if chat_id not in self._chat_ids:
+            # Mismo criterio que el poll: fuera del allowlist no se lee nada.
+            log.warning("feed de WhatsApp: '%s' no está en WHATSAPP_CHAT_IDS", chat_id)
+            return []
+        corte = since.timestamp() if since else None
+        posts = []
+        for msg in list(self._recientes.get(chat_id, ()))[-limit:]:
+            if msg.get("from_me"):
+                continue                      # lo suyo no es "lo que dice el grupo"
+            if corte is not None and float(msg.get("ts") or 0) <= corte:
+                continue
+            texto = self._full_text(msg)
+            if not texto:
+                continue
+            quoted = msg.get("quoted_id")
+            posts.append({
+                # El teléfono, igual que en las menciones: si acá fuera el
+                # nombre visible, el bot aprendería de "Fulano" y contestaría a
+                # "5491111111111" — dos personas distintas para su memoria.
+                "handle"    : wa_handle(msg.get("author_id")),
+                "text"      : texto,
+                "uri"       : f"{chat_id}/{msg.get('id')}",
+                "indexed_at": datetime.fromtimestamp(
+                    float(msg.get("ts") or 0), tz=timezone.utc).isoformat(),
+                "reply_to"  : f"{chat_id}/{quoted}" if quoted else None,
+            })
+        log.info("chat %s: %d mensajes para el pase de feed", chat_id, len(posts))
+        return posts
 
     def get_list_members(self, list_id: str) -> list[str]:
         return []

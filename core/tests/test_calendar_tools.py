@@ -110,3 +110,43 @@ def test_scopes_default(conn):
     assert "create_event" in [t.name for t in reg.available(Scope.ADMIN)]
     # default actual: admin + usuarios (los usuarios agendan solo para sí — regla en el handler)
     assert "create_event" in [t.name for t in reg.available(Scope.REPLY)]
+
+
+# ─── /schedule y /agenda: el atajo al calendario ─────────────────────────────
+# `/remember` es la memoria; `/schedule` es el calendario. La distinción la hace
+# el classify_prompt, pero lo que garantiza que un usuario común pueda agendar es
+# el RUTEO: un comando de no-admin cae al flujo de reply, que es donde vive
+# create_event con scope reply.
+def _clasificacion(**kw):
+    base = dict(is_admin_command=False, command=None, skip=False,
+                is_block_query=False, is_role_query=False)
+    base.update(kw)
+    return b.MentionClassification(**base)
+
+
+def test_schedule_de_un_usuario_va_al_flujo_de_reply():
+    estado = {"classification": _clasificacion(is_admin_command=True, command="schedule"),
+              "is_admin": False}
+    assert b.route_after_classify(estado) == "load_context"
+
+
+def test_schedule_del_admin_va_al_nodo_de_admin():
+    estado = {"classification": _clasificacion(is_admin_command=True, command="schedule"),
+              "is_admin": True}
+    assert b.route_after_classify(estado) == "handle_admin_command"
+
+
+def test_las_tools_del_calendario_estan_abiertas_a_los_usuarios():
+    """Sin scope reply, /schedule y /agenda solo funcionarían para el admin."""
+    from tools import Scope
+    reg = b.build_tool_registry(b.TOOLS_CONFIG)
+    disponibles = [t.name for t in reg.available(Scope.REPLY)]
+    assert "create_event" in disponibles          # /schedule
+    assert "get_upcoming_events" in disponibles   # /agenda
+
+
+def test_el_help_distingue_calendario_de_memoria():
+    from tools import ToolContext
+    texto = b._tool_get_help({}, ToolContext(state={}, conn=None)).text
+    assert "/schedule" in texto and "/remember" in texto
+    assert "calendario" in texto and "memoria" in texto

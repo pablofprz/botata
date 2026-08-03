@@ -97,23 +97,16 @@ def test_manual_fixed_nonexistent(conn):
     assert b.current_mood(conn) is None
 
 
-def test_manual_schedule_today(conn):
-    key = b._WEEKDAY_KEYS[b.now_local().weekday()]
-    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"schedule": {key: "gloomy"}}}
+def test_manual_schedule_ya_no_existe(conn):
+    """El schedule por día de la semana se retiró (es una rutina o un evento del
+    calendario). Un settings viejo que lo traiga cae al humor base, no explota."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "default": "upbeat",
+                      "manual": {"schedule": {"mon": "gloomy", "tue": "gloomy",
+                                              "wed": "gloomy", "thu": "gloomy",
+                                              "fri": "gloomy", "sat": "gloomy",
+                                              "sun": "gloomy"}}}
     m = b.current_mood(conn)
-    assert m and m.name == "gloomy"
-
-
-def test_manual_schedule_unmapped_day(conn):
-    b.MOODS_CONFIG = {"enabled": True, "mode": "manual", "manual": {"schedule": {"zzz": "gloomy"}}}
-    assert b.current_mood(conn) is None
-
-
-def test_manual_fixed_beats_schedule(conn):
-    key = b._WEEKDAY_KEYS[b.now_local().weekday()]
-    b.MOODS_CONFIG = {"enabled": True, "mode": "manual",
-                      "manual": {"fixed": "upbeat", "schedule": {key: "gloomy"}}}
-    assert b.current_mood(conn).name == "upbeat"
+    assert m and m.name == "upbeat"
 
 
 def test_auto_undecided_returns_none(conn):
@@ -353,3 +346,55 @@ def test_pref_tools_scopes_segun_modo(monkeypatch):
     monkeypatch.setattr(b, "PREFS_MODE", "full_auto")
     reg = b.build_tool_registry()
     assert Scope.REPLY in reg.get("remove_preference").scopes
+
+
+# ─── el pase silencioso: leer a la comunidad y elegir el humor, juntos ───────
+class _GrafoFalso:
+    def __init__(self, explota=False):
+        self.pasadas, self.explota = 0, explota
+
+    def invoke(self, state):
+        self.pasadas += 1
+        if self.explota:
+            raise RuntimeError("el feed no responde")
+        return {"posts_count": 3}
+
+
+def test_pase_silencioso_lee_y_elige_humor(conn, monkeypatch):
+    """Una sola vuelta: aprende del feed y decide el humor con ese mismo clima."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    monkeypatch.setattr(b, "FEEDS_CONFIG", [{"name": "comunidad", "uri": "at://x"}])
+    _fake_rolellm(monkeypatch, "upbeat", "andan de buenas")
+    grafo = _GrafoFalso()
+    b._pase_silencioso(grafo, None, conn, None)
+    assert grafo.pasadas == 1
+    assert b.current_mood(conn).name == "upbeat"
+
+
+def test_el_humor_se_elige_aunque_no_haya_feed(conn, monkeypatch):
+    """En WhatsApp/Telegram no hay feed que leer, y el bot igual tiene humor."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    monkeypatch.setattr(b, "FEEDS_CONFIG", [])
+    _fake_rolellm(monkeypatch, "chill", "todo tranquilo")
+    b._pase_silencioso(_GrafoFalso(), None, conn, None)
+    assert b.current_mood(conn).name == "chill"
+
+
+def test_si_el_feed_falla_el_humor_igual_se_decide(conn, monkeypatch):
+    """La red del feed no puede llevarse puesta la otra mitad del pase."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    monkeypatch.setattr(b, "FEEDS_CONFIG", [{"name": "comunidad", "uri": "at://x"}])
+    _fake_rolellm(monkeypatch, "gloomy", "día raro")
+    b._pase_silencioso(_GrafoFalso(explota=True), None, conn, None)
+    assert b.current_mood(conn).name == "gloomy"
+
+
+def test_el_humor_sigue_siendo_uno_por_dia(conn, monkeypatch):
+    """El pase corre seguido (cada ciclo); la decisión no se repite en el día."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    monkeypatch.setattr(b, "FEEDS_CONFIG", [])
+    _fake_rolellm(monkeypatch, "snarky", "primera decisión")
+    b._pase_silencioso(_GrafoFalso(), None, conn, None)
+    _fake_rolellm(monkeypatch, "angry", "segunda decisión")
+    b._pase_silencioso(_GrafoFalso(), None, conn, None)
+    assert b.current_mood(conn).name == "snarky"   # no la repisó

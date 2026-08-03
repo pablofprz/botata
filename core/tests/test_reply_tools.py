@@ -105,3 +105,46 @@ def test_toggle_disables_tool():
     cfg["summarize_feed"] = {"enabled": False, "scopes": ["reply"]}
     reg = b.build_tool_registry(cfg, bsky=FakeBsky([]), router=FakeRouter())
     assert "summarize_feed" not in [t.name for t in reg.available(Scope.REPLY)]
+
+
+# ─── La regla anti-promesa tiene que estar donde se ESCRIBE la respuesta ────
+# La generación del reply son DOS llamadas: fase 1 elige tools (system =
+# reply_tools_prompt.md) y fase 2 escribe el texto (system = SOUL + resultados
+# de tools + reply_format.md). "No prometas lo que no trajiste" estaba solo en
+# la fase 1, así que el modelo que escribe nunca la leía: contestó "dame un
+# toque" y después "escuchate este" sin ningún link (2026-08-01).
+def test_la_regla_anti_promesa_esta_en_el_prompt_de_la_fase_que_escribe():
+    fmt = (Path(__file__).resolve().parents[1] / "instance_template" / "prompts"
+           / "reply_format.md").read_text(encoding="utf-8").lower()
+    assert "don't promise what you didn't bring" in fmt
+    assert "no second message" in fmt
+
+
+# ─── Traer temas DE un artista no puede depender de cómo redacte el modelo ──
+def test_el_artista_va_por_su_campo_y_no_como_texto_libre(monkeypatch):
+    """Buscar el nombre pelado matchea también TÍTULOS: pedir "Sumo" devolvía
+    primero una canción llamada «Sumo» de otro artista (2026-08-01)."""
+    vistos = {}
+
+    def _fake_get(path, token, params):
+        vistos["q"] = params["q"]
+        return {"tracks": {"items": []}}
+
+    monkeypatch.setattr(b, "_spotify_token", lambda: "tok")
+    monkeypatch.setattr(b, "_spotify_get", _fake_get)
+
+    b.search_spotify_tracks("", artist="Sumo")
+    assert vistos["q"] == 'artist:"Sumo"'
+
+    b.search_spotify_tracks("en vivo", artist="Sumo")
+    assert vistos["q"] == 'artist:"Sumo" en vivo'
+
+    b.search_spotify_tracks("rock nacional melancólico")
+    assert vistos["q"] == "rock nacional melancólico"    # el vibe sigue siendo texto libre
+
+
+def test_search_music_pide_algo_con_que_buscar(monkeypatch):
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "x")
+    monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "y")
+    out = b._tool_search_music({}, ToolContext(state={}, conn=None))
+    assert "necesito" in out.text

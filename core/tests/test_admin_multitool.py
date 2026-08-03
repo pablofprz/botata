@@ -35,6 +35,12 @@ class FakeLLM:
         self.last_system = system
         return "", self.calls
 
+    def call_with_messages(self, messages, tools):
+        # El nodo encadena tools sobre una conversación (ver correr_rondas_de_tools):
+        # el system sigue siendo el primer mensaje.
+        self.last_system = messages[0]["content"]
+        return "", self.calls
+
 
 def _registry(executed):
     reg = ToolRegistry()
@@ -108,3 +114,20 @@ def test_rutinas_actuales_entran_al_contexto(tmp_path, monkeypatch):
     assert "RUTINAS ACTUALES" in llm.last_system
     assert "shitposting" in llm.last_system and "posteá un meme" in llm.last_system
     assert "apagada (OFF)" in llm.last_system  # las deshabilitadas también se ven
+
+
+# ─── El parte al admin no es un documento ───────────────────────────────────
+def test_la_respuesta_de_una_tool_se_recorta_para_el_admin():
+    """Caso real (2026-08-01): al pedirle agregar un video a YouTube no había
+    tool para eso, el modelo manoteó el MCP de Playwright y el nodo de admin
+    posteó el dump entero del navegador —CAPTCHA de Google incluido— como si
+    fuera su respuesta."""
+    dump = "### Ran Playwright code\n" + ("- Page URL: https://google.com/sorry " * 40)
+    salida = b._recorte_de_tool("browser_navigate", dump)
+    assert len(salida) < len(dump) and "recorté el resto" in salida
+    assert "\n" not in salida            # era markdown de otra herramienta
+
+
+def test_una_respuesta_corta_no_se_toca():
+    assert b._recorte_de_tool("set_routine", "listo, apagué la rutina memes") == \
+        "listo, apagué la rutina memes"

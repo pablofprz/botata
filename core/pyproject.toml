@@ -18,6 +18,9 @@ dependencies = [
     "python-dotenv>=1.0",
     # Zona horaria IANA (America/Argentina/Buenos_Aires) — Windows no trae tzdata del SO
     "tzdata>=2024.1",
+    # Recomprimir las imágenes generadas (tool generate_image): los generadores
+    # devuelven PNG de ~1,4 MB y el PDS de Bluesky rechaza blobs de más de 1 MB.
+    "pillow>=10.0",
     # Persistencia: SQLite moderno + búsqueda semántica (vec0)
     "sqlite-vec>=0.1.6",
     # Embeddings locales multilingües (bge-m3)
@@ -41,7 +44,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["botata", "db", "router", "tools", "skills", "moods", "routines", "scheduler", "mcp_tools", "mem_admin", "budget", "clearsky", "config_ui", "catalog", "parse_memory", "spotify_auth", "instance", "init_instance", "channels", "connectors"]
+py-modules = ["botata", "db", "router", "tools", "skills", "moods", "routines", "scheduler", "mcp_tools", "mem_admin", "budget", "clearsky", "config_ui", "catalog", "parse_memory", "spotify_auth", "youtube_auth", "instance", "init_instance", "channels", "connectors"]
 
 # --- ruff: tipado estricto, sin opinionated noise ---------------------------
 [tool.ruff]

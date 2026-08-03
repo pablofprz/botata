@@ -285,6 +285,9 @@ class _FakeLLM:
     def call_with_tools(self, system, user, tools):
         return "", self.calls
 
+    def call_with_messages(self, messages, tools):
+        return "", self.calls
+
     def complete(self, system, user, schema):
         self.system_visto = system
         return b.BotReply(text=self.texto, should_update_profile=False,

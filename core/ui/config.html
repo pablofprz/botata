@@ -56,6 +56,27 @@
   th { color: var(--muted); font-weight: 600; font-size: 12px; }
   code { background: #2b0f2c; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .hint { color: var(--muted); font-size: 12.5px; }
+  /* Cajas de tags (gustos y disgustos): el borde lleno marca los del admin */
+  .tagbox { display: flex; flex-wrap: wrap; gap: 6px; min-height: 40px; padding: 8px;
+            margin-top: 4px; border: 1px solid var(--line); border-radius: 8px; }
+  .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 13px;
+         padding: 2px 4px 2px 10px; border-radius: 12px; background: var(--panel2);
+         border: 1px dashed var(--line); }
+  .tag.mine { border-style: solid; border-color: var(--accent); }
+  .tag button { all: unset; cursor: pointer; opacity: .5; padding: 0 5px;
+                font-size: 14px; line-height: 1; }
+  .tag button:hover { opacity: 1; color: var(--err); }
+  /* Grilla del calendario */
+  .calhead, .calgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .calhead { margin-bottom: 4px; font-size: 11px; color: var(--muted); text-align: center; }
+  .calcell { min-height: 74px; padding: 4px; border: 1px solid var(--line); border-radius: 6px;
+             background: var(--panel2); cursor: pointer; overflow: hidden; }
+  .calcell.out { opacity: .35; }
+  .calcell.hoy { border-color: var(--accent); }
+  .calcell.sel { background: var(--hot); }
+  .calcell .d { font-size: 11px; color: var(--muted); }
+  .calcell .ev { font-size: 11px; line-height: 1.35; white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
   .badge { font-size: 11px; padding: 1px 8px; border-radius: 9px; }
   .badge.on  { background: #1d4030; color: var(--ok); }
   .badge.off { background: #571b2a; color: var(--err); }
@@ -72,6 +93,11 @@
   .chip.stop { border-color: var(--err); color: var(--err); }
   #savebar { display: none; align-items: center; gap: 10px; }
   #savebar.dirty { display: flex; }
+  #modal-bg { position: fixed; inset: 0; z-index: 50; background: #0009;
+              display: none; align-items: center; justify-content: center; padding: 20px; }
+  #modal-bg.on { display: flex; }
+  #modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           padding: 20px; max-width: 560px; width: 100%; max-height: 90vh; overflow: auto; }
   #toast { position: fixed; bottom: 18px; right: 18px; z-index: 40; padding: 10px 18px;
            border-radius: 7px; background: var(--panel2); border: 1px solid var(--line);
            display: none; max-width: 460px; white-space: pre-wrap; }
@@ -110,12 +136,10 @@
   <a href="#skills">📚 Skills</a>
   <a href="#moods">🌦️ Moods</a>
   <a href="#prefs">👍 Gustos</a>
-  <a href="#bio">🪪 Bio</a>
   <div class="navsep">Proactividad</div>
   <a href="#rutinas">⏰ Rutinas</a>
   <a href="#calendario">📅 Calendario</a>
   <a href="#feeds">📖 Lectura del feed</a>
-  <a href="#tareas">⚙️ Motor</a>
   <div class="navsep">Datos y motor</div>
   <a href="#memoria">🧠 Memoria</a>
   <a href="#memoria-usuarios">🗂️ Memoria por usuario</a>
@@ -126,6 +150,7 @@
   <a href="#mcp">🔌 MCP</a>
   <a href="#membrilla">🍐 Membrilla</a>
   <div class="navsep">Operación</div>
+  <a href="#tareas">⚙️ Motor (deberes fijos)</a>
   <a href="#debug">🐛 Debug (chat)</a>
   <a href="#mantenimiento">🔧 Mantenimiento</a>
   <a href="#avanzado">⚠️ Avanzado (prompts)</a>
@@ -233,13 +258,14 @@
     </div></section>
 
   <section id="moods"><h2>Moods (estados de ánimo)</h2>
-    <p class="hint">Un registro afectivo por día que tiñe el tono del bot (un día más
-      eufórico, otro más filoso) sin cambiar quién es. En <b>auto</b>, el bot elige su humor
-      cada mañana según cómo lo trató la comunidad, y puede cambiarlo durante el día si algo
-      lo mueve: la <b>susceptibilidad</b> (0–1) calibra cuán fácil cede y la
-      <b>histéresis</b> es el mínimo de horas entre cambios. En <b>manual</b> lo fijás vos
-      (fijo o por día de semana). Los moods viven en <code>moods/*.md</code> (editables).
-      Requiere reiniciar el bot.</p>
+    <p class="hint">Un humor que tiñe el tono del bot (un día más eufórico, otro más
+      filoso) sin cambiar quién es. Tres opciones y nada más: <b>apagado</b> ·
+      <b>fijo</b> (un humor siempre, el que elijas) · <b>automático</b> (lo elige él cada
+      mañana según cómo lo trataron, y puede cambiarlo durante el día si algo lo mueve —
+      la <b>susceptibilidad</b> calibra cuán fácil cede). Cada mood es un
+      <code>moods/*.md</code> editable, con su propio interruptor: uno desactivado sigue
+      existiendo pero el bot no lo elige. Los archivos son en vivo; el selector de arriba
+      requiere reiniciar.</p>
     <div class="card" id="c-moods"></div></section>
 
   <section id="prefs"><h2>Gustos y disgustos</h2>
@@ -251,19 +277,6 @@
       cambios de la tabla son en vivo; el modo requiere reiniciar.</p>
     <div class="card" id="c-prefsmode"></div>
     <div class="card" id="c-prefs"></div></section>
-
-  <section id="bio"><h2>Bio del perfil</h2>
-    <p class="hint">El bot puede regenerar la <b>bio de su cuenta</b> en su propia voz (con su
-      humor del día incluido). Qué debe mostrar es un prompt libre (<code>prompts/bio.md</code>,
-      abajo). Se dispara de dos formas: la tarea periódica <code>bio</code> (apagada por
-      default) o al toque por mención («@bot actualizá tu bio»). En Discord actualiza el
-      "About Me" del bot; en Bluesky/Mastodon, la descripción del perfil.</p>
-    <div class="card" id="c-bio"></div>
-    <div class="card">
-      <label>qué debe mostrar la bio (<code>prompts/bio.md</code> — prompt libre, aplica en el próximo disparo)</label>
-      <textarea id="bio-text" style="min-height:120px" spellcheck="false"></textarea>
-      <div class="row"><div style="max-width:200px"><button onclick="saveBioPrompt()">💾 guardar bio.md</button></div></div>
-    </div></section>
 
   <section id="rutinas"><h2>Rutinas (todo lo que el bot hace por iniciativa propia)</h2>
     <p class="hint"><b>Una rutina = un archivo <code>routines/*.md</code> = una conducta con
@@ -287,10 +300,10 @@
         <div style="max-width:240px"><label>archivo<input id="routine-file" placeholder="memes.md"></label></div>
         <div style="max-width:110px"><button class="ghost" onclick="openBehavior('routine')">abrir</button></div>
         <div style="max-width:130px"><button onclick="saveBehavior('routine')">guardar</button></div>
-        <div style="max-width:110px"><button class="danger" onclick="deleteBehavior('routine')">borrar</button></div>
       </div>
       <p class="hint">Para crear una: escribí un nombre nuevo (ej. <code>memes.md</code>) y
-        tocá abrir — te deja la plantilla para completar.</p>
+        tocá abrir — te deja la plantilla para completar. (Para borrar una existente,
+        usá su botón en la lista de arriba.)</p>
       <textarea id="routine-text" style="min-height:180px;display:none" spellcheck="false"></textarea>
     </div></section>
 
@@ -305,17 +318,6 @@
       con summarize_feed y si hay un tema que te pinta, opiná").</p>
     <div id="c-feeds"></div>
     <button class="ghost" onclick="addFeed()">+ feed</button></section>
-
-  <section id="tareas"><h2>Motor (deberes fijos del bot)</h2>
-    <p class="hint">Estos son los <b>deberes</b> del motor, no su personalidad: responder
-      menciones, anunciar el calendario, ejecutar órdenes, leer el feed y aprender,
-      destilar lecciones, elegir el humor, regenerar la bio. <b>Todo lo que el bot hace
-      por iniciativa propia vive en ⏰ Rutinas</b> (ahí es prompteable); acá solo está el
-      interruptor maestro + la frecuencia de cada deber. Intervalo <code>0</code> = corre
-      en cada ciclo del loop y el deber decide solo si hay algo que hacer (menciones,
-      feeds y rutinas se auto-regulan con sus propios intervalos por fuente/archivo).
-      En general no hace falta tocar nada acá.</p>
-    <div class="card" id="c-tasks"></div></section>
 
   <section id="calendario"><h2>Calendario</h2>
     <p class="hint"><b>Cómo funciona:</b> un evento se anuncia con <b>un post automático a la
@@ -332,6 +334,7 @@
       vacío = de la comunidad. <b>bot_action</b> no es un anuncio: es una orden que el bot
       EJECUTA a esa hora (tarea <code>actions</code>).</p>
     <div class="card" id="c-calann"></div>
+    <div class="card" id="c-calgrid"></div>
     <div class="card" id="c-events"></div>
     <div class="card" id="c-import">
       <b>📥 Importar calendario</b>
@@ -508,11 +511,29 @@
       <pre class="out" id="bot-log" style="display:none"></pre>
     </div></section>
 
+  <section id="tareas"><h2>Motor (deberes fijos del bot)</h2>
+    <p class="hint">Los <b>deberes</b> del motor, no su personalidad: responder menciones,
+      anunciar el calendario, ejecutar órdenes, correr las rutinas y el <b>pase silencioso</b>
+      — todo lo que hace hacia adentro en una sola vuelta: leer a la comunidad, aprender de
+      ella, elegir su humor del día y destilar lecciones de lo que viene diciendo. <b>Todo lo que el bot hace por iniciativa propia vive en
+      ⏰ Rutinas</b> (ahí es prompteable, incluida la bio); acá solo está el interruptor y
+      la frecuencia de cada deber. Intervalo <code>0</code> = corre en cada ciclo del loop y
+      el deber decide solo si hay algo que hacer (feeds y rutinas se auto-regulan con sus
+      propios intervalos por fuente/archivo). <b>En general no hace falta tocar nada acá.</b></p>
+    <div class="card" id="c-tasks"></div></section>
+
   <section id="avanzado"><h2>Avanzado — editor de prompts</h2>
     <p class="hint">Los prompts internos del bot (cómo clasifica, cómo resume el feed, el
       formato de las replies...) viven en <code>prompts/</code> de la instancia y se pueden
       afinar acá. ⚠️ Para usuarios avanzados: un prompt roto degrada el comportamiento del
       bot — el <code>.bak</code> que queda al lado permite volver atrás.</p>
+    <div class="card">
+      <b>👋 Presentación (hello world)</b>
+      <p class="hint">El posteo con el que el bot se presenta a la comunidad. Sale solo la
+        primera vez que lo arrancás; desde acá se puede volver a lanzar (ojo: si ya se
+        presentó, esto postea una segunda presentación).</p>
+      <button class="ghost" onclick="abrirHello(true)">👋 Presentación del bot</button>
+    </div>
     <div class="card" id="c-adv-flags"></div>
     <div class="card">
       <div class="row">
@@ -540,6 +561,24 @@
       </div></div></section>
 
 </main>
+<div id="modal-bg" onclick="if(event.target===this)cerrarHello()">
+  <div id="modal">
+    <h2 style="margin-top:0">👋 ¿Que se presente?</h2>
+    <p class="hint">Es la primera vez que arrancás este bot. Puede escribir <b>un</b> posteo
+      presentándose a la comunidad, con lo que configuraste (personalidad, nombre, comunidad,
+      gustos). Se hace una sola vez.</p>
+    <div id="hello-faltan" class="hint" style="display:none;white-space:pre-wrap"></div>
+    <textarea id="hello-text" style="min-height:110px;display:none" spellcheck="false"
+      placeholder="el borrador aparece acá y se puede editar"></textarea>
+    <div class="row" style="margin-top:10px">
+      <div><button class="ghost" onclick="helloPreview(this)">✍️ Escribir borrador</button></div>
+      <div><button onclick="helloPost(this)">📣 Publicar</button></div>
+      <div style="max-width:130px"><button class="ghost" onclick="cerrarHello()">ahora no</button></div>
+      <div style="max-width:150px"><button class="ghost" onclick="cerrarHello(true)"
+        title="no volver a preguntar en esta instancia">no preguntar más</button></div>
+    </div>
+  </div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -574,13 +613,20 @@ async function api(path, body) {
 }
 
 // ─── Input helpers (todos marcan dirty) ──────────────────────────────────
-function textInput(obj, key, label, type = "text") {
+// `dflt`: el valor que usa el MOTOR si la clave no está. Va de placeholder, y
+// vaciar el campo borra la clave en vez de guardar 0 — sin esto, un campo vacío
+// significaba "default" al abrir y "cero" después de tocarlo. Cero es un valor
+// legítimo (0 hechos = solo los 📌), así que la diferencia importa.
+function textInput(obj, key, label, type = "text", dflt = null) {
   const id = "i" + Math.random().toString(36).slice(2);
   setTimeout(() => $(id)?.addEventListener("input", e => {
-    obj[key] = type === "number" ? Number(e.target.value) : e.target.value;
+    const raw = e.target.value.trim();
+    if (raw === "" && dflt !== null) delete obj[key];
+    else obj[key] = type === "number" ? Number(e.target.value) : e.target.value;
     markDirty();
   }));
-  return `<label>${esc(label)}<input id="${id}" type="${type}" value="${esc(obj[key] ?? "")}"></label>`;
+  const ph = dflt === null ? "" : ` placeholder="${esc(String(dflt))} (default)"`;
+  return `<label>${esc(label)}<input id="${id}" type="${type}"${ph} value="${esc(obj[key] ?? "")}"></label>`;
 }
 function check(obj, key, label, dflt = false) {
   const id = "i" + Math.random().toString(36).slice(2);
@@ -588,6 +634,26 @@ function check(obj, key, label, dflt = false) {
   return `<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px">
     <input id="${id}" type="checkbox" ${ (obj[key] ?? dflt) ? "checked" : ""}> ${esc(label)}</label>`;
 }
+// Checkbox sobre algo que no es un bool en settings (ej. "0 = apagado"): en vez
+// de exponer el número, se lee y se escribe con dos funciones.
+function checkFn(get, set, label) {
+  const id = "i" + Math.random().toString(36).slice(2);
+  setTimeout(() => $(id)?.addEventListener("change", e => { set(e.target.checked); markDirty(); }));
+  return `<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px">
+    <input id="${id}" type="checkbox" ${get() ? "checked" : ""}> ${esc(label)}</label>`;
+}
+// Un "handle" no es lo mismo en todos lados: en WhatsApp es el teléfono. Se
+// acepta como salga (con +, con guiones, o el JID pegado del bridge) y se
+// guarda solo el número — es la misma regla que aplica el canal al leer un
+// mensaje, así que lo que se escribe acá matchea con quien escribe allá.
+// `feed:nombre` y demás no son personas: quedan intactos.
+function normHandle(v) {
+  const s = String(v ?? "").trim();
+  if ((S?.CHANNEL || "bluesky") !== "whatsapp") return s.replace(/^@/, "");
+  if (!s || s.includes(":")) return s;
+  return s.split("@")[0].replace(/\D/g, "") || s;
+}
+
 function selectInput(obj, key, label, options, dflt) {
   const id = "i" + Math.random().toString(36).slice(2);
   setTimeout(() => $(id)?.addEventListener("change", e => { obj[key] = e.target.value; markDirty(); }));
@@ -627,11 +693,13 @@ function render() {
 
   const isMasto = (S.CHANNEL || "bluesky") === "mastodon";
   const isDiscord = (S.CHANNEL || "bluesky") === "discord";
+  const isWhats = (S.CHANNEL || "bluesky") === "whatsapp";
   const discordIdsCsv = (S.DISCORD_CHANNEL_IDS || []).join(", ");
+  const whatsIdsCsv = (S.WHATSAPP_CHAT_IDS || []).join(", ");
   $("c-identidad").innerHTML = `<div class="row">
-    <div>${selectInput(S, "CHANNEL", "Canal", ["bluesky", "mastodon", "discord"], "bluesky")}</div>
+    <div>${selectInput(S, "CHANNEL", "Canal", ["bluesky", "mastodon", "discord", "whatsapp"], "bluesky")}</div>
     <div>${textInput(S, "BOT_HANDLE", "Handle del bot (la cuenta con la que habla)")}</div>
-    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll de menciones (segundos)", "number")}</div></div>
+    <div>${textInput(S, "POLL_INTERVAL_SECONDS", "Poll de menciones (segundos)", "number", 60)}</div></div>
     <div class="row" id="masto-row" style="${isMasto ? "" : "display:none"}">
     <div>${textInput(S, "MASTODON_BASE_URL", "URL de la instancia Mastodon (ej. https://mastodon.social)")}</div>
     <div><span class="hint">El token va en Credenciales → <code>MASTODON_ACCESS_TOKEN</code>
@@ -643,26 +711,84 @@ function render() {
       (bot del <a href="https://discord.com/developers" target="_blank">Developer Portal</a> con
       Message Content Intent, invitado al server con permiso de leer/enviar en esos canales).
       Comportamiento POR canal (qué postea, cada cuánto, con qué actitud): rutinas con
-      <code>channel:</code> — ver la sección ⏰ Rutinas; sus canales se escuchan solos.</span></div></div>`;
+      <code>channel:</code> — ver la sección ⏰ Rutinas; sus canales se escuchan solos.</span></div></div>
+    <div id="whatsapp-row" style="${isWhats ? "" : "display:none"}">
+    <div class="row">
+    <div style="flex:2"><label>Chats donde vive el bot (JIDs separados por coma; el primero es el principal)
+      <input id="i-whats-chats" value="${esc(whatsIdsCsv)}" placeholder="5491111111111-1431400469@g.us"></label></div>
+    <div style="max-width:240px">${textInput(S, "WHATSAPP_BRIDGE_URL", "URL del bridge", "text", "http://127.0.0.1:8899")}</div>
+    <div style="max-width:190px">${textInput(S, "WHATSAPP_CONTEXT_MESSAGES", "Mensajes de contexto", "number", 20)}</div></div>
+    <div class="hint">WhatsApp no tiene hilos: <b>esos mensajes de atrás SON el contexto</b> de la
+      conversación — lo que ve un humano cuando entra al grupo. Más = entiende mejor de qué se
+      está hablando y gasta más tokens por respuesta. Se acumulan mientras el bot corre; si lo
+      reiniciás arranca de cero.</div>
+    <div class="hint"><b>Esta lista no es opcional y es lo único que te protege.</b> WhatsApp no
+      tiene bots: el número entra como <i>dispositivo vinculado</i>, así que recibe <b>todos</b>
+      los mensajes de la cuenta — incluidas tus conversaciones personales. El bot solo mira los
+      chats que estén acá. Por lo mismo podés compartir el número con otro bot ya vinculado:
+      cada uno atiende los suyos.<br>
+      No hay credencial en <code>.env</code>: la sesión se abre escaneando un QR (abajo) y queda
+      guardada en <code>&lt;instancia&gt;/whatsapp/session.db</code>.</div>
+    <div class="card" style="margin-top:10px">
+      <div class="row" style="align-items:center">
+        <div><b>Bridge</b> <span id="wa-badge" class="badge off">sin consultar</span></div>
+        <div><button class="ghost" onclick="waStatus(this)">🔄 Consultar bridge</button></div>
+      </div>
+      <p class="hint" id="wa-hint">El bridge es un <b>proceso aparte</b> que habla el protocolo de
+        WhatsApp (el motor no puede). Levantalo con el comando de acá abajo, desde
+        <code>core/bridges/whatsapp/</code>, y volvé acá.</p>
+      <p class="hint">Comando para levantarlo (<code>-chats</code> hace que ni siquiera reciba
+        los mensajes de tus chats personales — si cambiás la lista de arriba, reiniciá el bridge
+        con el comando nuevo):</p>
+      <pre class="out" id="wa-cmd" style="user-select:all"></pre>
+      <div id="wa-qr" style="display:none;margin:10px 0">
+        <img id="wa-qr-img" alt="QR de vinculación" style="width:260px;height:260px;background:#fff;padding:8px;border-radius:8px">
+        <p class="hint">Escaneá desde <b>WhatsApp → Ajustes → Dispositivos vinculados → Vincular
+          dispositivo</b>. El QR rota solo cada ~30s mientras esta sección esté abierta.</p>
+      </div>
+      <div id="wa-groups"></div>
+    </div></div>`;
   $("i-discord-channels").addEventListener("input", e => {
     S.DISCORD_CHANNEL_IDS = e.target.value.split(",").map(c => c.trim()).filter(Boolean);
     markDirty();
   });
+  $("i-whats-chats").addEventListener("input", e => {
+    S.WHATSAPP_CHAT_IDS = e.target.value.split(",").map(c => c.trim()).filter(Boolean);
+    waPintarComando();
+    markDirty();
+  });
+  if (isWhats) waPintarComando();
   setTimeout(() => document.querySelectorAll("#c-identidad select").forEach(sel =>
     sel.addEventListener("change", () => {
       $("masto-row").style.display = (S.CHANNEL === "mastodon") ? "" : "none";
       $("discord-row").style.display = (S.CHANNEL === "discord") ? "" : "none";
+      $("whatsapp-row").style.display = (S.CHANNEL === "whatsapp") ? "" : "none";
       $("rt-discord-hint").style.display = (S.CHANNEL === "discord") ? "" : "none";
+      waAutoRefresh();
       navStatus();
     })));
 
   const adminsCsv = (S.ADMIN_HANDLES || []).join(", ");
   $("c-admin").innerHTML = `<div class="row">
-    <div>${textInput(S, "ADMIN_HANDLE", "⭐ TU handle (el del admin — obligatorio)")}</div>
-    <div><label>Co-admins (separados por coma, opcional)
-      <input id="i-admin-handles" value="${esc(adminsCsv)}" placeholder="otro.handle, tercero.handle"></label></div></div>`;
+    <div><label>${isWhats ? "⭐ TU número de WhatsApp (el del admin — obligatorio)"
+                          : "⭐ TU handle (el del admin — obligatorio)"}
+      <input id="i-admin-handle" value="${esc(S.ADMIN_HANDLE ?? "")}"
+        placeholder="${isWhats ? "+54 9 11 1111-1111" : "tu.handle"}"></label></div>
+    <div><label>${isWhats ? "Co-admins (números separados por coma, opcional)"
+                          : "Co-admins (separados por coma, opcional)"}
+      <input id="i-admin-handles" value="${esc(adminsCsv)}"
+        placeholder="${isWhats ? "+54 9 11 2222-2222" : "otro.handle, tercero.handle"}"></label></div></div>
+    ${isWhats ? `<div class="hint">En WhatsApp no hay handles: la identidad es el
+      <b>teléfono</b>. Escribilo como quieras (con <code>+</code>, con guiones, o el JID que
+      copiaste del bridge) — se guarda solo el número, que es lo que manda el canal.<br>
+      <b>Tiene que ser un número distinto al del bot:</b> el canal ignora lo que sale del
+      propio teléfono vinculado, así que desde ahí no podrías darle órdenes.</div>` : ""}`;
+  $("i-admin-handle").addEventListener("input", e => {
+    S.ADMIN_HANDLE = normHandle(e.target.value);
+    markDirty();
+  });
   $("i-admin-handles").addEventListener("input", e => {
-    S.ADMIN_HANDLES = e.target.value.split(",").map(h => h.trim().replace(/^@/, "")).filter(Boolean);
+    S.ADMIN_HANDLES = e.target.value.split(",").map(normHandle).filter(Boolean);
     markDirty();
   });
 
@@ -679,29 +805,72 @@ function render() {
 
   renderBudget(); renderModels(); renderFeeds(); renderTools(); renderGroups();
   renderTasks(); renderMcp(); renderSources(); renderPlugins(); renderSkills(); renderMoods();
-  renderPrefsMode(); renderData(); renderUserMem(); renderBio(); renderRoutines(); renderAdvFlags();
+  renderPrefsMode(); renderData(); renderUserMem(); renderRoutines(); renderAdvFlags();
   $("prompt-file").innerHTML = PROMPTS.map(f => `<option>${esc(f)}</option>`).join("");
+  if (isWhats) waStatus(null); else waAutoRefresh(false);
   navStatus();
+}
+
+// La línea "hoy: X — «porqué»" va aparte del resto de la sección a propósito:
+// el bot cambia de humor solo mientras el panel está abierto, y re-renderizar
+// toda la sección cada 15s pisaría los editores de mood abiertos y lo que el
+// admin esté tipeando. Antes no se refrescaba nunca: se quedaba con el humor
+// que había al cargar la página.
+function moodTodayLine() {
+  if (!S?.MOODS?.enabled) return "moods apagados — tono normal";
+  const st = DATA.mood_state;
+  if (!(st && st.mood)) return "hoy: sin definir";
+  return `hoy: <b>${esc(st.mood)}</b>`
+    + (st.reason ? ` — «${esc(st.reason)}»` : "")
+    + ` <span class="hint">(${esc(st.mode ?? "")})</span>`;
 }
 
 function renderMoods() {
   const m = S.MOODS ?? (S.MOODS = {enabled: false, mode: "auto", manual: {fixed: ""}});
   m.manual ??= {fixed: ""};
   const names = ["", ...MOODS.map(x => x.name)];
-  const st = DATA.mood_state;
-  const today = st && st.mood ? `hoy: <b>${esc(st.mood)}</b>${st.reason ? ` — «${esc(st.reason)}»` : ""} <span class="hint">(${esc(st.mode ?? "")})</span>` : "hoy: sin definir";
-  let html = `<div class="row">
-    <div style="max-width:120px;padding-bottom:6px">${check(m, "enabled", "activo", false)}</div>
-    <div style="max-width:140px">${selectInput(m, "mode", "modo", ["manual", "auto"], "auto")}</div>
-    <div style="max-width:170px">${textInput(m, "susceptibility", "susceptibilidad (0–1)", "number")}</div>
-    <div style="max-width:170px">${textInput(m, "hysteresis_hours", "histéresis (horas)", "number")}</div>
-    <div style="max-width:170px">${selectInput(m, "default", "mood por default", names, "")}</div>
-    <div style="max-width:190px">${selectInput(m.manual, "fixed", "manual: mood fijo", names, "")}</div>
-  </div>
-  <p class="hint">${m.enabled ? today : "moods apagados — tono normal"}</p>`;
+  // UN solo selector con los tres estados que existen de verdad. Antes eran
+  // cuatro perillas (enabled + mode + manual.fixed + default) para lo mismo, y
+  // "manual + fijo" no era otra cosa que "un humor y listo".
+  const estado = !m.enabled ? "apagado"
+    : (String(m.mode ?? "auto").toLowerCase() === "auto" ? "automático" : "fijo");
+  const setEstado = v => {
+    if (v === "apagado") { m.enabled = false; return; }
+    m.enabled = true;
+    m.mode = v === "automático" ? "auto" : "manual";
+    if (v === "fijo") { m.manual ??= {}; m.manual.fixed ||= (MOODS[0]?.name ?? ""); }
+  };
+  const eid = "i" + Math.random().toString(36).slice(2);
+  setTimeout(() => $(eid)?.addEventListener("change", e => {
+    setEstado(e.target.value); markDirty(); render();
+  }));
+  const susc = Number(m.susceptibility ?? 0.5);
+  let html = `<div class="row" style="align-items:end">
+    <div style="max-width:190px"><label>humor del bot<select id="${eid}">${
+      ["apagado", "fijo", "automático"].map(o =>
+        `<option ${o === estado ? "selected" : ""}>${o}</option>`).join("")}</select></label></div>`
+    + (estado === "fijo"
+       ? `<div style="max-width:190px">${selectInput(m.manual, "fixed", "cuál", names, "")}</div>
+          <div><span class="hint">un solo humor, siempre. Para que cambie por día de la
+          semana o por fecha, hacelo con una <b>rutina</b> (⏰) o un evento del 📅 calendario
+          que le pida cambiar de humor — no hace falta configurarlo acá.</span></div>`
+       : estado === "automático"
+       ? `<div style="max-width:190px">${selectInput(m, "default", "humor base (al que vuelve)", names, "")}</div>
+          <div style="max-width:170px">${textInput(m, "susceptibility", "susceptibilidad (0–1)", "number", 0.5)}</div>`
+         + (susc > 0
+            ? `<div style="max-width:170px">${textInput(m, "hysteresis_hours", "no cambia dos veces en … horas", "number", 2)}</div>`
+            : `<div><span class="hint">con susceptibilidad <b>0</b> no cambia de humor en
+               medio de una conversación: solo lo elige el pase diario.</span></div>`)
+       : "")
+    + `</div>
+  <p class="hint" id="mood-today-line">${moodTodayLine()}</p>`;
   // Editor de moods: cada uno es un .md editable; también se pueden crear.
-  html += MOODS.map((mo, i) => `<details class="card"><summary><code>${esc(mo.name)}</code>
-      — <span class="hint">${esc(mo.description)}</span></summary>
+  html += MOODS.map((mo, i) => `<details class="card"><summary>
+      <label style="display:inline-flex;gap:5px;align-items:center" title="${mo.enabled ? "activo: el bot puede usarlo" : "desactivado: el bot no lo elige"}"
+        onclick="event.stopPropagation()"><input type="checkbox" ${mo.enabled ? "checked" : ""}
+        onchange="toggleMood(${i}, this.checked)"></label>
+      <code>${esc(mo.name)}</code>
+      — <span class="hint">${esc(mo.description)}</span>${mo.enabled ? "" : ' <span class="badge off">off</span>'}</summary>
     <label>descripción (el bot la ve al elegir humor)
       <input data-mood-desc="${i}" value="${esc(mo.description)}"></label>
     <label>disparadores (opcional — QUÉ lo pone así; el selector auto los prioriza:
@@ -717,6 +886,18 @@ function renderMoods() {
     el contenido, en el idioma que quieras. Los cambios de moods son en vivo (no requieren
     reiniciar); el toggle/modo de arriba sí.</p>`;
   $("c-moods").innerHTML = html;
+}
+// Toggle por mood: reescribe su .md con enabled true/false (en vivo, no pide
+// reiniciar). Un mood desactivado sigue existiendo pero el bot no lo elige.
+async function toggleMood(i, enabled) {
+  const mo = MOODS[i];
+  try {
+    await api("/api/moods", {action: "save", name: mo.name, enabled,
+      description: mo.description, triggers: mo.triggers || "", body: mo.body});
+    mo.enabled = enabled;
+    toast(`${mo.name}: ${enabled ? "activo" : "desactivado"} ✓`);
+    await reloadConfig();
+  } catch (e) { toast(e.message, false); }
 }
 async function saveMood(i) {
   const mo = MOODS[i];
@@ -751,7 +932,7 @@ async function reloadConfig() {
   const data = await api("/api/config");
   ENV_KEYS = data.env_keys; SKILLS = data.skills; MOODS = data.moods ?? [];
   CATALOG = data.tools_catalog ?? []; INSTANCE = data.instance ?? {};
-  PROMPTS = data.prompts ?? [];
+  PROMPTS = data.prompts ?? []; ROUTINES = data.routines ?? [];
   render();
 }
 
@@ -761,29 +942,117 @@ function renderPrefsMode() {
     ${selectInput(p, "mode", "modo (qué puede hacer el bot solo)", ["manual", "add_only", "full_auto"], "manual")}</div>`;
 }
 
+// ─── Grilla del calendario ───────────────────────────────────────────────
+// Mes visible y día seleccionado (null = mostrar todos en la tabla de abajo).
+let CAL_MES = null, CAL_DIA = null;
+const _iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// Un evento recurrente es UNA fila en la DB, así que la grilla tiene que
+// expandirlo: sin esto, un cumpleaños anual solo se vería el año que se cargó.
+function ocurrenciasEnMes(ev, primerDia, ultimoDia) {
+  const base = new Date((ev.event_at || "").replace(" ", "T"));
+  if (isNaN(base)) return [];
+  const out = [];
+  if (!ev.recur) {
+    if (base >= primerDia && base <= ultimoDia) out.push(_iso(base));
+    return out;
+  }
+  for (let d = new Date(primerDia); d <= ultimoDia; d.setDate(d.getDate() + 1)) {
+    if (d < new Date(base.getFullYear(), base.getMonth(), base.getDate())) continue;
+    const ok = ev.recur === "daily"
+      || (ev.recur === "weekly" && d.getDay() === base.getDay())
+      || (ev.recur === "monthly" && d.getDate() === base.getDate())
+      || (ev.recur === "yearly" && d.getDate() === base.getDate() && d.getMonth() === base.getMonth());
+    if (ok) out.push(_iso(d));
+  }
+  return out;
+}
+
+function renderCalGrid(evs) {
+  const hoy = new Date();
+  CAL_MES ??= new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+  const primero = new Date(CAL_MES.getFullYear(), CAL_MES.getMonth(), 1);
+  const ultimo = new Date(CAL_MES.getFullYear(), CAL_MES.getMonth() + 1, 0);
+  // la grilla arranca el lunes de la semana del día 1 (getDay: domingo = 0)
+  const desde = new Date(primero);
+  desde.setDate(1 - ((primero.getDay() + 6) % 7));
+  const hasta = new Date(desde); hasta.setDate(desde.getDate() + 41);
+
+  const porDia = {};
+  for (const ev of evs)
+    for (const dia of ocurrenciasEnMes(ev, desde, hasta)) (porDia[dia] ??= []).push(ev);
+
+  const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+                 "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  let celdas = "";
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(desde); d.setDate(desde.getDate() + i);
+    const iso = _iso(d), delMes = d.getMonth() === CAL_MES.getMonth();
+    const dia = porDia[iso] ?? [];
+    const chips = dia.slice(0, 3).map(e =>
+      `<div class="ev" title="${esc(e.title)}">${e.kind === "bot_action" ? "🤖" :
+        e.kind === "birthday" ? "🎂" : (e.announce_effective ? "📣" : "🔇")} ${esc(e.title)}</div>`).join("");
+    celdas += `<div class="calcell${delMes ? "" : " out"}${iso === _iso(hoy) ? " hoy" : ""}${iso === CAL_DIA ? " sel" : ""}"
+      onclick="pickCalDia('${iso}')"><div class="d">${d.getDate()}</div>${chips}
+      ${dia.length > 3 ? `<div class="ev hint">+${dia.length - 3} más</div>` : ""}</div>`;
+  }
+  $("c-calgrid").innerHTML = `
+    <div class="row" style="align-items:center;margin-bottom:8px">
+      <div style="max-width:44px"><button class="ghost" onclick="calMes(-1)">‹</button></div>
+      <div style="max-width:190px;text-align:center"><b>${MESES[CAL_MES.getMonth()]} ${CAL_MES.getFullYear()}</b></div>
+      <div style="max-width:44px"><button class="ghost" onclick="calMes(1)">›</button></div>
+      <div style="max-width:80px"><button class="ghost" onclick="calMes(0)">hoy</button></div>
+      <div><span class="hint">${CAL_DIA ? `mostrando abajo solo el ${CAL_DIA} — ` : ""}
+        tocá un día para filtrar la lista${CAL_DIA ? ` · <a href="#" onclick="pickCalDia('${CAL_DIA}');return false">ver todos</a>` : ""}</span></div>
+    </div>
+    <div class="calhead">${["lun", "mar", "mié", "jue", "vie", "sáb", "dom"].map(d => `<div>${d}</div>`).join("")}</div>
+    <div class="calgrid">${celdas}</div>
+    <p class="hint" style="margin-bottom:0">Se ven los eventos de <b>ayer en adelante</b> (los
+      más viejos ya no se cargan). Los recurrentes se pintan en cada fecha que les toca.</p>`;
+}
+function calMes(delta) {
+  const hoy = new Date();
+  CAL_MES = delta === 0 ? new Date(hoy.getFullYear(), hoy.getMonth(), 1)
+    : new Date(CAL_MES.getFullYear(), CAL_MES.getMonth() + delta, 1);
+  if (delta === 0) CAL_DIA = null;
+  renderData();
+}
+function pickCalDia(iso) { CAL_DIA = CAL_DIA === iso ? null : iso; renderData(); }
+
 function renderData() {
   const prefs = DATA.preferences ?? [];
-  const rows = (kind) => prefs.filter(p => p.kind === kind).map(p =>
-    `<tr><td>${esc(p.text)}</td><td class="hint">${esc(p.source ?? "")}</td>
-     <td><button class="danger" onclick="delData('/api/preferences',${p.id})">borrar</button></td></tr>`).join("");
-  $("c-prefs").innerHTML = `
-    <b>Le gusta</b><table>${rows("like") || "<tr><td class='hint'>nada anotado — cargale gustos acá abajo</td></tr>"}</table>
-    <b style="display:block;margin-top:10px">No le gusta</b>
-    <table>${rows("dislike") || "<tr><td class='hint'>nada anotado</td></tr>"}</table>
-    <div class="row" style="margin-top:10px">
-      <div style="max-width:140px"><label>tipo<select id="pref-kind"><option value="like">gusto</option><option value="dislike">disgusto</option></select></label></div>
-      <div><label>texto<input id="pref-text" type="text" placeholder="el mate amargo · la cumbia · madrugar"></label></div>
-      <div style="max-width:110px"><button onclick="addPref()">+ agregar</button></div></div>`;
+  // Dos cajas de tags. El `source` no se muestra como columna pero sigue vivo:
+  // los que puso el admin llevan borde lleno y el bot NUNCA puede sacarlos (ni
+  // en full_auto). Sin esa marca, "el bot me borró un gusto mío" sería invisible.
+  const tags = (kind) => prefs.filter(p => p.kind === kind).map(p => {
+    const mio = (p.source ?? "") === "admin";
+    return `<span class="tag${mio ? " mine" : ""}" title="${mio ? "lo pusiste vos: el bot no puede sacarlo" : "lo anotó el bot solo"}">
+      ${esc(p.text)}<button title="sacar" onclick="delData('/api/preferences',${p.id})">×</button></span>`;
+  }).join("") || `<span class="hint">nada anotado todavía</span>`;
+  const cajaPref = (kind, titulo, ph) => `
+    <div style="flex:1;min-width:260px">
+      <b>${titulo}</b>
+      <div class="tagbox">${tags(kind)}</div>
+      <div class="row" style="margin-top:6px">
+        <div><input id="pref-new-${kind}" type="text" placeholder="${ph}"
+          onkeydown="if(event.key==='Enter')addPref('${kind}')"></div>
+        <div style="max-width:44px"><button onclick="addPref('${kind}')">+</button></div>
+      </div>
+    </div>`;
+  $("c-prefs").innerHTML = `<div class="row" style="align-items:flex-start;gap:18px">
+    ${cajaPref("like", "👍 Le gusta", "el mate amargo · la cumbia")}
+    ${cajaPref("dislike", "👎 No le gusta", "madrugar · que lo boludeen")}</div>`;
 
   const mem = DATA.memory ?? [];
   const memChars = mem.reduce((n, r) => n + (r.text ?? "").length, 0);
+  // Mismo gesto que en Memoria por usuario: 📌 delante del texto + botón al lado
+  // del borrar. Antes eran dos UIs distintas para exactamente lo mismo.
   $("c-memory").innerHTML = `<table>${mem.map(r =>
     `<tr><td class="hint" style="white-space:nowrap">${esc((r.created_at ?? "").slice(0, 10))}</td>
-     <td><button class="ghost" title="${r.pinned ? "fijada: la compactación no la toca" : "fijar (protegerla de la compactación)"}"
-          style="padding:2px 6px;opacity:${r.pinned ? 1 : .35}"
-          onclick="pinMem(${r.id}, ${r.pinned ? "false" : "true"})">📌</button></td>
-     <td>${esc(r.text)}</td><td class="hint">${esc(r.source ?? "")}</td>
-     <td><button class="danger" onclick="delData('/api/memory',${r.id})">borrar</button></td></tr>`).join("")
+     <td>${r.pinned ? "📌 " : ""}${esc(r.text)}</td><td class="hint">${esc(r.source ?? "")}</td>
+     <td style="white-space:nowrap"><button title="${r.pinned ? "dejar de fijarla" : "fijarla: la compactación no la toca"}"
+        onclick="pinMem(${r.id}, ${r.pinned ? "false" : "true"})">📌</button>
+      <button class="danger" onclick="delData('/api/memory',${r.id})">borrar</button></td></tr>`).join("")
     || "<tr><td class='hint'>memoria vacía</td></tr>"}</table>
     <p class="hint">Esta memoria entra <b>entera</b> en cada respuesta del bot:
       hoy son <b>${memChars} caracteres</b> (~${Math.round(memChars / 4)} tokens) en
@@ -795,11 +1064,15 @@ function renderData() {
 
   const ca = S.CALENDAR_ANNOUNCE ?? (S.CALENDAR_ANNOUNCE = {from: "admin", groups: []});
   const caGid = "i" + Math.random().toString(36).slice(2);
+  const baGid = "i" + Math.random().toString(36).slice(2);
   setTimeout(() => {
     $(caGid)?.addEventListener("input", e => {
       ca.groups = e.target.value.split(/[\s,]+/).filter(Boolean); markDirty();
     });
-    $("c-calann").querySelector("select")?.addEventListener("change", render);
+    $(baGid)?.addEventListener("input", e => {
+      S.BOT_ACTIONS_GROUPS = e.target.value.split(/[\s,]+/).filter(Boolean); markDirty();
+    });
+    $("c-calann").querySelectorAll("select").forEach(s => s.addEventListener("change", render));
   });
   $("c-calann").innerHTML = `<div class="row" style="align-items:end">
     <div style="max-width:300px">${selectInput(ca, "from", "Anuncios automáticos: eventos creados por", ["admin", "groups", "any"], "admin")}</div>
@@ -808,10 +1081,13 @@ function renderData() {
     <div><span class="hint"><b>admin</b> = solo admin/comunidad · <b>groups</b> = además los de esos grupos · <b>any</b> ⚠️ = cualquiera hace postear al bot</span></div></div>
     <div style="margin-top:6px">${check(ca, "feed", "anunciar también eventos aprendidos del feed (T6) — contenido de terceros, opt-in", false)}</div>
     <div class="row" style="align-items:end;margin-top:8px">
-      <div style="max-width:300px">${selectInput(S, "BOT_ACTIONS_FROM", "Órdenes agendadas (bot_action): quién puede", ["admin", "any"], "admin")}</div>
-      <div><span class="hint">quién puede agendarle al bot "posteá X a tal hora". <b>any</b> ⚠️ = cualquier usuario (superficie de prompt injection); de no-admins con <b>admin</b> degradan a recordatorio.</span></div></div>`;
+      <div style="max-width:300px">${selectInput(S, "BOT_ACTIONS_FROM", "Órdenes agendadas (bot_action): quién puede", ["admin", "groups", "any"], "admin")}</div>
+      <div style="${(S.BOT_ACTIONS_FROM ?? "admin") === "groups" ? "" : "display:none"}"><label>grupos habilitados (separados por coma)
+        <input id="${baGid}" value="${esc((S.BOT_ACTIONS_GROUPS ?? []).join(", "))}" placeholder="power_users"></label></div>
+      <div><span class="hint">quién puede agendarle al bot "posteá X a tal hora". <b>groups</b> = además los de esos grupos (los mismos de 👥 Grupos) · <b>any</b> ⚠️ = cualquier usuario (superficie de prompt injection). Los pedidos que no califican degradan a recordatorio.</span></div></div>`;
 
   const evs = DATA.events ?? [];
+  renderCalGrid(evs);
   const RECUR_ES = {daily: "todos los días", weekly: "semanal", monthly: "mensual", yearly: "anual"};
   const RECUR_OPTS = (sel) => `
     <option value="" ${!sel ? "selected" : ""}>una sola vez</option>
@@ -846,7 +1122,10 @@ function renderData() {
       <button class="danger" onclick="delData('/api/events',${e.id})">borrar</button></td></tr>`;
   };
   $("c-events").innerHTML = `<table><tr><th>fecha</th><th>título</th><th>tipo</th><th>repite</th><th>de quién</th><th title="¿la tarea calendar lo anuncia?">📣</th><th></th></tr>
-    ${evs.map(evRow).join("") || "<tr><td class='hint'>sin eventos próximos</td></tr>"}</table>
+    ${(CAL_DIA
+        ? evs.filter(e => ocurrenciasEnMes(e, new Date(CAL_DIA + "T00:00"), new Date(CAL_DIA + "T23:59")).length)
+        : evs).map(evRow).join("")
+      || `<tr><td class='hint'>${CAL_DIA ? "nada ese día" : "sin eventos próximos"}</td></tr>`}</table>
     <div class="row" style="margin-top:10px">
       <div><label>título<input id="ev-title" type="text"></label></div>
       <div style="max-width:220px"><label>primera fecha y hora<input id="ev-at" type="datetime-local"></label></div>
@@ -926,10 +1205,16 @@ function renderUserMem() {
         <div style="flex:1"><input id="fact-new" placeholder="nuevo hecho sobre @${esc(USERMEM_SEL)} (ej. 'vive en Rosario')"></div>
         <div><button onclick="addUserMem('fact')">➕ agregar hecho</button></div></div>
       <b style="display:block;margin-top:10px">Interacciones recientes (${inter.length})</b>
+      <p class="hint" style="margin:2px 0 6px">Notas que el bot escribió solo de cada
+      charla. Entran por <b>recencia</b> (las últimas) y se comprimen por día, así que
+      no se fijan: si una importa de verdad, pasala a <b>hecho 📌</b> — ahí la editás y
+      queda para siempre.</p>
       <table>${inter.map(i =>
       `<tr><td class="hint" style="white-space:nowrap">${esc((i.created_at ?? "").slice(0, 16).replace("T", " "))}</td>
        <td>${esc(i.summary)}</td>
-       <td><button class="danger" onclick="delUserMem('interaction',${i.id})">borrar</button></td></tr>`).join("")
+       <td style="white-space:nowrap"><button class="ghost" title="pasarla a hecho fijado (editable)"
+         onclick="interAHecho(${JSON.stringify(i.summary).replace(/"/g, "&quot;")})">📌 a hecho</button>
+       <button class="danger" onclick="delUserMem('interaction',${i.id})">borrar</button></td></tr>`).join("")
       || "<tr><td class='hint'>sin interacciones</td></tr>"}</table>`;
   }
   $("c-usermem").innerHTML = html;
@@ -943,6 +1228,17 @@ function renderUserMem() {
     <div class="row" style="margin-top:6px;align-items:center">
       <div style="flex:1"><input id="lesson-new" placeholder="nueva lección conductual (ej. 'con @fulano, respuestas cortas funcionan mejor')"></div>
       <div><button onclick="addUserMem('lesson')">➕ agregar lección</button></div></div>`;
+}
+// Una interacción es un resumen que escribió el bot de paso; un hecho 📌 es una
+// frase deliberada. Convertir = copiarla al input de hechos para EDITARLA antes
+// de fijarla (por eso no se guarda sola).
+function interAHecho(texto) {
+  const inp = $("fact-new");
+  if (!inp) return;
+  inp.value = texto;
+  inp.scrollIntoView({block: "center", behavior: "smooth"});
+  inp.focus();
+  toast("editala y dale «agregar hecho» — después fijala con 📌");
 }
 async function addUserMem(kind) {
   const inp = $(kind === "fact" ? "fact-new" : "lesson-new");
@@ -966,10 +1262,12 @@ async function dataAction(path, body) {
 function delData(path, id) { dataAction(path, {action: "delete", id}); }
 // Switch 📣 por evento: prende/apaga el anuncio automático de la tarea calendar
 function toggleAnnounce(id, on) { dataAction("/api/events/announce", {id, announce: !on}); }
-function addPref() {
-  const text = $("pref-text").value.trim();
+function addPref(kind) {
+  const input = $("pref-new-" + kind);
+  const text = input.value.trim();
   if (!text) return toast("falta el texto", false);
-  dataAction("/api/preferences", {action: "add", kind: $("pref-kind").value, text});
+  input.value = "";
+  dataAction("/api/preferences", {action: "add", kind, text});
 }
 function addMem() {
   const text = $("mem-text").value.trim();
@@ -1048,7 +1346,7 @@ function renderBudget() {
 
 const DEFAULT_ROLES = {classify: "lite", reply: "reasoning", admin: "reasoning",
   update_profile: "reasoning", feed_summary: "lite", feed_opinion: "lite",
-  bio_interp: "lite", image_describe: "vision"};
+  bio_interp: "lite", image_describe: "vision", image_generate: "image_gen"};
 
 function normalizeModels() {
   // 1) Sin sección MODELS → prellenar los defaults (endpoint + reasoning/lite/
@@ -1097,6 +1395,8 @@ function normalizeModels() {
       reasoning: S.REASONING_MODEL || "deepseek/deepseek-v4-pro",
       lite:      S.LITE_MODEL || "deepseek/deepseek-v4-flash",
       vision:    S.IMAGE_MODEL || "google/gemini-2.5-flash",
+      // `vision` MIRA imágenes; `image_gen` las CREA (tool generate_image).
+      image_gen: "google/gemini-2.5-flash-image",
     };
     for (const [alias, model] of Object.entries(DEFAULT_MODELS))
       if (!m.aliases[alias]) m.aliases[alias] = [{endpoint: ep0, model}];
@@ -1181,11 +1481,13 @@ const FEED_TYPES_BY_CHANNEL = {
   bluesky:  ["list", "feed", "following"],
   mastodon: ["list", "following", "local"],
   discord:  ["channel"],
+  whatsapp: ["chat"],
 };
 const FEED_TYPES_HINT = {
   bluesky: "tipos: <code>list</code> = lista de cuentas · <code>feed</code> = feed algorítmico · <code>following</code> = a quiénes sigue el bot",
   mastodon: "tipos: <code>list</code> = lista de cuentas · <code>following</code> = a quiénes sigue el bot · <code>local</code> = timeline local de la instancia",
   discord: "tipo <code>channel</code> = el bot lee y resume los mensajes de un canal (poné el id del canal como fuente)",
+  whatsapp: "tipo <code>chat</code> = el bot lee cada tanto la conversación del grupo y aprende de la gente. La fuente es el JID del chat — el mismo de la sección Canal, y tiene que estar en esa lista. Solo ve lo que pasó desde que el bot arrancó: no hay historial anterior.",
 };
 function renderFeeds() {
   const chan = S.CHANNEL || "bluesky";
@@ -1197,7 +1499,9 @@ function renderFeeds() {
       <div>${selectInput(f, "type", "tipo", types.includes(f.type ?? "list") ? types : [f.type, ...types], types[0])}</div>
       <div>${textInput(f, "interval_hours", "cada cuántas horas", "number")}</div>
     </div>
-    ${textInput(f, "uri", chan === "discord" ? "id del canal fuente" : "URI / id de la fuente (no aplica a following/local)")}
+    ${textInput(f, "uri", chan === "discord" ? "id del canal fuente"
+      : chan === "whatsapp" ? "JID del chat (el de la sección Canal)"
+      : "URI / id de la fuente (no aplica a following/local)")}
     <p class="hint">${FEED_TYPES_HINT[chan] ?? ""}</p>
     <div style="margin-top:8px">${check(f, "enabled", "activo", true)}${check(f, "learn", "aprender de lo que lee", true)}
       <button class="danger" onclick="S.FEEDS.splice(${i},1);markDirty();render()">borrar</button></div>
@@ -1284,16 +1588,22 @@ function renderTools() {
 
 function renderGroups() {
   const groups = S.USER_GROUPS ?? (S.USER_GROUPS = {});
+  // En WhatsApp un miembro es un teléfono, y un teléfono se escribe con
+  // espacios: separar por espacio partiría el número en pedazos.
+  const isWhats = (S.CHANNEL || "bluesky") === "whatsapp";
   $("c-groups").innerHTML = Object.entries(groups).map(([gname, members]) => {
     const mid = "i" + Math.random().toString(36).slice(2);
     setTimeout(() => $(mid)?.addEventListener("input", e => {
-      groups[gname] = e.target.value.split(/[\s,]+/).filter(Boolean);
+      groups[gname] = e.target.value.split(isWhats ? "," : /[\s,]+/)
+        .map(normHandle).filter(Boolean);
       markDirty();
     }));
     return `<div class="card">
       <b><code>${esc(gname)}</code></b>
-      <label>handles y/o feed:nombre (separados por espacio, sin @)
-        <input id="${mid}" type="text" value="${esc((members ?? []).join(" "))}"></label>
+      <label>${isWhats ? "números de teléfono (separados por coma)"
+                       : "handles y/o feed:nombre (separados por espacio, sin @)"}
+        <input id="${mid}" type="text" placeholder="${isWhats ? "+54 9 11 1111-1111, 5491122222222" : ""}"
+          value="${esc((members ?? []).join(isWhats ? ", " : " "))}"></label>
       <div style="margin-top:8px">
         <button class="danger" onclick="deleteGroup('${esc(gname)}')">borrar grupo</button></div>
     </div>`;
@@ -1313,14 +1623,12 @@ function deleteGroup(name) {
 }
 
 const TASK_DESC = {
-  mentions: "responder menciones (el corazón — no se apaga)",
+  mentions: "responder menciones — el corazón del bot: no se apaga (es también por donde le llegan tus órdenes)",
   calendar: "anunciar eventos vencidos del calendario (determinístico: actúa siempre)",
   actions: "ejecutar órdenes agendadas (bot_action) apenas llega su hora",
   routines: "correr las rutinas (routines/*.md — cadencia propia de cada archivo)",
-  feed: "leer los feeds de la comunidad y aprender (nunca postea)",
-  reflection: "aprender lecciones de sus conversaciones (no postea)",
-  mood: "elegir el humor del día (si moods está en auto)",
-  bio: "regenerar la bio del perfil según prompts/bio.md",
+  feed: "pase silencioso: leer a la comunidad, aprender de ella, elegir su humor del día y destilar lecciones (nunca postea)",
+  reflection: "↳ cada cuánto, dentro del pase silencioso, destila lecciones de lo que viene diciendo",
 };
 // Defaults del MOTOR (registro de PeriodicTask en botata.py): si el settings de
 // la instancia no lista una tarea, igual existe — se materializa acá para que
@@ -1329,20 +1637,31 @@ const TASK_DEFAULTS = {
   feed: {enabled: true, interval_hours: 0},
   mentions: {enabled: true, interval_hours: 0}, calendar: {enabled: true, interval_hours: 0},
   actions: {enabled: true, interval_hours: 0}, routines: {enabled: true, interval_hours: 0},
-  reflection: {enabled: true, interval_hours: 24}, mood: {enabled: true, interval_hours: 6},
-  bio: {enabled: false, interval_hours: 6},
+  reflection: {enabled: true, interval_hours: 24},
 };
+// Tareas retiradas: absorbidas por rutinas (heartbeat, rooms, public_reflection,
+// playlist_share, news) o convertidas en una (bio → routines/bio.md).
+const TASK_RETIRADAS = ["heartbeat", "rooms", "public_reflection", "playlist_share",
+                        "news", "bio", "mood"];
 function renderTasks() {
   const tasks = S.TASKS ?? (S.TASKS = {});
   for (const [name, dflt] of Object.entries(TASK_DEFAULTS)) tasks[name] ??= {...dflt};
-  let html = `<table><tr><th>tarea</th><th>qué hace</th><th>on</th><th>intervalo (h; 0 = cada ciclo)</th></tr>`;
+  let html = `<table><tr><th>deber</th><th>qué hace</th><th>on</th>
+              <th>cada cuánto</th></tr>`;
   for (const [name, cfg] of Object.entries(tasks)) {
-    // tareas viejas absorbidas por rutinas (settings legados pueden traerlas)
-    if (["heartbeat", "rooms", "public_reflection", "playlist_share", "news"].includes(name)) continue;
-    cfg.interval_hours ??= 0;  // editable siempre (antes decía "auto-regulada" sin más)
+    if (TASK_RETIRADAS.includes(name)) { delete tasks[name]; continue; }
+    cfg.interval_hours ??= 0;
+    // mentions no tiene interruptor: apagarlo deja al bot mudo Y sin forma de
+    // recibir órdenes (por eso el motor tampoco deja apagarlo por comando). Lo
+    // único suyo que se configura es cada cuánto mira, y eso se mide en
+    // segundos, no en horas — es el mismo POLL de la sección Canal.
+    const esMentions = name === "mentions";
+    if (esMentions) cfg.enabled = true;
     html += `<tr><td><code>${esc(name)}</code></td><td class="hint">${esc(TASK_DESC[name] ?? "")}</td>
-             <td>${check(cfg, "enabled", "", true)}</td>
-             <td style="max-width:140px">${textInput(cfg, "interval_hours", "", "number")}</td></tr>`;
+             <td>${esMentions ? '<span title="no se puede apagar">🔒</span>' : check(cfg, "enabled", "", true)}</td>
+             <td style="max-width:170px">${esMentions
+                ? textInput(S, "POLL_INTERVAL_SECONDS", "segundos", "number", 60)
+                : textInput(cfg, "interval_hours", "horas (0 = cada ciclo)", "number", 0)}</td></tr>`;
   }
   $("c-tasks").innerHTML = html + "</table>";
 }
@@ -1361,19 +1680,13 @@ function routineNext(rt) {
 }
 
 // ─── Mood en vivo (topbar, visible con el bot corriendo) ─────────────────
+// El humor vigente lo resuelve el servidor (mood_today en /api/data), con la
+// misma regla y la misma zona horaria que el motor. Acá se resolvía en JS con
+// un -3 hardcodeado — y en cualquier instancia fuera de Argentina el chip
+// mostraba un humor distinto del que el bot estaba usando de verdad.
 function currentMoodName() {
-  const m = S?.MOODS ?? {};
-  if (!m.enabled) return null;
-  const nowAr = new Date(Date.now() - 3 * 3600e3);  // hora AR
-  if ((m.mode ?? "manual") === "auto") {
-    const st = DATA.mood_state;
-    if (st && st.date === nowAr.toISOString().slice(0, 10) && st.mood) return st.mood;
-    return (m.default ?? "").trim() || null;
-  }
-  const man = m.manual ?? {};
-  if ((man.fixed ?? "").trim()) return man.fixed.trim();
-  const key = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][nowAr.getUTCDay()];
-  return ((man.schedule ?? {})[key] ?? "").trim() || (m.default ?? "").trim() || null;
+  if (!S?.MOODS?.enabled) return null;
+  return DATA.mood_today || null;
 }
 function updateMoodChip() {
   const chip = $("mood-chip"), sel = $("mood-select");
@@ -1395,9 +1708,11 @@ async function setMoodToday(name) {
     await api("/api/mood-today", {mood: name});
     await loadData();
     updateMoodChip();
+    const ml = $("mood-today-line");
+    if (ml) ml.innerHTML = moodTodayLine();
     const manual = (S.MOODS?.mode ?? "manual") !== "auto";
     toast(manual
-      ? `mood de hoy: ${name} — OJO: con MOODS en modo manual manda fixed/schedule`
+      ? `mood de hoy: ${name} — OJO: con el humor en "fijo" manda el de la config`
       : `mood de hoy: ${name} ✓ (en vivo)`);
   } catch (e) { toast(e.message, false); }
 }
@@ -1457,6 +1772,25 @@ function addSource(kind) {
 function headersText(entry) {
   return Object.entries(entry.headers ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n");
 }
+// Campos de una fuente de DATOS: todo lo que no sea uno de los tres nombres
+// reservados del mapeo. El nombre lo elige el admin y es lo que el bot lee.
+const _MAPA_RESERVADO = ["image_url", "title", "url"];
+function fieldsText(mapa) {
+  return Object.entries(mapa ?? {})
+    .filter(([k]) => !_MAPA_RESERVADO.includes(k))
+    .map(([k, v]) => `${k}: ${v}`).join("\n");
+}
+function setApiFields(i, raw) {
+  const mapa = SOURCES[i].map ?? (SOURCES[i].map = {});
+  // se conservan los reservados (los editan sus propios inputs) y se reemplaza el resto
+  for (const k of Object.keys(mapa)) if (!_MAPA_RESERVADO.includes(k)) delete mapa[k];
+  raw.split("\n").forEach(linea => {
+    const corte = linea.indexOf(":");
+    const nombre = corte > 0 ? linea.slice(0, corte).trim() : "";
+    if (nombre && !_MAPA_RESERVADO.includes(nombre)) mapa[nombre] = linea.slice(corte + 1).trim();
+  });
+  markDirty();
+}
 function setApiHeaders(i, raw) {
   const h = {};
   raw.split("\n").forEach(linea => {
@@ -1484,13 +1818,19 @@ async function testSource(i) {
     return;
   }
   const s = d.sample ?? {};
+  // Fuente de DATOS: no hay imagen que mostrar, se muestran los valores que trajo
+  // (que es justo lo que el bot va a leer).
+  const campos = Object.entries(s.fields ?? {});
+  const cuerpo = s.image_url
+    ? `<img src="${esc(s.image_url)}" alt="" style="max-width:110px;border-radius:6px">
+       <div><b>${esc(s.title || "(sin título)")}</b><br>
+         <code style="word-break:break-all">${esc(s.image_url)}</code></div>`
+    : `<div>${s.title ? `<b>${esc(s.title)}</b><br>` : ""}${campos.length
+        ? campos.map(([k, v]) => `<code>${esc(k)}</code>: ${esc(String(v))}`).join("<br>")
+        : "<span class='hint'>trajo el item pero sin campos mapeados</span>"}</div>`;
   box.innerHTML = `<span style="color:var(--ok)">✅ anduvo</span> — ${d.count} item(s)
     de <code>${esc(d.source)}</code>
-    <div style="display:flex;gap:10px;margin-top:6px;align-items:flex-start">
-      <img src="${esc(s.image_url)}" alt="" style="max-width:110px;border-radius:6px">
-      <div><b>${esc(s.title || "(sin título)")}</b><br>
-        <code style="word-break:break-all">${esc(s.image_url)}</code></div>
-    </div>`;
+    <div style="display:flex;gap:10px;margin-top:6px;align-items:flex-start">${cuerpo}</div>`;
 }
 function apiFields(entry, i) {
   const mapa = (entry.map ??= {});
@@ -1512,12 +1852,19 @@ function apiFields(entry, i) {
     ${textInput(entry, "url", "URL de la API")}
     <div class="row" style="margin-top:6px">
       <div>${textInput(entry, "items_path", "dónde está la lista (vacío = la respuesta ES un solo item)")}</div>
-      <div>${textInput(mapa, "image_url", "campo de la imagen (obligatorio)")}</div>
+      <div>${textInput(mapa, "image_url", "campo de la imagen (si es fuente de imágenes)")}</div>
     </div>
     <div class="row" style="margin-top:6px">
       <div>${textInput(mapa, "title", "campo del título (opcional)")}</div>
       <div>${textInput(mapa, "url", "campo del link al original (opcional)")}</div>
     </div>
+    <p class="hint" style="margin:8px 0 2px"><b>¿Datos en vez de imágenes?</b> Dejá vacío
+      el campo de la imagen y pedí acá los valores que quieras: el bot los consulta con
+      <code>get_data</code> (dólar, clima, resultados). Uno por línea,
+      <code>nombre: campo.de.la.respuesta</code> — el nombre lo elegís vos y es lo que el
+      bot va a leer.</p>
+    <textarea style="min-height:52px" placeholder="blue: blue.venta&#10;oficial: oficial.venta"
+      oninput="setApiFields(${i}, this.value)">${esc(fieldsText(mapa))}</textarea>
     <label>headers (opcional, uno por línea: <code>Authorization: Bearer {env:MI_TOKEN}</code>)
       <textarea style="min-height:52px" oninput="setApiHeaders(${i}, this.value)"
         >${esc(headersText(entry))}</textarea></label>
@@ -1633,37 +1980,53 @@ function renderSkills() {
 }
 
 // ─── Bio del perfil ──────────────────────────────────────────────────────
-function renderBio() {
-  const t = (S.TASKS ??= {});
-  t.bio ??= {enabled: false, interval_hours: 6};
-  const cur = DATA.bio_current;
-  $("c-bio").innerHTML = `<div class="row" style="align-items:end">
-    <div style="max-width:230px">${check(t.bio, "enabled", "regenerarla sola (tarea bio)", false)}</div>
-    <div style="max-width:180px">${textInput(t.bio, "interval_hours", "cada cuántas horas", "number")}</div></div>
-    <p class="hint">bio aplicada por última vez: ${cur ? `«${esc(cur)}»` : "(el bot todavía nunca la actualizó)"}</p>`;
-}
-async function saveBioPrompt() {
-  try {
-    const r = await api("/api/prompt", {action: "save", file: "bio.md", text: $("bio-text").value});
-    if (!r.ok) throw new Error((r.errors || []).join("\n"));
-    toast("bio.md guardado ✓ — aplica en el próximo disparo de la bio");
-  } catch (e) { toast(e.message, false); }
-}
-
 // ─── Rutinas (conducta proactiva en routines/*.md) ───────────────────────
 function renderRoutines() {
-  $("c-routines").innerHTML = ROUTINES.map(rt => `
-    <div class="row" style="align-items:center;margin-bottom:6px">
-      <div style="max-width:40px"><span class="badge ${rt.enabled ? "on" : "off"}">${rt.enabled ? "on" : "off"}</span></div>
-      <div style="max-width:150px"><code>${esc(rt.name)}</code></div>
-      <div style="max-width:170px" class="hint">${Number(rt.interval_hours) > 0 ? `cada ${esc(String(rt.interval_hours))}h` : (rt.channel ? "solo actitud" : "sin pase (interval 0)")}${rt.channel ? ` · canal ${esc(rt.channel)}` : ""}</div>
-      <div style="max-width:190px" class="hint">${esc(routineNext(rt))}</div>
-      <div class="hint">${esc((rt.body || "").slice(0, 80))}${(rt.body || "").length > 80 ? "…" : ""}</div>
-      <div style="max-width:90px"><button class="ghost" onclick="editBehavior('routine','${esc(rt.file)}')">✏️ ver</button></div>
-    </div>`).join("") ||
-    `<p class="hint">sin rutinas — el bot solo reacciona (menciones, calendario).
-     Creá una acá abajo (ej. <code>memes.md</code> con "posteá un meme" cada 4h) para darle
-     iniciativa propia.</p>`;
+  if (!ROUTINES.length) {
+    $("c-routines").innerHTML = `<p class="hint">sin rutinas — el bot solo reacciona
+      (menciones, calendario). Creá una acá abajo (ej. <code>memes.md</code> con
+      "posteá un meme" cada 4h) para darle iniciativa propia.</p>`;
+    return;
+  }
+  const filas = ROUTINES.map((rt, i) => `
+    <tr>
+      <td style="width:34px"><input type="checkbox" ${rt.enabled ? "checked" : ""}
+        title="${rt.enabled ? "activa" : "apagada"}" onchange="setRoutineMeta(${i}, {enabled: this.checked})"></td>
+      <td style="width:170px"><code>${esc(rt.name)}</code>${rt.channel
+        ? `<br><span class="hint">canal ${esc(rt.channel)}</span>` : ""}</td>
+      <td style="width:120px"><input type="number" min="0" step="0.5" style="margin:0"
+        value="${esc(String(rt.interval_hours ?? 0))}" title="cada cuántas horas (0 = no postea sola)"
+        onchange="setRoutineMeta(${i}, {interval_hours: this.value})"></td>
+      <td style="width:190px" class="hint">${esc(routineNext(rt))}</td>
+      <td class="hint">${esc((rt.body || "").slice(0, 90))}${(rt.body || "").length > 90 ? "…" : ""}</td>
+      <td style="width:150px;white-space:nowrap;text-align:right">
+        <button class="ghost" style="padding:3px 10px" onclick="editBehavior('routine','${esc(rt.file)}')">✏️ ver</button>
+        <button class="danger" style="padding:3px 10px" onclick="deleteRoutine('${esc(rt.file)}')">borrar</button></td>
+    </tr>`).join("");
+  $("c-routines").innerHTML = `<table>
+    <tr><th>on</th><th>rutina</th><th>cada … h</th><th>próximo pase</th><th>qué hace</th><th></th></tr>
+    ${filas}</table>`;
+}
+// Interruptor y frecuencia sin abrir el archivo: la config de una rutina vive en
+// su frontmatter, así que esto reescribe SOLO esa línea (el cuerpo no se toca).
+async function setRoutineMeta(i, cambio) {
+  const rt = ROUTINES[i];
+  try {
+    await api("/api/routine-meta", {file: rt.file, ...cambio});
+    Object.assign(rt, "interval_hours" in cambio
+      ? {interval_hours: Number(cambio.interval_hours)} : cambio);
+    toast(`${rt.name} actualizada ✓ (en vivo)`);
+    await reloadConfig();
+  } catch (e) { toast(e.message, false); await reloadConfig(); }
+}
+async function deleteRoutine(file) {
+  if (!confirm(`¿Borrar la rutina ${file}? (borra routines/${file})`)) return;
+  try {
+    const r = await api("/api/behavior-file", {kind: "routine", action: "delete", file});
+    if (!r.ok) throw new Error((r.errors || []).join("\n"));
+    toast("rutina borrada");
+    await reloadConfig();
+  } catch (e) { toast(e.message, false); }
 }
 
 // ─── Flags avanzados sueltos ─────────────────────────────────────────────
@@ -1674,6 +2037,16 @@ function renderAdvFlags() {
     check(S, "READ_THREAD_MEDIA",
           "leer la media de los hilos (vision: describe imágenes/GIFs/videos del contexto de cada mención — cuesta 1 llamada al modelo de imagen por pieza)",
           true)
+    + `<div class="row" style="margin-top:10px"><div style="max-width:240px">`
+    + textInput(S, "TOOL_ROUNDS", "Rondas de tools por respuesta", "number", 1)
+    + `</div></div>
+       <p class="hint" style="margin-top:0"><b>Cuántas veces puede pensar antes de contestar.</b>
+       Con <b>1</b> el bot decide TODAS las tools que va a usar de una, sin ver ningún resultado:
+       "leé la playlist y traeme algo parecido que no esté ahí" es imposible, porque la segunda
+       búsqueda depende de lo que trajo la primera. Con <b>2 o 3</b> ve lo que trajo cada tool y
+       decide la siguiente — pedidos de varios pasos empiezan a funcionar sin escribirle una
+       skill que se los guione. Cada ronda extra es <b>una llamada más al modelo</b>, y solo la
+       pagan los pedidos que la necesitan (si resuelve en una, no cambia nada). Máximo 5.</p>`
     + `<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
        <p class="hint" style="margin-top:0"><b>🔎 Cuánta memoria trae en cada respuesta.</b>
        La memoria general entra <b>entera</b> siempre, y de cada persona entran siempre sus
@@ -1684,20 +2057,17 @@ function renderAdvFlags() {
        subís, conviene tener la compactación de abajo prendida: traer 10 hechos no sirve de
        nada si tres son el mismo repetido.</p>
        <div class="row"><div style="max-width:220px">`
-    + textInput(rt, "user_facts", "hechos no fijados de la persona", "number")
+    + textInput(rt, "user_facts", "hechos no fijados de la persona", "number", 5)
     + `</div><div style="max-width:220px">`
-    + textInput(rt, "interactions", "charlas anteriores con ella", "number")
+    + textInput(rt, "interactions", "charlas anteriores con ella", "number", 5)
     + `</div><div style="max-width:220px">`
-    + textInput(rt, "lessons", "lecciones de conducta", "number")
-    + `</div></div>
-       <p class="hint">Y de los <b>otros</b> que estén en el mismo hilo (para no hablarle a
-       alguien como si no lo conociera):</p>
-       <div class="row"><div style="max-width:220px">`
-    + textInput(rt, "thread_users", "cuántas personas del hilo mira", "number")
-    + `</div><div style="max-width:220px">`
-    + textInput(rt, "thread_facts", "hechos de cada una", "number")
-    + `</div></div>
-       <hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
+    + textInput(rt, "lessons", "lecciones de conducta", "number", 5)
+    + `</div></div>`
+    + checkFn(() => (S.RETRIEVAL.thread_users ?? 3) > 0,
+              v => { if (v) delete S.RETRIEVAL.thread_users; else S.RETRIEVAL.thread_users = 0; },
+              "mirar también a los otros del hilo (para no hablarle a alguien como si no lo "
+              + "conociera; pesa mucho menos que los hechos de quien le habla)")
+    + `<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
        <p class="hint" style="margin-top:0"><b>🧠 Compactar memoria.</b> La memoria general
        entra <b>entera</b> en cada respuesta, así que su largo es contexto gastado en todas
        las conversaciones. Cuando pasa el tope, el bot usa su modelo de razonamiento para
@@ -1707,7 +2077,8 @@ function renderAdvFlags() {
        <code>compact_memory.md</code>.</p>`
     + check(mc, "enabled", "compactar la memoria general automáticamente", true)
     + `<div class="row"><div style="max-width:220px">`
-    + textInput(mc, "max_chars", "compactar al pasar los … caracteres", "number")
+    + textInput(mc, "max_chars", "compactar la memoria GENERAL al pasar los … caracteres",
+                "number", 4000)
     + `</div></div>
        <p class="hint">🗣️ <b>Notas de conversación.</b> Cada mención que el bot contesta deja
        una nota, así que un rato de ida y vuelta deja varias casi iguales y tapan las
@@ -1718,9 +2089,9 @@ function renderAdvFlags() {
        bot.</p>`
     + check(mc, "interactions", "comprimir las notas de conversación por día", true)
     + `<div class="row"><div style="max-width:220px">`
-    + textInput(mc, "min_por_dia", "comprimir desde … notas en el día", "number")
+    + textInput(mc, "min_por_dia", "comprimir desde … notas en el día", "number", 3)
     + `</div><div style="max-width:220px">`
-    + textInput(mc, "max_grupos", "personas por pase (costo/tiempo)", "number")
+    + textInput(mc, "max_grupos", "personas por pase (costo/tiempo)", "number", 8)
     + `</div></div>
        <p class="hint">🗂️ <b>Hechos de cada persona.</b> Esta memoria no entra entera: el bot
        busca los <b>5 hechos más relevantes</b> para lo que se está hablando. El problema no
@@ -1731,9 +2102,9 @@ function renderAdvFlags() {
        archivado. El criterio se edita abajo en <code>compact_facts.md</code>.</p>`
     + check(mc, "facts", "deduplicar los hechos de cada persona", true)
     + `<div class="row"><div style="max-width:220px">`
-    + textInput(mc, "min_por_usuario", "revisar desde … hechos por persona", "number")
+    + textInput(mc, "min_por_usuario", "revisar desde … hechos por persona", "number", 5)
     + `</div><div style="max-width:220px">`
-    + textInput(mc, "max_usuarios", "personas por pase (costo/tiempo)", "number")
+    + textInput(mc, "max_usuarios", "personas por pase (costo/tiempo)", "number", 3)
     + `</div></div>`;
 }
 
@@ -1799,8 +2170,11 @@ function navStatus() {
   if (!S) return;
   const isMasto = (S.CHANNEL || "bluesky") === "mastodon";
   const isDiscord = (S.CHANNEL || "bluesky") === "discord";
+  const isWhats = (S.CHANNEL || "bluesky") === "whatsapp";
+  // WhatsApp no tiene credencial en el .env: la sesión es el QR ya escaneado.
   const chanCred = isMasto ? ENV_KEYS.MASTODON_ACCESS_TOKEN
                  : isDiscord ? ENV_KEYS.DISCORD_BOT_TOKEN
+                 : isWhats ? true
                  : ENV_KEYS.BSKY_PASSWORD;
   const llmCred = ENV_KEYS.OPENROUTER_API_KEY || ENV_KEYS.LLM_API_KEY;
   const soulTxt = soulDirty ? $("soul-text").value : SOUL;
@@ -1808,7 +2182,8 @@ function navStatus() {
     nombre: !!(S.BOT_NAME || "").trim(),
     canal: !!(S.BOT_HANDLE || "").trim()
       && (!isMasto || !!(S.MASTODON_BASE_URL || "").trim())
-      && (!isDiscord || (S.DISCORD_CHANNEL_IDS || []).length > 0),
+      && (!isDiscord || (S.DISCORD_CHANNEL_IDS || []).length > 0)
+      && (!isWhats || (S.WHATSAPP_CHAT_IDS || []).length > 0),
     creds: !!(chanCred && llmCred),
     admin: !!(S.ADMIN_HANDLE || "").trim(),
     soul: !!soulTxt.trim() && !soulTxt.includes("deliberadamente neutro"),
@@ -1893,6 +2268,8 @@ async function refreshBot() {
   $("bot-toggle").textContent = BOT.running ? "parar" : "arrancar";
   if (BOT.running) { try { await loadData(); } catch {} }  // mood/cursores frescos
   updateMoodChip();
+  const ml = $("mood-today-line");
+  if (ml) ml.innerHTML = moodTodayLine();   // el humor del bot cambia solo
   renderRoutines();  // refresca el "próximo pase" de cada rutina
 }
 async function botToggle() {
@@ -1905,6 +2282,8 @@ async function botToggle() {
   try {
     await api("/api/bot", {action, mode});
     toast(action === "start" ? `bot arrancado (${mode}) — el log sale por la consola y en Mantenimiento` : "bot detenido");
+    // Primer arranque de la instancia: ofrecerle presentarse (una sola vez).
+    if (action === "start") setTimeout(() => abrirHello().catch(() => {}), 1200);
   } catch (e) { toast(e.message, false); }
   setTimeout(refreshBot, 800);
 }
@@ -1953,6 +2332,156 @@ async function runAction(action, btn) {
   } catch (e) { toast(e.message, false); }
   btn.disabled = false;
   btn.textContent = label;
+}
+
+// ─── WhatsApp: vinculación por QR y elección del chat ────────────────────
+// Es el único canal donde configurar NO es escribir en un campo: hay que
+// escanear un QR con el teléfono, y el JID del grupo no se ve por ningún lado
+// desde WhatsApp. Sin este panel el admin tiene que leer la terminal del bridge
+// y adivinar el JID — exactamente el muro que el proyecto no le quiere poner.
+let WA_TIMER = null;
+
+async function waStatus(btn) {
+  const label = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "consultando…"; }
+  let r;
+  try { r = await api("/api/run", {action: "whatsapp_status"}); }
+  catch (e) { r = {ok: false, errors: [e.message]}; }
+  if (btn) { btn.disabled = false; btn.textContent = label; }
+
+  const badge = $("wa-badge"), hint = $("wa-hint"), qr = $("wa-qr");
+  if (!r.ok) {
+    badge.className = "badge off"; badge.textContent = "no responde";
+    hint.textContent = (r.errors || []).join(" · ");
+    qr.style.display = "none"; $("wa-groups").innerHTML = "";
+    return false;
+  }
+  const st = r.status || {};
+  if (st.connected) {
+    badge.className = "badge on";
+    badge.textContent = "vinculado" + (st.me?.id ? " · " + st.me.id.split("@")[0] : "");
+    hint.innerHTML = "Sesión viva. Elegí abajo en qué chat vive el bot y guardá."
+      + (st.me?.name ? ` El número se presenta como <b>${esc(st.me.name)}</b>.` : "");
+    qr.style.display = "none";
+  } else {
+    badge.className = "badge off"; badge.textContent = "sin vincular";
+    hint.textContent = "El bridge está levantado pero el número no está vinculado. "
+      + "Escaneá el QR de acá abajo.";
+    // Cache-buster: el QR rota cada ~30s y el navegador no tiene forma de saberlo.
+    $("wa-qr-img").src = r.qr_url + "?t=" + Date.now();
+    qr.style.display = "";
+  }
+  waRenderGroups(r.groups || []);
+  waAutoRefresh(!st.connected);
+  return st.connected;
+}
+
+// El comando sale de la config real: escribirlo a mano es donde se pierde el
+// -chats, que es justamente lo que evita que el bridge toque tus conversaciones.
+function waPintarComando() {
+  const pre = $("wa-cmd");
+  if (pre) pre.textContent = waComando();
+}
+
+function waComando() {
+  const chats = (S.WHATSAPP_CHAT_IDS || []).join(",");
+  const inst = INSTANCE.path || `bots/${INSTANCE.name || "<instancia>"}`;
+  const sep = inst.includes("\\") ? "\\" : "/";   // que se pueda pegar tal cual
+  return `whatsapp-bridge.exe -data "${inst}${sep}whatsapp"`
+    + (chats ? ` -chats "${chats}"` : "")
+    + (chats ? "" : "     # ⚠ falta elegir los chats arriba");
+}
+
+function waRenderGroups(groups) {
+  const box = $("wa-groups");
+  if (!groups.length) { box.innerHTML = ""; return; }
+  const activos = new Set(S.WHATSAPP_CHAT_IDS || []);
+  box.innerHTML = `<p class="hint" style="margin-top:12px">Grupos que ve el número. Marcá el que
+    el bot tiene que atender — <b>solo esos</b>. El JID no se ve desde el teléfono, sale de acá.</p>
+    <table><tr><th>Grupo</th><th>JID</th><th style="width:80px">Miembros</th><th style="width:90px">Atiende</th></tr>
+    ${groups.map(g => `<tr>
+      <td>${esc(g.name || "(sin nombre)")}</td>
+      <td><code style="font-size:11px">${esc(g.id)}</code></td>
+      <td>${esc(String(g.participants ?? "?"))}</td>
+      <td><input type="checkbox" data-wa-chat="${esc(g.id)}" ${activos.has(g.id) ? "checked" : ""}></td>
+    </tr>`).join("")}</table>`;
+  box.querySelectorAll("input[data-wa-chat]").forEach(cb =>
+    cb.addEventListener("change", e => {
+      const id = e.target.dataset.waChat;
+      const lista = new Set(S.WHATSAPP_CHAT_IDS || []);
+      e.target.checked ? lista.add(id) : lista.delete(id);
+      S.WHATSAPP_CHAT_IDS = [...lista];
+      $("i-whats-chats").value = S.WHATSAPP_CHAT_IDS.join(", ");
+      waPintarComando();
+      markDirty();
+    }));
+}
+
+// Mientras el número esté sin vincular el QR se vence: refrescar es la única
+// forma de que el que está con el teléfono en la mano no tenga que apretar nada.
+function waAutoRefresh(activar = (S?.CHANNEL === "whatsapp")) {
+  clearInterval(WA_TIMER); WA_TIMER = null;
+  if (!activar || S?.CHANNEL !== "whatsapp") return;
+  WA_TIMER = setInterval(() => {
+    if (S?.CHANNEL !== "whatsapp" || !document.getElementById("wa-badge")) {
+      clearInterval(WA_TIMER); WA_TIMER = null; return;
+    }
+    waStatus(null);
+  }, 20000);
+}
+
+// ─── Presentación (hello world) ───────────────────────────────────────────
+// Sale como popup la PRIMERA vez que arrancás el bot (y desde Avanzado si querés
+// repetirla). No es una sección: se hace una vez en la vida de la instancia.
+let HELLO_FORZADO = false;
+async function abrirHello(forzado = false) {
+  HELLO_FORZADO = forzado;
+  let r;
+  try { r = await api("/api/hello", {action: "status"}); }
+  catch (e) { return toast(e.message, false); }
+  if (!forzado && r.ya_posteado) return false;      // ya se presentó (o dijiste que no)
+  const faltan = r.errors || [];
+  const box = $("hello-faltan");
+  box.style.display = faltan.length ? "" : "none";
+  box.textContent = faltan.length
+    ? "Todavía no puede presentarse — falta configurar:\n- " + faltan.join("\n- ") : "";
+  $("hello-text").style.display = "none";
+  $("hello-text").value = "";
+  $("modal-bg").classList.add("on");
+  return true;
+}
+function cerrarHello(paraSiempre = false) {
+  $("modal-bg").classList.remove("on");
+  if (paraSiempre) api("/api/hello", {action: "descartar"})
+    .then(() => toast("listo, no te pregunto más (podés lanzarla desde Avanzado)"))
+    .catch(e => toast(e.message, false));
+}
+async function helloCall(body, btn, okMsg) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "…";
+  const box = $("hello-faltan"), ta = $("hello-text");
+  try {
+    const r = await api("/api/hello", body);
+    if (r.text) { ta.style.display = ""; ta.value = r.text; }
+    const lineas = [];
+    if (r.ya_posteado && !r.uri) lineas.push("Tu bot ya se presentó: " + r.ya_posteado);
+    if ((r.errors || []).length) lineas.push("Falta configurar:\n- " + r.errors.join("\n- "));
+    if (r.uri) lineas.push("✓ publicado — " + r.uri);
+    box.style.display = lineas.length ? "" : "none";
+    box.textContent = lineas.join("\n\n");
+    toast(r.ok ? okMsg : "todavía no", r.ok);
+    if (r.uri) setTimeout(() => $("modal-bg").classList.remove("on"), 2500);
+  } catch (e) { toast(e.message, false); }
+  btn.disabled = false; btn.textContent = label;
+}
+function helloPreview(btn) {
+  return helloCall({action: "preview"}, btn, "borrador listo — leelo y editalo");
+}
+function helloPost(btn) {
+  const text = $("hello-text").value.trim();
+  if (!confirm("Esto POSTEA la presentación en el canal de verdad" +
+               (text ? " (el texto de abajo)." : " (se escribe uno nuevo).") + " ¿Seguís?")) return;
+  return helloCall({action: "post", text, force: HELLO_FORZADO}, btn, "publicada 🎉");
 }
 
 // ─── Debug chat ──────────────────────────────────────────────────────────
@@ -2035,12 +2564,6 @@ async function load() {
   setInterval(refreshBot, 15000);
   $("soul-text").addEventListener("input", () => { soulDirty = true; markDirty(); });
   $("ui-lang").addEventListener("change", e => { S.LANGUAGE = e.target.value; markDirty(); });
-  if (PROMPTS.includes("bio.md")) {
-    try {
-      const r = await api("/api/prompt", {action: "get", file: "bio.md"});
-      if (r.ok) $("bio-text").value = r.text;
-    } catch {}
-  }
 }
 load().catch(e => toast("no pude cargar la config: " + e.message, false));
 </script>

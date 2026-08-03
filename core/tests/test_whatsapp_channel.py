@@ -26,9 +26,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 os.environ.setdefault("BSKY_PASSWORD", "dummy")
 
+import channels as ch  # noqa: E402
 from channels import WhatsAppChannel  # noqa: E402
 
 YO = "5491100000000@s.whatsapp.net"
+# La segunda identidad del bot: los grupos nuevos direccionan por LID, un id
+# opaco que no tiene nada que ver con el número.
+YO_LID = "104913921159305@lid"
 OTRO = "5491111111111@s.whatsapp.net"
 GRUPO = "12036300000000@g.us"
 PRIVADO = "5491122222222@s.whatsapp.net"
@@ -63,12 +67,13 @@ class BridgeFalso:
         self.cola = list(mensajes)
         self.connected = connected
         self.enviados: list[dict] = []
+        self.reacciones: list[dict] = []
         self.entregados = 0
 
     def request(self, method, path, params=None, json=None, **kw):
         if path == "/status":
             return _Resp({"connected": self.connected, "qr": None,
-                          "me": {"id": YO, "name": "Botata"}})
+                          "me": {"id": YO, "lid": YO_LID, "name": "Botata"}})
         if path == "/messages":
             pendientes = self.cola[self.entregados:]
             self.entregados = len(self.cola)
@@ -81,6 +86,9 @@ class BridgeFalso:
             self.enviados.append(json)
             return _Resp({"id": f"enviado-{len(self.enviados)}"})
         if path == "/profile":
+            return _Resp(None, 204)
+        if path == "/react":
+            self.reacciones.append(json)
             return _Resp(None, 204)
         return _Resp(None, 404)
 
@@ -157,16 +165,23 @@ def test_la_mencion_tiene_la_forma_que_espera_el_grafo():
     b = BridgeFalso([_msg("7", text="@5491100000000 hola", mentions=[YO])])
     m = _canal(b).get_mentions()[0]
     assert m["uri"] == f"{GRUPO}/7" and m["cid"] == "7"
-    assert m["author_handle"] == OTRO       # el JID es el id opaco, como en Discord
-    assert m["text"] == "@5491100000000 hola"
+    # El teléfono pelado, no el JID: es lo que el admin escribe en ADMIN_HANDLE
+    # y en USER_GROUPS, y tiene que matchear con quien escribe en el grupo.
+    assert m["author_handle"] == "5491111111111"
+    assert m["text"] == "@Botata hola"      # a sí mismo se lee por su nombre
 
 
 def test_las_menciones_se_ven_legibles_no_como_jid():
-    b = BridgeFalso([_msg("1", text=f"che @{YO} mirá", mentions=[YO])])
-    assert _canal(b).get_mentions()[0]["text"] == "che @5491100000000 mirá"
+    """Un JID crudo en el texto no le dice nada al LLM. Al bot se lo nombra por
+    su nombre; a los demás, por su número (que es su identidad acá)."""
+    b = BridgeFalso([_msg("1", text=f"che @{YO} y @{OTRO} miren", mentions=[YO, OTRO])])
+    assert _canal(b).get_mentions()[0]["text"] == "che @Botata y @5491111111111 miren"
 
 
-def test_el_hilo_sube_por_las_citas():
+def test_la_raiz_sigue_subiendo_por_las_citas():
+    """El contexto que ve el LLM es la ventana de conversación, pero la RAÍZ
+    (con la que el motor agrupa la charla en su DB) sale de la cadena de citas:
+    son dos cosas distintas y las dos tienen que seguir andando."""
     b = BridgeFalso([
         _msg("1", text="arranco yo"),
         _msg("2", text="te respondo", quoted_id="1"),
@@ -175,9 +190,9 @@ def test_el_hilo_sube_por_las_citas():
     c = _canal(b)
     c.get_mentions()                        # llena el cache
     ctx, root_uri, root_cid, _ = c.get_thread_info(f"{GRUPO}/3", "3")
-    assert ctx.splitlines() == ["Fulano: arranco yo", "Fulano: te respondo",
-                                "Fulano: y yo"]
     assert root_uri == f"{GRUPO}/1" and root_cid == "1"
+    assert ctx.splitlines()[0] == "Fulano: arranco yo"
+    assert ctx.splitlines()[-1].endswith("y yo")
 
 
 def test_un_mensaje_sin_cita_es_su_propia_raiz():
@@ -301,10 +316,297 @@ def test_devuelve_el_qr_para_mostrarlo(store, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _R())
     out = store.run_action("whatsapp_status")
     assert out["ok"] and out["status"]["qr"] == "2@abc..."
-    assert out["chats"] == [GRUPO]
+    # El panel dibuja el QR con un <img> contra el bridge: el string suelto no
+    # se puede mostrar. Y sin sesión no hay grupos que listar todavía.
+    assert out["qr_url"].endswith("/qr.png") and out["groups"] == []
 
 
 def test_sin_bridge_url_avisa_que_falta(store, tmp_path):
     (tmp_path / "config" / "settings.json").write_text(
         json.dumps({"CHANNEL": "whatsapp"}), encoding="utf-8")
     assert "WHATSAPP_BRIDGE_URL" in store.run_action("whatsapp_status")["errors"][0]
+
+
+# ─── "Me gusta" = reacción ──────────────────────────────────────────────────
+def test_like_post_reacciona_con_el_autor_del_mensaje():
+    """La reacción se firma contra (chat, autor, id): el bridge necesita saber
+    quién escribió el mensaje, no alcanza con el id."""
+    b = BridgeFalso([_msg("7", text="me encantan los mapaches")])
+    c = _canal(b)
+    c.get_mentions()                             # el canal ve (y recuerda) el mensaje
+    assert c.like_post(f"{GRUPO}/7") is True
+    assert b.reacciones == [{"chat_id": GRUPO, "message_id": "7",
+                             "author_id": OTRO, "emoji": "❤️"}]
+
+
+def test_like_post_con_bridge_viejo_no_rompe():
+    """Un bridge sin /react devuelve 404: el bot pierde el gesto, no la respuesta."""
+    b = BridgeFalso([_msg("7")])
+    b.request = lambda method, path, params=None, json=None, **kw: (
+        _Resp(None, 404) if path == "/react"
+        else BridgeFalso.request(b, method, path, params, json, **kw))
+    c = _canal(b)
+    assert c.like_post(f"{GRUPO}/7") is False
+
+
+# ─── El handle de WhatsApp es el teléfono ───────────────────────────────────
+@pytest.mark.parametrize("escrito", [
+    "5491111111111",                     # pelado
+    "+54 9 11 1111-1111",                # como lo tipea un humano
+    "+5491111111111",
+    "5491111111111@s.whatsapp.net",      # el JID, copiado del bridge
+    "5491111111111@lid",                 # con modo privado del otro lado
+])
+def test_todas_las_formas_del_mismo_numero_son_el_mismo_handle(escrito):
+    """Lo que el admin escribe en ADMIN_HANDLE/USER_GROUPS tiene que matchear
+    con el author_handle que el canal saca de un mensaje, se escriba como se
+    escriba. Si no, el bot se queda mudo sin decir por qué."""
+    b = BridgeFalso([_msg("1", autor=OTRO, text="@bot", mentions=[YO])])
+    assert ch.wa_handle(escrito) == _canal(b).get_mentions()[0]["author_handle"]
+
+
+def test_lo_que_no_es_un_numero_queda_intacto():
+    """`feed:x` no es una persona, y un handle de otra red que quedó de arrastre
+    tiene que seguir sin matchear — normalizarlo sería inventar un match."""
+    assert ch.wa_handle("feed:polcifeed") == "feed:polcifeed"
+    assert ch.wa_handle("ppolci.com") == "ppolci.com"
+    assert ch.wa_handle("") == "" and ch.wa_handle(None) == ""
+
+
+def test_get_profile_acepta_el_numero_y_no_solo_el_jid():
+    b = BridgeFalso([_msg("1", autor=OTRO, text="@bot", mentions=[YO])])
+    c = _canal(b)
+    c.get_mentions()
+    perfil = c.get_profile("+54 9 11 1111-1111")
+    assert perfil.handle == "5491111111111" and perfil.display_name == "Fulano"
+
+
+# ─── Grupos direccionados por LID ───────────────────────────────────────────
+# Caso real (2026-07-31): el hello world salió, pero contestarle citándolo no
+# despertaba al bot. En un grupo con LID la cita viene firmada con el LID del
+# bot y el canal solo conocía su número: no se reconocía como destinatario.
+def test_una_cita_firmada_con_el_lid_del_bot_lo_despierta():
+    b = BridgeFalso([_msg("2", text="Test para ver que respondas.",
+                          quoted_id="1", quoted_author_id=YO_LID)])
+    assert [m["cid"] for m in _canal(b).get_mentions()] == ["2"]
+
+
+def test_una_mencion_por_lid_tambien_lo_despierta():
+    b = BridgeFalso([_msg("3", text="che @bot", mentions=[YO_LID])])
+    assert [m["cid"] for m in _canal(b).get_mentions()] == ["3"]
+
+
+def test_el_bot_sigue_sin_contestarse_a_si_mismo_por_lid():
+    """Anti-loop: sus propios mensajes le llegan con la otra identidad."""
+    b = BridgeFalso([_msg("4", autor=YO_LID, text="algo mío", mentions=[YO])])
+    assert _canal(b).get_mentions() == []
+
+
+# ─── El contexto es la conversación, no el hilo ─────────────────────────────
+# En un grupo la gente contesta sin citar: reconstruir "el hilo" devolvía casi
+# siempre UNA línea (el mensaje mismo) y el bot contestaba sin saber de qué se
+# venía hablando.
+def _canal_con(bridge, n=20):
+    return WhatsAppChannel("http://x", [GRUPO], http=bridge, context_messages=n)
+
+
+def test_el_contexto_son_los_ultimos_mensajes_del_grupo():
+    b = BridgeFalso([
+        _msg("1", text="alguien vio el partido?"),
+        _msg("2", text="un desastre el arquero"),
+        _msg("3", text="che @bot qué opinás", mentions=[YO]),
+    ])
+    c = _canal_con(b)
+    c.get_mentions()
+    ctx, _, _, _ = c.get_thread_info(f"{GRUPO}/3", "3")
+    assert ctx.splitlines() == ["Fulano: alguien vio el partido?",
+                                "Fulano: un desastre el arquero",
+                                "Fulano: che @bot qué opinás"]
+
+
+def test_el_contexto_se_recorta_a_lo_configurado():
+    b = BridgeFalso([_msg(str(i), text=f"mensaje {i}") for i in range(1, 8)]
+                    + [_msg("8", text="@bot", mentions=[YO])])
+    c = _canal_con(b, n=3)
+    c.get_mentions()
+    ctx, _, _, _ = c.get_thread_info(f"{GRUPO}/8", "8")
+    assert len(ctx.splitlines()) == 3 and ctx.splitlines()[-1].endswith("@bot")
+
+
+def test_la_cita_se_marca_en_la_linea():
+    """Sin esto, en un grupo no se entiende quién le contesta a quién."""
+    b = BridgeFalso([
+        _msg("1", text="yo digo que sí"),
+        _msg("2", text="no estoy de acuerdo", quoted_id="1"),
+        _msg("3", text="@bot desempatá", mentions=[YO]),
+    ])
+    c = _canal_con(b)
+    c.get_mentions()
+    ctx, _, _, _ = c.get_thread_info(f"{GRUPO}/3", "3")
+    assert "Fulano [le contesta a Fulano: «yo digo que sí»]: no estoy de acuerdo" in ctx
+
+
+def test_el_mensaje_citado_entra_aunque_haya_quedado_fuera_de_la_ventana():
+    """Lo más específico que hay sobre qué le están contestando al bot no se
+    puede perder por el recorte."""
+    b = BridgeFalso([_msg("1", text="la pregunta original")]
+                    + [_msg(str(i), text=f"ruido {i}") for i in range(2, 7)]
+                    + [_msg("7", text="@bot mirá esto", mentions=[YO], quoted_id="1")])
+    c = _canal_con(b, n=2)
+    c.get_mentions()
+    ctx, _, _, _ = c.get_thread_info(f"{GRUPO}/7", "7")
+    assert "la pregunta original" in ctx
+
+
+def test_los_chats_ajenos_no_se_guardan_ni_en_memoria():
+    """El número recibe TODO, incluidas las conversaciones personales del
+    dueño: no tienen por qué quedar en la RAM del bot."""
+    b = BridgeFalso([
+        _msg("1", chat=PRIVADO, text="algo privado del dueño"),
+        _msg("2", text="@bot", mentions=[YO]),
+    ])
+    c = _canal_con(b)
+    c.get_mentions()
+    assert PRIVADO not in c._recientes and "1" not in c._msgs
+    ctx, _, _, _ = c.get_thread_info(f"{GRUPO}/2", "2")
+    assert "privado" not in ctx
+
+
+def test_el_bot_se_reconoce_por_su_nombre_en_el_contexto():
+    b = BridgeFalso([
+        _msg("1", autor=YO, from_me=True, text="lo que dije antes"),
+        _msg("2", text="@bot y ahora?", mentions=[YO]),
+    ])
+    c = _canal_con(b)
+    c.get_mentions()
+    ctx, _, _, _ = c.get_thread_info(f"{GRUPO}/2", "2")
+    assert ctx.splitlines()[0] == "Botata: lo que dije antes"
+
+
+# ─── Arrobado a mano ────────────────────────────────────────────────────────
+@pytest.mark.parametrize("texto, contesta", [
+    ("@Botata qué opinás", True),          # tipeado a mano, sin elegir del listado
+    ("@botata en minúscula", True),
+    ("@5491100000000 por número", True),
+    ("che botata qué opinás", False),      # nombrarlo no es arrobarlo
+    ("mandale un mail a juan@botata.com", False),
+])
+def test_arrobarlo_a_mano_tambien_cuenta(texto, contesta):
+    """WhatsApp solo crea una mención si elegís al bot del listado del `@`.
+    Escrito a mano no genera nada y se ve idéntico: el bot quedaba mudo sin
+    motivo visible."""
+    b = BridgeFalso([_msg("1", text=texto)])
+    assert bool(_canal(b).get_mentions()) is contesta
+
+
+# ─── Pase de feed: la conversación ES el feed ───────────────────────────────
+# No hay timeline, pero la idea del pase vale igual: leer cada tanto de qué se
+# habla y aprender de la gente (decisión del admin, 2026-07-31).
+def _con_charla(n=20):
+    b = BridgeFalso([
+        _msg("1", text="hoy juega Boca"),
+        _msg("2", autor=YO, from_me=True, text="lo que dije yo"),
+        _msg("3", text="a las 9", quoted_id="1"),
+    ])
+    c = _canal_con(b, n)
+    c.get_mentions()
+    return c
+
+
+def test_el_feed_devuelve_la_conversacion_en_la_forma_del_pase():
+    posts = _con_charla().get_feed_posts("chat", GRUPO)
+    assert [p["text"] for p in posts] == ["hoy juega Boca", "a las 9"]
+    p = posts[0]
+    # El teléfono, igual que en las menciones: si acá fuera el nombre visible,
+    # el bot aprendería de "Fulano" y le contestaría a un número — dos personas
+    # distintas para su memoria.
+    assert p["handle"] == "5491111111111"
+    assert p["uri"] == f"{GRUPO}/1" and p["reply_to"] is None
+    assert posts[1]["reply_to"] == f"{GRUPO}/1"
+
+
+def test_el_feed_no_le_devuelve_al_bot_lo_que_dijo_el_bot():
+    assert all("lo que dije yo" not in p["text"] for p in
+               _con_charla().get_feed_posts("chat", GRUPO))
+
+
+def test_el_feed_respeta_el_since():
+    from datetime import datetime, timedelta, timezone
+    futuro = datetime.now(timezone.utc) + timedelta(days=1)
+    assert _con_charla().get_feed_posts("chat", GRUPO, since=futuro) == []
+
+
+def test_el_feed_sin_fuente_usa_el_chat_principal():
+    assert _con_charla().get_feed_posts("chat", None)
+
+
+def test_el_feed_no_lee_chats_fuera_del_allowlist():
+    """Mismo criterio que el poll: si no está en WHATSAPP_CHAT_IDS, no se lee —
+    ni aunque una fuente mal configurada lo pida por nombre."""
+    assert _con_charla().get_feed_posts("chat", PRIVADO) == []
+
+
+def test_un_tipo_de_fuente_de_otra_red_no_rompe():
+    assert _con_charla().get_feed_posts("list", "at://loquesea") == []
+
+
+# ─── Lo que NO aplica en WhatsApp ───────────────────────────────────────────
+def test_bloquear_no_aplica_y_lo_dice():
+    """En un grupo bloquear no saca a nadie: el pedido tiene que fallar, no
+    fingir que pasó algo (decisión del admin, 2026-07-31)."""
+    assert _canal(BridgeFalso()).block_user("5491111111111") is False
+
+
+# ─── Vision: citar una foto y preguntar por ella ────────────────────────────
+# Caso real (2026-07-31): se le citó un mensaje con imagen pidiéndole que la
+# describa y contestó que no puede ver imágenes. La imagen no estaba en el
+# mensaje que lo menciona (solo texto) sino en el CITADO, y solo se describía
+# la hoja.
+def _con_foto():
+    b = BridgeFalso([
+        _msg("1", text="miren esto", media=[{"path": "/tmp/foto.jpg", "mime": "image/jpeg"}]),
+        _msg("2", text="@bot describime la imagen", mentions=[YO], quoted_id="1"),
+    ])
+    c = _canal_con(b)
+    c.set_media_describer(lambda fuente: f"un mapache lavando una galletita ({fuente})")
+    c.get_mentions()
+    return c
+
+
+def test_describe_la_imagen_del_mensaje_citado():
+    _, _, _, media = _con_foto().get_thread_info(f"{GRUPO}/2", "2")
+    assert "mapache lavando una galletita" in media and "lo que cita" in media
+
+
+def test_la_imagen_de_la_ventana_se_anota_pero_no_se_mira():
+    """Costo acotado: vision solo sobre el mensaje que se contesta y el que
+    cita. El resto de la conversación lleva la anotación barata."""
+    c = _canal_con(BridgeFalso([
+        _msg("1", text="foto vieja", media=[{"path": "/tmp/v.jpg", "mime": "image/jpeg"}]),
+        _msg("2", text="@bot hola", mentions=[YO]),
+    ]))
+    mirados = []
+    c.set_media_describer(lambda f: mirados.append(f) or "descripción")
+    c.get_mentions()
+    ctx, _, _, _ = c.get_thread_info(f"{GRUPO}/2", "2")
+    assert "[image]" in ctx and mirados == []
+
+
+def test_el_perfil_trae_did_aunque_whatsapp_no_tenga_ese_concepto():
+    """El motor cachea `did` al conocer a alguien. Sin el campo, reventaba con
+    AttributeError en cada mensaje de esa persona: el except lo tragaba, la fila
+    quedaba incompleta y el intento se repetía para siempre."""
+    b = BridgeFalso([_msg("1", text="@bot", mentions=[YO])])
+    c = _canal(b)
+    c.get_mentions()
+    perfil = c.get_profile("5491111111111")
+    assert perfil.did == "5491111111111" and perfil.display_name == "Fulano"
+
+
+def test_arrobarlo_le_llega_con_su_nombre_y_no_un_numero_crudo():
+    """Caso real (2026-07-31): arrobarlo dejaba en el texto el LID con el que
+    el grupo lo direcciona, y el bot leía «@104913921159305 sobre esto qué
+    opinás?» sin reconocer que ese número es él."""
+    b = BridgeFalso([_msg("1", text=f"@{YO_LID.split('@')[0]} sobre esto qué opinás?")])
+    m = _canal(b).get_mentions()[0]
+    assert m["text"] == "@Botata sobre esto qué opinás?"

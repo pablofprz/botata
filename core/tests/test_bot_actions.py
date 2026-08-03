@@ -94,6 +94,41 @@ def test_config_any_habilita_usuarios(conn, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='bot_action'").fetchone()[0] == 1
 
 
+# ─── modo 'groups': el escalón que faltaba entre "solo yo" y "cualquiera" ────
+@pytest.fixture()
+def _grupos(monkeypatch):
+    """Registry con un grupo real, como en producción (USER_GROUPS)."""
+    from tools import ToolRegistry
+    reg = ToolRegistry()
+    reg.set_groups({"power_users": [U1]}, admin_handle=ADMIN)
+    monkeypatch.setattr(b, "_REGISTRY", reg)
+    monkeypatch.setattr(b, "BOT_ACTIONS_FROM", "groups")
+    monkeypatch.setattr(b, "BOT_ACTIONS_GROUPS", frozenset({"power_users"}))
+
+
+def test_config_groups_habilita_al_grupo(conn, monkeypatch, _grupos):
+    r = b._tool_create_event(
+        {"title": "africa", "event_at": _hora(+1), "kind": "bot_action"}, _ctx(conn, U1))
+    assert "acción agendada" in r.text
+
+
+def test_config_groups_no_habilita_a_los_demas(conn, monkeypatch, _grupos):
+    conn.execute("INSERT INTO users(handle) VALUES ('ajeno.bsky.social')")
+    conn.commit()
+    r = b._tool_create_event({"title": "africa", "event_at": _hora(+1),
+                              "kind": "bot_action"}, _ctx(conn, "ajeno.bsky.social"))
+    assert "recordatorio" in r.text          # degradado, como con 'admin'
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='bot_action'").fetchone()[0] == 0
+
+
+def test_config_groups_sin_registry_queda_cerrado(conn, monkeypatch, _grupos):
+    """Sin padrón cargado no se adivina: default cerrado (regla de tools.py)."""
+    monkeypatch.setattr(b, "_REGISTRY", None)
+    r = b._tool_create_event(
+        {"title": "africa", "event_at": _hora(+1), "kind": "bot_action"}, _ctx(conn, U1))
+    assert "recordatorio" in r.text
+
+
 # ─── tarea `actions`: ejecuta y marca done (antes vivía en el ex-heartbeat) ──
 class FakeBsky:
     def __init__(self):

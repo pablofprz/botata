@@ -107,3 +107,60 @@ def test_set_groups_acepta_multiples_admins():
     assert reg.allowed_for(t, "ppolci.com")
     assert reg.allowed_for(t, "segundo.bsky.social")
     assert not reg.allowed_for(t, "random.bsky.social")
+
+
+# ─── el atajo literal: /check-role no se le pregunta a un LLM ────────────────
+# Bug de producción (2026-07-29): alguien mandó `/check-role` y el bot contestó
+# "no existe /check-role". Este nodo y el ruteo estaban testeados, pero el
+# classify_prompt nunca mencionó `is_role_query`, así que el modelo devolvió
+# is_command=True + role_query=False y la mención cayó al flujo de reply.
+
+class LLMQueNoDeberiaCorrer:
+    def __init__(self):
+        self.llamadas = 0
+
+    def complete(self, system, user, model_cls=None):
+        self.llamadas += 1
+        # lo que devolvía en producción: reconoce el comando pero no el flag
+        return b.MentionClassification(is_admin_command=True, command="check-role",
+                                       skip=False)
+
+
+def _clasificar(texto):
+    llm = LLMQueNoDeberiaCorrer()
+    out = b.ClassifyNode(llm).run({"mention_text": texto})
+    return out["classification"], llm.llamadas
+
+
+def test_check_role_se_resuelve_sin_llm():
+    cls, llamadas = _clasificar("@botata.bsky.social /check-role")
+    assert cls.is_role_query is True
+    assert llamadas == 0                       # ni se consultó al modelo
+    assert b.route_after_classify({"classification": cls, "is_admin": False}) \
+        == "handle_role_query"
+
+
+def test_las_variantes_de_la_barra_tambien():
+    for texto in ("/rol", "/permisos", "/check-role", "/CheckRole", " /role "):
+        cls, _ = _clasificar(texto)
+        assert cls.is_role_query is True, texto
+
+
+def test_bloques_tambien_va_por_el_atajo():
+    cls, llamadas = _clasificar("@bot /bloques")
+    assert cls.is_block_query is True and llamadas == 0
+    assert b.route_after_classify({"classification": cls, "is_admin": False}) \
+        == "handle_block_query"
+
+
+def test_una_frase_con_el_comando_adentro_sigue_yendo_al_llm():
+    """El atajo es para el comando EXACTO; interpretar una frase es del modelo."""
+    cls, llamadas = _clasificar("che, qué permisos tengo? probé /check-role y nada")
+    assert llamadas == 1
+    assert cls.is_role_query is False           # lo que devolvió el fake
+
+
+def test_el_prompt_pide_el_flag():
+    """La otra mitad del bug: sin esto, las variantes en criollo no funcionan."""
+    prompt = (Path(b.PROMPTS_DIR) / "classify_prompt.md").read_text(encoding="utf-8")
+    assert "is_role_query" in prompt and "is_block_query" in prompt

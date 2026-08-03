@@ -73,3 +73,6 @@ ENV/
 .playwright-mcp/
 .ipynb_checkpoints
 .vscode/
+
+# Dumps sueltos del navegador agéntico (Playwright MCP)
+/pagni-lanacion.txt

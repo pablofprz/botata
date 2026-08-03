@@ -206,3 +206,37 @@ if __name__ == "__main__":
             traceback.print_exc()
     print(f"\n{len(tests) - failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ─── Scope múltiple: el admin hablando en criollo ────────────────────────────
+# `admin` describe el PERMISO, no la puerta. El flujo de reply pide la unión de
+# scopes cuando quien habla es admin, para que pedir algo conversando dé lo
+# mismo que pedirlo por comando.
+def test_available_acepta_varios_scopes_como_union():
+    reg = _make_registry()
+    assert {t.name for t in reg.available([Scope.REPLY, Scope.ADMIN])} == {
+        "admin_only", "reply_only", "multi"}
+
+
+def test_un_scope_solo_sigue_andando_igual():
+    reg = _make_registry()
+    assert ({t.name for t in reg.available(Scope.REPLY)}
+            == {t.name for t in reg.available([Scope.REPLY])})
+
+
+def test_varios_scopes_no_saltean_el_filtro_de_grupos():
+    """Sumar ADMIN no puede convertirse en un bypass de USER_GROUPS."""
+    reg = _make_registry()
+    reg.register("de_grupo", "d", {"type": "object", "properties": {}}, _noop,
+                 {Scope.REPLY}, groups={"moderadores"})
+    reg.set_groups({"moderadores": ["mod.test"]}, admin_handle=None)
+    nombres = {t.name for t in reg.available([Scope.REPLY, Scope.ADMIN], "random.test")}
+    assert "de_grupo" not in nombres
+    assert "de_grupo" in {t.name for t in reg.available([Scope.REPLY], "mod.test")}
+
+
+def test_schemas_openai_tambien_aceptan_varios_scopes():
+    reg = _make_registry()
+    nombres = {s["function"]["name"]
+               for s in reg.openai_schemas([Scope.REPLY, Scope.ADMIN])}
+    assert nombres == {"admin_only", "reply_only", "multi"}

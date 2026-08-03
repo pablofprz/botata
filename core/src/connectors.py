@@ -95,8 +95,9 @@ _BUILTIN: tuple[Connector, ...] = (
     Connector(
         id="api", label="API (JSON)", color="#0ea5e9", initial="{}",
         placeholder="pikachu, bulbasaur — lo que cambia en la URL",
-        tool="get_latest_media",
-        help="Cualquier API que devuelva JSON. Se configura acá, sin escribir código.",
+        tool="get_latest_media / get_data",
+        help="Cualquier API que devuelva JSON: imágenes o datos (dólar, clima, "
+             "fixture). Se configura acá, sin escribir código.",
         live=True,
     ),
 )
@@ -262,8 +263,18 @@ def api_items(source: str, limit: int = 15, entry: dict | None = None) -> list[d
     La entrada declara:
         url        — endpoint, con {source} / {limit} / {env:MI_API_KEY}
         items_path — dónde está la lista en la respuesta ("" = la respuesta ES el item)
-        map        — de qué campo sale cada cosa: {image_url, url, title}
+        map        — de qué campo sale cada cosa. Tres nombres tienen significado
+                     para el motor (`image_url`, `url`, `title`) y el RESTO es
+                     libre: `{"blue": "blue.venta", "oficial": "oficial.venta"}`
+                     trae dos datos con esos nombres.
         headers    — opcional, mismos reemplazos (para APIs con token)
+
+    Con `image_url` la fuente trae MEDIA (la consume `get_latest_media`); sin
+    `image_url` trae DATOS (la consume `get_data`). Es la misma API JSON leída de
+    dos maneras: no hay dos conectores, hay un mapeo que dice qué sacar. Antes
+    `image_url` era obligatorio y eso dejaba afuera todo lo que no es una foto
+    —el dólar, el clima, el fixture—, que en una comunidad es la mitad de lo que
+    se habla.
 
     Levanta ApiSourceError con un mensaje explicable: lo lee el admin en la UI.
     """
@@ -306,27 +317,39 @@ def api_items(source: str, limit: int = 15, entry: dict | None = None) -> list[d
             "concreto en vez de al listado.")
     crudos = nodo if isinstance(nodo, list) else [nodo]
 
-    mapa = dict(entry.get("map") or {})
-    img_path = str(mapa.get("image_url") or "").strip()
-    if not img_path:
-        raise ApiSourceError("falta decir de qué campo sale la imagen")
+    mapa = {k: str(v).strip() for k, v in (entry.get("map") or {}).items()
+            if str(v or "").strip()}
+    if not mapa:
+        raise ApiSourceError("falta decir qué campos traer (al menos uno)")
+    img_path = mapa.get("image_url", "")
+    # Campos libres: todo lo que no sea uno de los tres nombres reservados.
+    libres = {k: v for k, v in mapa.items() if k not in ("image_url", "url", "title")}
     out: list[dict] = []
     for it in crudos:
-        img = dig(it, img_path)
-        if not isinstance(img, str) or not img.startswith("http"):
+        img = dig(it, img_path) if img_path else None
+        if img_path and (not isinstance(img, str) or not img.startswith("http")):
             continue      # item sin imagen usable: se saltea, no es un error
-        titulo = dig(it, str(mapa.get("title") or "").strip()) if mapa.get("title") else ""
-        link = dig(it, str(mapa.get("url") or "").strip()) if mapa.get("url") else ""
-        out.append({"image_url": img,
+        titulo = dig(it, mapa["title"]) if mapa.get("title") else ""
+        link = dig(it, mapa["url"]) if mapa.get("url") else ""
+        campos = {k: dig(it, ruta) for k, ruta in libres.items()}
+        campos = {k: v for k, v in campos.items() if v is not None}
+        if not img_path and not campos and not titulo:
+            continue      # item que no trajo NADA de lo pedido
+        out.append({"image_url": img if img_path else "",
                     "url": link if isinstance(link, str) else "",
                     "title": ("" if titulo is None else str(titulo))[:200],
+                    "fields": campos,
                     "source": source})
         if len(out) >= max(1, int(limit)):
             break
     if not out:
+        if img_path:
+            raise ApiSourceError(
+                f"traje {len(crudos)} resultado(s) pero ninguno tiene una imagen en "
+                f"'{img_path}'. " + _campos_de_imagen(crudos[0]))
         raise ApiSourceError(
-            f"traje {len(crudos)} resultado(s) pero ninguno tiene una imagen en "
-            f"'{img_path}'. " + _campos_de_imagen(crudos[0]))
+            f"traje {len(crudos)} resultado(s) pero ninguno tiene los campos que "
+            f"pediste ({', '.join(sorted(mapa))}). " + _campos_visibles(crudos[0]))
     return out
 
 
@@ -359,6 +382,15 @@ def _listas_visibles(data: Any, tope: int = 3) -> str:
         return ""
     return ("Poné en 'dónde está la lista': " +
             " o ".join(f"'{k}'" for k in hallados[:tope]))
+
+
+def _campos_visibles(item: Any, tope: int = 8) -> str:
+    """Qué campos trae un item, para llenar el mapeo. El error de una fuente de
+    DATOS tiene que decir qué había, no solo que no encontró lo que pidieron."""
+    if not isinstance(item, dict):
+        return ""
+    claves = [k for k, v in item.items() if not isinstance(v, (list, dict))][:tope]
+    return ("Campos disponibles: " + ", ".join(f"'{k}'" for k in claves)) if claves else ""
 
 
 def _campos_de_imagen(item: Any, tope: int = 4) -> str:

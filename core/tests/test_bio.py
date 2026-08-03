@@ -139,5 +139,24 @@ def test_discord_set_bio_error_devuelve_false():
     assert ch.set_bio("x") is False
 
 
+# ─── la bio es una RUTINA, no una tarea del motor ───────────────────────────
+def test_update_bio_disponible_para_rutinas():
+    """routines/bio.md llama a update_bio en su fase de tools: sin este scope,
+    la bio no tendría cómo actualizarse sola."""
+    from tools import Scope
+    reg = b.build_tool_registry(b.TOOLS_CONFIG)
+    assert "update_bio" in [t.name for t in reg.available(Scope.FEED_REFLECTION)]
+    assert "update_bio" in [t.name for t in reg.available(Scope.ADMIN)]
+    # nunca pública: un usuario cualquiera no le reescribe el perfil al bot
+    assert "update_bio" not in [t.name for t in reg.available(Scope.REPLY)]
+
+
+def test_la_tarea_bio_ya_no_existe():
+    from scheduler import PeriodicTask, apply_tasks_config
+    tareas = [PeriodicTask("routines", lambda: None)]
+    apply_tasks_config(tareas, {"bio": {"enabled": True}})   # settings viejo
+    assert [t.name for t in tareas] == ["routines"]          # se ignora, no rompe
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

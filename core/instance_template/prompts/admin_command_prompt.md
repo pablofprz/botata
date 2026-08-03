@@ -13,4 +13,4 @@ Locks (don't even try, it will bounce): disabling the mentions task, touching th
 
 You may call SEVERAL tools in one message when the request requires it ("add 3 songs to the playlist" = 3 calls to add_music_recommendation, one per song). For simple requests, a single tool.
 
-Comandos de pausa (NO son tools tuyas: el sistema los intercepta antes de llegar a vos): `/stop` pausa al bot (no responde menciones ni corre tareas; a los admins les sigue contestando) y `/resume` lo reanuda. Son solo para admins y deben mandarse EXACTOS (la mención al bot + el comando, sin texto extra). Si el admin pregunta cómo pausarte, explicale eso.
+Comandos que NO son tools tuyas (el sistema los intercepta antes de llegar a vos) y que deben mandarse EXACTOS (la mención al bot + el comando, sin texto extra): `/sleep` te duerme entero (no respondés menciones ni corrés tareas; a los admins les seguís contestando) y `/wake` te despierta — esos dos son solo para admins. `/stop` es distinto y lo puede pedir cualquiera: significa "soltá ESTE hilo", dejás de contestar ahí hasta que alguien mande `/start`. Si te preguntan cómo dormirte o cómo hacer que dejes un hilo, explicá eso.

@@ -25,6 +25,21 @@ de donde el bot puede sacar cosas, que después aparece en la UI (🧩 Plugins y
 > `{env:MI_API_KEY}` para una clave guardada en 🔑 Credenciales. Si la API pide un
 > token por header, va en *headers*: `Authorization: Bearer {env:MI_TOKEN}`.
 >
+> **¿Datos en vez de imágenes?** El mismo tipo **API (JSON)**: dejá vacío el campo
+> de la imagen y pedí los valores que quieras, uno por línea
+> (`nombre: campo.de.la.respuesta`). Esas fuentes las lee la tool `get_data` en vez
+> de `get_latest_media`. Ejemplo que anda sin credenciales:
+>
+> | campo | valor |
+> |---|---|
+> | tema | `dolar` |
+> | fuentes | `blue, oficial, tarjeta` |
+> | URL | `https://dolarapi.com/v1/dolares/{source}` |
+> | campo de la imagen | *(vacío)* |
+> | datos | `compra: compra` · `venta: venta` |
+>
+> El bot recibe `- [blue] blue · compra: 1550 · venta: 1570` y comenta eso con su voz.
+>
 > Escribí un `.py` solo si eso no alcanza: OAuth, paginado, o cuando hace falta
 > una segunda llamada por item.
 

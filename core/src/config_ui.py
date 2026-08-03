@@ -49,6 +49,9 @@ UI_HTML = REPO_DIR / "ui" / "config.html"  # asset del motor, no de la instancia
 ENV_KEYS = [
     "BSKY_PASSWORD", "MASTODON_ACCESS_TOKEN", "DISCORD_BOT_TOKEN",
     "OPENROUTER_API_KEY", "LLM_API_KEY",
+    # Generar imágenes: OpenRouter alcanza. XAI_API_KEY es para el endpoint de
+    # xAI (Grok), que es el camino si se quiere un generador poco filtrado.
+    "XAI_API_KEY",
     "BRAVE_API_KEY",
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY", "TUMBLR_API_KEY",
     "IG_USERNAME", "IG_PASSWORD", "GOOGLE_OAUTH_ID", "GOOGLE_OAUTH_SECRET",
@@ -59,15 +62,28 @@ ENV_KEYS = [
 _ENV_RESERVADAS = {"PATH", "PYTHONPATH", "BOTATA_INSTANCE", "HOME", "USERPROFILE",
                    "LD_PRELOAD", "PYTHONSTARTUP"}
 
-_CHANNELS = {"bluesky", "mastodon", "discord"}
-# `local` = timeline local (Mastodon); `channel` = mensajes de un canal (Discord)
-_FEED_TYPES = {"list", "feed", "following", "local", "channel"}
+_CHANNELS = {"bluesky", "mastodon", "discord", "whatsapp"}
+# `local` = timeline local (Mastodon); `channel` = mensajes de un canal (Discord);
+# `chat` = la conversación de un grupo (WhatsApp)
+_FEED_TYPES = {"list", "feed", "following", "local", "channel", "chat"}
 _MCP_TRANSPORTS = {"stdio", "http"}
 _MOOD_MODES = {"manual", "auto"}
 _WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 _PREF_MODES = {"manual", "add_only", "full_auto"}
 _PREF_KINDS = {"like", "dislike"}
 _EVENT_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$")
+
+
+def _es_loopback(url: str) -> bool:
+    """El bridge de WhatsApp solo se habla por loopback (él mismo se niega a
+    escuchar en otra dirección). Se valida acá también para no dejar que la UI
+    guarde una config que el bridge nunca va a servir."""
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(url.strip())
+    except ValueError:
+        return False
+    return u.scheme in ("http", "https") and u.hostname in ("127.0.0.1", "localhost", "::1")
 
 
 # ─── Validadores (puros: devuelven lista de errores) ─────────────────────────
@@ -91,8 +107,15 @@ def validate_settings(s: dict) -> list[str]:
         errs.append("BOT_NAME debe ser un string")
     if not isinstance(s.get("COMMUNITY_NAME", ""), str):
         errs.append("COMMUNITY_NAME debe ser un string")
-    if s.get("BOT_ACTIONS_FROM", "admin") not in ("admin", "any"):
-        errs.append("BOT_ACTIONS_FROM inválido (admin|any)")
+    if s.get("BOT_ACTIONS_FROM", "admin") not in ("admin", "groups", "any"):
+        errs.append("BOT_ACTIONS_FROM inválido (admin|groups|any)")
+    grupos_acciones = s.get("BOT_ACTIONS_GROUPS", [])
+    if not (isinstance(grupos_acciones, list)
+            and all(isinstance(g, str) for g in grupos_acciones)):
+        errs.append("BOT_ACTIONS_GROUPS debe ser una lista de nombres de grupo")
+    elif s.get("BOT_ACTIONS_FROM") == "groups" and not grupos_acciones:
+        errs.append("BOT_ACTIONS_FROM='groups' sin BOT_ACTIONS_GROUPS: nadie salvo el "
+                    "admin podría agendar acciones (¿quisiste poner un grupo?)")
     if not isinstance(s.get("READ_THREAD_MEDIA", True), bool):
         errs.append("READ_THREAD_MEDIA debe ser booleano")
     tzname = s.get("TIMEZONE", "")
@@ -116,8 +139,41 @@ def validate_settings(s: dict) -> list[str]:
                 or not all(str(i).strip().isdigit() for i in ids)):
             errs.append("CHANNEL=discord requiere DISCORD_CHANNEL_IDS: lista no "
                         "vacía de ids numéricos de canal (el primero es el principal)")
+    if channel == "whatsapp":
+        # WHATSAPP_CHAT_IDS no es un "en qué canal postea" como en Discord: un
+        # dispositivo vinculado recibe TODOS los mensajes del número, así que
+        # esta lista es lo único que evita que el bot conteste en los chats
+        # personales del dueño. Vacía no se guarda.
+        chats = s.get("WHATSAPP_CHAT_IDS", [])
+        if (not isinstance(chats, list) or not chats
+                or not all(isinstance(c, str) and c.strip() for c in chats)):
+            errs.append("CHANNEL=whatsapp requiere WHATSAPP_CHAT_IDS: lista no vacía "
+                        "de JIDs de chat (ej. 1234567890-1111111111@g.us). Es lo único "
+                        "que evita que conteste en tus conversaciones personales — el "
+                        "número vinculado recibe todos los mensajes.")
+        # En WhatsApp la identidad es el teléfono: un handle de otra red acá no
+        # matchea con nadie y el síntoma es mudo (el bot deja de tener admin).
+        for etiqueta, valor in [("ADMIN_HANDLE", s.get("ADMIN_HANDLE")),
+                                *[("ADMIN_HANDLES", h) for h in s.get("ADMIN_HANDLES") or []],
+                                *[(f"USER_GROUPS.{g}", m)
+                                  for g, ms in (s.get("USER_GROUPS") or {}).items()
+                                  for m in (ms or []) if ":" not in str(m)]]:
+            if valor and not re.fullmatch(r"\+?[\d\s().-]+", str(valor)):
+                errs.append(f"{etiqueta}='{valor}' no es un teléfono. En WhatsApp no hay "
+                            "handles: la identidad de una persona es su número (con o sin "
+                            "+, espacios o guiones). Un handle de otra red no matchea con "
+                            "nadie y el bot se queda sin admin.")
+        url = str(s.get("WHATSAPP_BRIDGE_URL", "")).strip()
+        if not _es_loopback(url):
+            errs.append("CHANNEL=whatsapp requiere WHATSAPP_BRIDGE_URL apuntando a "
+                        "loopback (ej. http://127.0.0.1:8787): quien llegue a ese "
+                        "puerto escribe en el WhatsApp del número.")
     if not isinstance(s.get("POLL_INTERVAL_SECONDS", 60), (int, float)):
         errs.append("POLL_INTERVAL_SECONDS debe ser numérico")
+    rondas = s.get("TOOL_ROUNDS", 1)
+    if not isinstance(rondas, int) or isinstance(rondas, bool) or not 1 <= rondas <= 5:
+        errs.append("TOOL_ROUNDS debe ser un entero de 1 a 5 (cada ronda extra es "
+                    "una llamada más al modelo por respuesta)")
 
     conns = s.get("CONNECTORS", {})
     if not isinstance(conns, dict):
@@ -194,6 +250,33 @@ def validate_settings(s: dict) -> list[str]:
                     errs.append(f"TOOLS.{name}: grupo(s) desconocido(s) {sorted(unknown)} "
                                 "(definilos en USER_GROUPS)")
 
+    ig = s.get("IMAGE_GEN")
+    if ig is not None:
+        if not isinstance(ig, dict):
+            errs.append("IMAGE_GEN debe ser un objeto {max_per_day, size}")
+        else:
+            tope = ig.get("max_per_day", 20)
+            if not isinstance(tope, int) or isinstance(tope, bool) or tope < 0:
+                errs.append("IMAGE_GEN.max_per_day debe ser un entero >= 0 (0 = sin tope)")
+            th = ig.get("max_per_thread", 3)
+            if not isinstance(th, int) or isinstance(th, bool) or th < 0:
+                errs.append("IMAGE_GEN.max_per_thread debe ser un entero >= 0 "
+                            "(0 = sin tope; evita que encadene imágenes en una charla)")
+            mb = ig.get("max_bytes", 0)
+            if not isinstance(mb, int) or isinstance(mb, bool) or mb < 0:
+                errs.append("IMAGE_GEN.max_bytes debe ser un entero >= 0 (0 = sin tope; "
+                            "Bluesky rechaza blobs de más de 1000000)")
+            aviso = ig.get("aviso")
+            if aviso is not None and not (
+                    (isinstance(aviso, str) and aviso.strip())
+                    or (isinstance(aviso, list) and aviso
+                        and all(isinstance(f, str) and f.strip() for f in aviso))):
+                errs.append("IMAGE_GEN.aviso debe ser una frase, o una lista de frases "
+                            "no vacías (se elige una al azar)")
+            size = ig.get("size")
+            if size is not None and not re.fullmatch(r"\d{3,5}x\d{3,5}", str(size)):
+                errs.append("IMAGE_GEN.size debe tener la forma ANCHOxALTO (ej. 1024x1024)")
+
     for name, cfg in s.get("TASKS", {}).items():
         if "interval_hours" in cfg and not isinstance(cfg["interval_hours"], (int, float)):
             errs.append(f"TASKS.{name}: interval_hours debe ser numérico")
@@ -221,11 +304,13 @@ def validate_settings(s: dict) -> list[str]:
             errs.append("MOODS.hysteresis_hours debe ser un número >= 0")
         if not isinstance(moods.get("default", ""), str):
             errs.append("MOODS.default debe ser un string (name de un mood, o vacío)")
-        sched = (moods.get("manual") or {}).get("schedule") or {}
-        bad_days = set(sched) - _WEEKDAYS
-        if bad_days:
-            errs.append(f"MOODS.manual.schedule: día(s) inválido(s) {sorted(bad_days)} "
-                        "(usar mon..sun)")
+        # MOODS.manual.schedule (un mood por día) se retiró: eso es una rutina o
+        # un evento del calendario. Se acepta la clave si viene de un settings
+        # viejo, pero ya no hace nada — avisar es mejor que ignorar en silencio.
+        if (moods.get("manual") or {}).get("schedule"):
+            errs.append("MOODS.manual.schedule ya no existe: para cambiar de humor por "
+                        "día usá una rutina (⏰) o un evento del calendario. Vaciá esa "
+                        "clave para guardar.")
 
     prefs = s.get("PREFS")
     if prefs is not None and prefs.get("mode", "manual") not in _PREF_MODES:
@@ -297,21 +382,39 @@ def validate_sources(sources: list) -> list[str]:
             for u in srcs:
                 if not u.startswith(("http://", "https://")):
                     errs.append(f"{tag}: '{u}' no es una URL de feed válida")
+        if kind == "youtube":
+            # Un humano pega la URL de la barra del browser; el motor necesita el
+            # id. Se normaliza al guardar (ver write_sources) y acá se valida el
+            # resultado: sin esto, la URL entera viajaba como id de playlist y la
+            # API devolvía 400 — la fuente quedaba muda sin decir por qué.
+            import youtube_auth
+            for s in srcs:
+                sid = youtube_auth.source_id(s)
+                if not (sid.startswith(("PL", "UU", "UC")) or sid.startswith("@")):
+                    errs.append(
+                        f"{tag}: '{s}' no es una fuente de YouTube que se pueda usar. "
+                        "Pegá la URL de la playlist (…/playlist?list=PL…), la del canal "
+                        "(…/channel/UC… o …/@handle) o el id pelado.")
         if kind == "pinterest":
             for s in srcs:
                 if not s.startswith("http") and s.count("/") != 1:
                     errs.append(f"{tag}: '{s}' tiene que ser 'usuario/tablero' o la URL del tablero")
         if kind == "api":
-            # El conector declarativo: sin URL ni campo de imagen no hay nada que
-            # traer. Las credenciales que falten NO son error de validación — se
-            # pueden cargar después en el .env; el botón de probar las avisa.
+            # El conector declarativo: sin URL ni mapeo no hay nada que traer. Las
+            # credenciales que falten NO son error de validación — se pueden cargar
+            # después en el .env; el botón de probar las avisa.
             url = str(entry.get("url") or "").strip()
             if not url:
                 errs.append(f"{tag}: falta la URL de la API")
             elif not url.startswith(("http://", "https://")):
                 errs.append(f"{tag}: la URL tiene que empezar con http:// o https://")
-            if not str((entry.get("map") or {}).get("image_url") or "").strip():
-                errs.append(f"{tag}: falta indicar de qué campo de la respuesta sale la imagen")
+            # `image_url` dejó de ser obligatorio: una entrada que mapea otros
+            # campos es una fuente de DATOS (dólar, clima), que lee `get_data`.
+            mapa = {k: v for k, v in (entry.get("map") or {}).items()
+                    if str(v or "").strip()}
+            if not mapa:
+                errs.append(f"{tag}: falta el mapeo — decí de qué campo sale la imagen "
+                            "(fuente de media) o qué datos traer (fuente de datos)")
         if not (entry.get("category") or "").strip() and not (entry.get("name") or "").strip():
             errs.append(f"{tag}: poné al menos un tema (category) o un nombre")
     return errs
@@ -596,7 +699,14 @@ class ConfigStore:
     def set_mood_today(self, body: dict) -> list[str]:
         """Fija el mood de HOY en vivo (kv `mood_state`, lo que lee current_mood
         en modo auto). mood vacío = soltar (vuelve al default/decisión del bot).
-        Ojo: en MOODS.mode manual manda `manual.fixed/schedule` (settings)."""
+        Ojo: en MOODS.mode manual manda `manual.fixed` (settings).
+
+        La fecha va en la zona de la INSTANCIA (LOCAL_TZ, seteada en `_db`), no
+        con un -3 hardcodeado: current_mood() solo honra el estado cuyo `date` es
+        el hoy local, así que en cualquier instancia fuera de Argentina el mood
+        elegido acá caía en otra fecha y el motor lo ignoraba en silencio.
+        `changed_at` va aware (con offset) igual que el que escribe el motor —
+        sin él la histéresis no se aplica al humor que puso el admin."""
         name = (body.get("mood") or "").strip().lower()
         if name and not (self.moods_dir / f"{name}.md").exists():
             return [f"no existe el mood '{name}'"]
@@ -606,11 +716,12 @@ class ConfigStore:
                 conn.execute("DELETE FROM kv WHERE key = 'mood_state'")
                 conn.commit()
                 return []
-            from datetime import datetime, timedelta, timezone
-            today = (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
+            from datetime import datetime
+            ahora = datetime.now(dbmod.LOCAL_TZ)
             dbmod.kv_set(conn, "mood_state", json.dumps(
-                {"date": today, "mood": name, "mode": "ui",
-                 "reason": "seteado por el admin desde la UI"}))
+                {"date": ahora.date().isoformat(), "mood": name, "mode": "ui",
+                 "reason": "seteado por el admin desde la UI",
+                 "changed_at": ahora.isoformat()}))
             return []
         finally:
             conn.close()
@@ -722,16 +833,30 @@ class ConfigStore:
             return {"ok": False, "errors": [
                 "falta WHATSAPP_BRIDGE_URL en settings.json (dónde escucha el bridge, "
                 "por ejemplo http://127.0.0.1:8787)"]}
+        import urllib.request
+        base = url.rstrip("/")
         try:
-            import urllib.request
-            with urllib.request.urlopen(url.rstrip("/") + "/status", timeout=10) as r:
+            with urllib.request.urlopen(base + "/status", timeout=10) as r:
                 estado = json.loads(r.read().decode("utf-8", "replace"))
         except Exception as e:
             return {"ok": False, "errors": [
                 f"el bridge no responde en {url} ({type(e).__name__}). ¿Está levantado? "
                 "Es un proceso aparte: sin él, el canal de WhatsApp no arranca."]}
-        return {"ok": True, "status": estado,
-                "chats": [str(c) for c in (settings.get("WHATSAPP_CHAT_IDS") or [])]}
+        # Los grupos solo con la sesión viva. El JID de un grupo no se ve por
+        # ningún lado desde el teléfono: sin esta lista, llenar
+        # WHATSAPP_CHAT_IDS es adivinar.
+        grupos: list[dict] = []
+        if estado.get("connected"):
+            try:
+                with urllib.request.urlopen(base + "/groups", timeout=15) as r:
+                    grupos = (json.loads(r.read().decode("utf-8", "replace"))
+                              .get("groups") or [])
+            except Exception:
+                log.debug("no pude listar grupos de WhatsApp", exc_info=True)
+        # Los chats configurados no van acá: la UI los tiene en S y los edita en
+        # vivo (marcar un grupo en la tabla y no guardar todavía es un estado
+        # legítimo). Devolverlos también sería tener dos verdades.
+        return {"ok": True, "status": estado, "groups": grupos, "qr_url": base + "/qr.png"}
 
     def _run_membrilla(self) -> dict:
         """Lanza el scraper Membrilla (suite hermana) según settings.MEMBRILLA:
@@ -799,6 +924,52 @@ class ConfigStore:
         except Exception as e:
             return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
 
+    def hello_world(self, body: dict) -> dict:
+        """Presentación inicial del bot (hello world), en dos tiempos: `preview`
+        arma el borrador y `post` lo publica (una sola vez en la vida de la
+        instancia). El texto se puede editar antes de publicar.
+
+        Corre en el proceso de la UI, como el chat de debug: necesita el motor
+        cargado con la instancia y las credenciales ya guardadas."""
+        accion = str(body.get("action") or "preview")
+        if accion not in ("preview", "post", "status", "descartar"):
+            return {"ok": False, "errors":
+                    ["action inválida (status|preview|post|descartar)"]}
+        try:
+            import botata
+            if accion in ("status", "descartar"):
+                dbmod, conn = self._db()
+                if accion == "descartar":
+                    dbmod.kv_set(conn, botata._HELLO_KV, "descartado por el admin")
+                    return {"ok": True}
+                return {"ok": True,
+                        "ya_posteado": dbmod.kv_get(conn, botata._HELLO_KV),
+                        "errors": botata.hello_world_pendientes()}
+            # Lo que falta se pregunta ANTES de tocar nada: construir el router o
+            # el canal con la instancia a medio configurar tira un SystemExit que
+            # tapa la lista completa con el primer error que aparezca.
+            faltan = botata.hello_world_pendientes()
+            if faltan:
+                return {"ok": False, "errors": faltan, "text": ""}
+            conn = botata.init_db()
+            router = botata.build_router(botata.MODELS_CONFIG,
+                                         legacy=botata._LEGACY_MODELS, env=os.environ)
+            # El canal recién se construye para publicar: el borrador no necesita
+            # loguearse en la red (y así se puede mirar antes de tener el bridge
+            # o el token del canal a mano).
+            canal = botata.build_channel() if accion == "post" else None
+            r = botata.run_hello_world(canal, router, conn,
+                                       text=str(body.get("text") or ""),
+                                       publish=accion == "post",
+                                       force=bool(body.get("force")))
+        except SystemExit as e:
+            return {"ok": False, "errors": [str(e)]}
+        except Exception as e:
+            return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
+        return {"ok": bool(r.get("ok")), "text": r.get("text", ""),
+                "uri": r.get("uri"), "ya_posteado": r.get("ya_posteado"),
+                "errors": r.get("faltantes") or []}
+
     def danger(self, action: str, confirm: str) -> list[str]:
         """Acciones irreversibles. `confirm` debe ser el nombre de la instancia."""
         if confirm != self.base.name:
@@ -863,12 +1034,35 @@ class ConfigStore:
                 "preferences": dbmod.list_preferences(conn),
                 "events": ev_list,
                 "mood_state": mood_state,
+                "mood_today": self._mood_today(mood_state, dbmod),
                 "routine_last_runs": {r["feed_name"][len("routine:"):]: r["last_run"]
                                       for r in rt_rows},
                 "bio_current": dbmod.kv_get(conn, "bio_current"),
             }
         finally:
             conn.close()
+
+    def _mood_today(self, mood_state: dict | None, dbmod) -> str | None:
+        """El humor VIGENTE, con la misma regla que `current_mood()` del motor.
+
+        Se resuelve acá y no en el navegador: la UI lo hacía en JS con un -3
+        hardcodeado y todavía miraba `manual.schedule`, que ya no existe. Una
+        sola regla, del lado que conoce la zona de la instancia."""
+        from datetime import datetime
+        try:
+            cfg = (json.loads(self.settings_path.read_text(encoding="utf-8"))
+                   .get("MOODS") or {})
+        except Exception:
+            return None
+        if not cfg.get("enabled"):
+            return None
+        base = (cfg.get("default") or "").strip() or None
+        if str(cfg.get("mode", "manual")).lower() != "auto":
+            return ((cfg.get("manual") or {}).get("fixed") or "").strip() or base
+        hoy = datetime.now(dbmod.LOCAL_TZ).date().isoformat()
+        if mood_state and mood_state.get("mood") and mood_state.get("date") == hoy:
+            return str(mood_state["mood"])
+        return base
 
     def _announce_default(self, source: str | None) -> bool:
         """Estimación UI del switch de anuncio para eventos legados (announce
@@ -1258,19 +1452,52 @@ class ConfigStore:
         errs = validate_sources(sources)
         if errs:
             return errs
+        import youtube_auth
         norm = []
         for e in sources:
             srcs = e.get("sources")
             if isinstance(srcs, str):
                 srcs = srcs.split(",")
-            norm.append({**e, "sources": [str(s).strip() for s in (srcs or []) if str(s).strip()]})
+            limpias = [str(s).strip() for s in (srcs or []) if str(s).strip()]
+            # YouTube se guarda ya normalizado a id: lo que pega el admin es la
+            # URL del browser, y el motor no parsea URLs en caliente.
+            if (e.get("type") or "").strip().lower() == "youtube":
+                limpias = [youtube_auth.source_id(s) for s in limpias]
+            norm.append({**e, "sources": limpias})
         self._atomic_write(self.sources_path,
                            json.dumps(norm, ensure_ascii=False, indent=2) + "\n")
         # Los registros viejos ya no gobiernan nada: se retiran para no confundir.
         for legacy in (self.news_path, self.content_sources_path):
             if legacy.exists():
                 legacy.replace(legacy.with_suffix(legacy.suffix + ".migrado"))
+        self._retirar_playlist_legacy()
         return []
+
+    def _retirar_playlist_legacy(self) -> None:
+        """`SPOTIFY_PLAYLIST_ID` de settings se retira apenas se guardan fuentes.
+
+        Esa clave se INYECTA como una fuente más ("playlist comunitaria"), acá y
+        en el motor. Mientras siga en settings, la fuente reaparece por más que
+        se borre en la UI: no hay campo para editarla y no hay forma de sacarla
+        sin tocar el JSON a mano. En una instancia clonada de otra eso es peor
+        que confuso — la copia hereda la playlist de la original y le escribe
+        temas (le pasó a botata-rancher con la de botata-arg, 2026-08-01).
+
+        Lo que el admin acaba de guardar en `sources.json` ES su intención: si
+        dejó la playlist, ya quedó ahí como entrada de verdad; si la borró, se
+        va. En los dos casos la clave vieja sobra.
+        """
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not str(settings.get("SPOTIFY_PLAYLIST_ID", "")).strip():
+            return
+        settings.pop("SPOTIFY_PLAYLIST_ID", None)
+        self._atomic_write(self.settings_path,
+                           json.dumps(settings, ensure_ascii=False, indent="\t") + "\n")
+        log.info("SPOTIFY_PLAYLIST_ID retirado de settings.json: las playlists "
+                 "viven en sources.json (registro único de fuentes)")
 
     def test_source(self, body: dict) -> dict:
         """Corre UNA fuente ahora y cuenta qué trajo, sin guardar nada.
@@ -1383,6 +1610,44 @@ class ConfigStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(path, text if text.endswith("\n") else text + "\n")
         return {"ok": True}
+
+    def set_routine_meta(self, body: dict) -> list[str]:
+        """Toca UNA clave del frontmatter de una rutina (enabled / interval_hours)
+        sin abrir el archivo entero.
+
+        La config de una rutina vive en su .md, no en settings.json — así que el
+        interruptor de la lista tiene que reescribir el archivo. Se cambia solo
+        la línea pedida: el cuerpo (que es la conducta) no se toca nunca."""
+        fname = (body.get("file") or "").strip()
+        if not self._BEHAVIOR_FILE_RE.match(fname) or fname.upper() == "README.MD":
+            return ["nombre de rutina inválido"]
+        path = self.base / "routines" / fname
+        if not path.exists():
+            return [f"routines/{fname} no existe"]
+        if "enabled" in body:
+            clave, valor = "enabled", "true" if body["enabled"] else "false"
+        elif "interval_hours" in body:
+            try:
+                horas = float(body["interval_hours"])
+            except (TypeError, ValueError):
+                return ["interval_hours debe ser numérico"]
+            if horas < 0:
+                return ["interval_hours no puede ser negativo"]
+            clave = "interval_hours"
+            valor = str(int(horas)) if horas == int(horas) else str(horas)
+        else:
+            return ["nada que cambiar (enabled | interval_hours)"]
+        text = path.read_text(encoding="utf-8")
+        if _parse_frontmatter(text) is None:
+            return [f"routines/{fname} no tiene frontmatter — editala a mano"]
+        if re.search(rf"(?m)^{clave}\s*:", text):
+            nuevo = re.sub(rf"(?m)^{clave}\s*:.*$", f"{clave}: {valor}", text, count=1)
+        else:  # insertar antes del cierre del frontmatter (segundo ---)
+            cabeza, resto = text.split("\n", 1)
+            nuevo = cabeza + "\n" + re.sub(r"(?m)^---\s*$", f"{clave}: {valor}\n---",
+                                           resto, count=1)
+        self._atomic_write(path, nuevo)
+        return []
 
     def set_skill_enabled(self, name: str, enabled: bool) -> list[str]:
         """Reescribe solo la línea `enabled:` del frontmatter (o la inserta)."""
@@ -1582,6 +1847,8 @@ def make_handler(store: ConfigStore):
                     errs = store.add_user_memory(body)
                 elif self.path == "/api/memory/user/pin":
                     errs = store.pin_user_fact(body)
+                elif self.path == "/api/routine-meta":
+                    errs = store.set_routine_meta(body)
                 elif self.path == "/api/behavior-file":
                     self._send(200, store.edit_behavior_file(body))
                     return
@@ -1608,6 +1875,9 @@ def make_handler(store: ConfigStore):
                                        body.get("mode", "open"))
                 elif self.path == "/api/run":
                     self._send(200, store.run_action(body.get("action", "")))
+                    return
+                elif self.path == "/api/hello":
+                    self._send(200, store.hello_world(body))
                     return
                 elif self.path == "/api/debug/chat":
                     self._send(200, store.debug_chat(body.get("text", ""),

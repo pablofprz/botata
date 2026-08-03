@@ -75,7 +75,7 @@ def test_objeto_unico_se_trata_como_un_item(monkeypatch):
     assert items == [{
         "image_url": "https://raw.githubusercontent.com/x/pikachu.png",
         "url": "https://pokeapi.co/api/v2/pokemon-species/25/",
-        "title": "pikachu", "source": "pikachu"}]
+        "title": "pikachu", "fields": {}, "source": "pikachu"}]
 
 
 def test_lista_respeta_items_path_y_el_limite(monkeypatch):
@@ -139,9 +139,10 @@ def test_url_no_http_se_rechaza():
         c.api_items("x", 5, {"url": "file:///etc/passwd", "map": {"image_url": "i"}})
 
 
-def test_sin_campo_de_imagen_avisa(monkeypatch):
+def test_sin_mapeo_avisa(monkeypatch):
+    """Sin mapear NADA no hay nada que traer — ni imagen ni datos."""
     _stub(monkeypatch, _POKEAPI)
-    with pytest.raises(c.ApiSourceError, match="imagen"):
+    with pytest.raises(c.ApiSourceError, match="qué campos traer"):
         c.api_items("x", 5, {"url": "https://api.test/x", "map": {}})
 
 
@@ -206,9 +207,10 @@ def test_fetch_items_de_un_conector_inexistente_es_vacio():
 
 
 # ─── El conector está en el catálogo y es "en vivo" ──────────────────────────
-def test_api_esta_en_el_catalogo_y_lo_consume_get_latest_media():
+def test_api_esta_en_el_catalogo_y_lo_consumen_las_dos_tools():
     con = c.by_id("api")
-    assert con is not None and con.live and con.tool == "get_latest_media"
+    assert con is not None and con.live
+    assert "get_latest_media" in con.tool and "get_data" in con.tool
     assert not con.core                       # se puede apagar desde Plugins
 
 
@@ -248,3 +250,57 @@ def test_si_no_hay_ninguna_imagen_lo_dice_en_criollo(monkeypatch):
     with pytest.raises(c.ApiSourceError, match="no hay ningún campo que sea una URL"):
         c.api_items("x", 5, {"url": "https://api.test/x", "items_path": "",
                              "map": {"image_url": "img"}})
+
+
+# ═══ Fuentes de DATOS ════════════════════════════════════════════════════════
+# El mismo conector, sin mapear imagen: la mitad de lo que se habla en una
+# comunidad (el dólar, el clima, si hoy juega Boca) no es una foto, y exigir
+# `image_url` dejaba todo eso afuera — obligando a una tool a medida por API.
+
+# Forma real de dolarapi.com/v1/dolares/{source}
+_DOLAR = {"casa": "blue", "compra": 1410, "venta": 1435,
+          "fechaActualizacion": "2026-07-30T14:02:00.000Z"}
+
+_ENTRY_DOLAR = {
+    "type": "api", "category": "dolar", "sources": ["blue", "oficial"],
+    "url": "https://dolarapi.com/v1/dolares/{source}",
+    "items_path": "",
+    "map": {"compra": "compra", "venta": "venta", "title": "casa"},
+}
+
+
+def test_una_fuente_sin_imagen_trae_datos(monkeypatch):
+    _stub(monkeypatch, _DOLAR)
+    items = c.api_items("blue", 5, _ENTRY_DOLAR)
+    assert items == [{"image_url": "", "url": "", "title": "blue",
+                      "fields": {"compra": 1410, "venta": 1435},
+                      "source": "blue"}]
+
+
+def test_los_nombres_de_los_campos_los_elige_el_admin(monkeypatch):
+    _stub(monkeypatch, _DOLAR)
+    entry = {**_ENTRY_DOLAR, "map": {"a cuánto lo venden": "venta"}}
+    assert c.api_items("blue", 5, entry)[0]["fields"] == {"a cuánto lo venden": 1435}
+
+
+def test_un_campo_que_no_existe_no_inventa_nada(monkeypatch):
+    _stub(monkeypatch, _DOLAR)
+    entry = {**_ENTRY_DOLAR, "map": {"venta": "venta", "fantasma": "no.existe"}}
+    assert c.api_items("blue", 5, entry)[0]["fields"] == {"venta": 1435}
+
+
+def test_si_no_encuentra_ningun_campo_dice_cuales_habia(monkeypatch):
+    """El error tiene que enseñar: es lo único que ve alguien que no programa."""
+    _stub(monkeypatch, _DOLAR)
+    entry = {**_ENTRY_DOLAR, "map": {"precio": "no.existe"}}
+    with pytest.raises(c.ApiSourceError, match="Campos disponibles.*compra"):
+        c.api_items("blue", 5, entry)
+
+
+def test_las_fuentes_de_media_no_cambiaron(monkeypatch):
+    """La generalización no puede tocar lo que ya andaba: con imagen mapeada,
+    un item sin imagen se saltea igual que antes."""
+    _stub(monkeypatch, {"results": [{"img": None}, {"img": "https://x/2.png"}]})
+    items = c.api_items("x", 5, {"url": "https://api.test/x", "items_path": "results",
+                                 "map": {"image_url": "img"}})
+    assert [i["image_url"] for i in items] == ["https://x/2.png"]

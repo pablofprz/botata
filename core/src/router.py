@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+import base64
+import urllib.request
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from openai import OpenAI
@@ -35,6 +37,9 @@ _DEFAULT_ROLES: dict[str, str] = {
     "feed_opinion":   "lite",
     "bio_interp":     "lite",
     "image_describe": "vision",
+    # Generar imágenes: si la instancia no declara el alias, la tool se apaga
+    # sola (ver `tiene_rol`) en vez de pedirle un PNG a un modelo de texto.
+    "image_generate": "image_gen",
     # Compactar la memoria GENERAL exige razonar sobre contradicciones y sobre
     # qué se puede perder sin dañar al bot: es el trabajo menos apto para un
     # modelo chico. Resumir las notas de un día de charla, en cambio, es
@@ -48,11 +53,63 @@ _DEFAULT_ROLES: dict[str, str] = {
 }
 
 
+def _bytes_de_payload(payload: str | None) -> bytes:
+    """Un resultado de imagen viene como data URL, base64 pelado o http(s). Bytes."""
+    if not payload:
+        raise RuntimeError("el modelo no devolvió ninguna imagen")
+    if payload.startswith("data:"):
+        payload = payload.split(",", 1)[-1]
+    elif payload.startswith(("http://", "https://")):
+        # URL efímera del proveedor: se baja acá porque caduca en minutos.
+        with urllib.request.urlopen(payload, timeout=60) as resp:
+            return resp.read(20_000_000)
+    return base64.b64decode(payload)
+
+
+def _imagen_por_chat(t: _Target, prompt: str) -> str | None:
+    """chat/completions pidiendo salida de imagen (la forma de OpenRouter)."""
+    resp = t.client.chat.completions.create(
+        model=t.model,
+        messages=[{"role": "user", "content": prompt}],
+        extra_body={"modalities": ["image", "text"]},
+    )
+    msg = resp.choices[0].message
+    # `images` no está en el schema del SDK de OpenAI: viaja como campo extra.
+    imgs = getattr(msg, "images", None) or (getattr(msg, "model_extra", None) or {}).get("images")
+    for img in imgs or []:
+        d = img if isinstance(img, dict) else getattr(img, "model_dump", lambda: {})()
+        url = ((d.get("image_url") or {}) or {}).get("url") or d.get("url") or d.get("b64_json")
+        if url:
+            return url
+    return None
+
+
+def _imagen_por_endpoint_images(t: _Target, prompt: str, size: str | None) -> str | None:
+    """`/v1/images/generations` (OpenAI, xAI/Grok, servidores locales)."""
+    kw: dict[str, Any] = {"model": t.model, "prompt": prompt, "n": 1}
+    if size:
+        kw["size"] = size
+    try:
+        resp = t.client.images.generate(**kw, response_format="b64_json")
+    except Exception as e:
+        # gpt-image-1 rechaza response_format (siempre devuelve b64); xAI lo exige
+        # para no darte una URL que caduca. Se pide, y si molesta se pide sin él.
+        if "response_format" not in str(e):
+            raise
+        log.info("router: %s no acepta response_format, reintento sin él", t.model)
+        resp = t.client.images.generate(**kw)
+    d = resp.data[0]
+    return getattr(d, "b64_json", None) or getattr(d, "url", None)
+
+
 @dataclass
 class _Target:
     endpoint: str
     model: str
     client: OpenAI
+    # Resto del hop tal cual está en la config (ej. `api: "images"`). Lo consume
+    # quien sabe qué significa; el router solo lo transporta.
+    opciones: dict = field(default_factory=dict)
 
 
 class ModelRouter:
@@ -109,20 +166,21 @@ class ModelRouter:
             if client is None:
                 log.warning("endpoint %r desconocido en alias %r — omitido", t["endpoint"], alias)
                 continue
-            out.append(_Target(t["endpoint"], t["model"], client))
+            out.append(_Target(t["endpoint"], t["model"], client,
+                               {k: v for k, v in t.items() if k not in ("endpoint", "model")}))
         if not out:
             raise KeyError(f"alias {alias!r} sin endpoints válidos")
         return out
 
-    def _run(self, role: str, fn: Callable[[OpenAI, str], Any]) -> Any:
-        """Recorre la cadena del rol; `fn(client, model)` hace la llamada real.
+    def _run(self, role: str, fn: Callable[[_Target], Any]) -> Any:
+        """Recorre la cadena del rol; `fn(target)` hace la llamada real.
         Reintenta cada target con backoff exponencial antes de pasar al siguiente."""
         chain = self._chain(role)
         last_exc: Exception | None = None
         for idx, target in enumerate(chain):
             for attempt in range(self._max_retries):
                 try:
-                    result = fn(target.client, target.model)
+                    result = fn(target)
                     if idx > 0 or attempt > 0:
                         log.info("router[%s]: sirvió %s/%s", role, target.endpoint, target.model)
                     return result
@@ -141,9 +199,9 @@ class ModelRouter:
         """Structured output → instancia pydantic (guided_json cuando el endpoint lo soporta)."""
         schema = response_model.model_json_schema()
 
-        def fn(client: OpenAI, model: str) -> BaseModel:
-            resp = client.chat.completions.create(
-                model=model,
+        def fn(t: _Target) -> BaseModel:
+            resp = t.client.chat.completions.create(
+                model=t.model,
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                 response_format={"type": "json_object"},
                 extra_body={"guided_json": schema},
@@ -154,11 +212,27 @@ class ModelRouter:
         return self._run(role, fn)
 
     def call_with_tools(self, role: str, system: str, user: str, tools: list[dict]) -> tuple[str | None, list]:
-        """Tool-calling. Devuelve (texto, tool_calls); exactamente uno no vacío."""
-        def fn(client: OpenAI, model: str) -> tuple[str | None, list]:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        """Tool-calling de una sola vuelta. Devuelve (texto, tool_calls)."""
+        return self.call_with_messages(
+            role,
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            tools,
+        )
+
+    def call_with_messages(self, role: str, messages: list[dict],
+                           tools: list[dict]) -> tuple[str | None, list]:
+        """Igual, pero sobre una conversación ya armada.
+
+        Es lo que habilita encadenar tools: para pedir una segunda tool EN
+        FUNCIÓN de lo que trajo la primera, el modelo tiene que volver a ver la
+        conversación con los resultados adentro (mensajes `role: "tool"`). Con
+        `[system, user]` fijo eso era imposible — el modelo tenía que decidir
+        todas sus llamadas a ciegas, antes de ver ningún resultado.
+        """
+        def fn(t: _Target) -> tuple[str | None, list]:
+            resp = t.client.chat.completions.create(
+                model=t.model,
+                messages=messages,
                 tools=tools,
                 tool_choice="auto",
             )
@@ -171,9 +245,41 @@ class ModelRouter:
 
     def chat(self, role: str, messages: list[dict], **kwargs: Any) -> str:
         """Chat plano → texto. Para prompts que no necesitan structured output."""
-        def fn(client: OpenAI, model: str) -> str:
-            resp = client.chat.completions.create(model=model, messages=messages, **kwargs)
+        def fn(t: _Target) -> str:
+            resp = t.client.chat.completions.create(model=t.model, messages=messages, **kwargs)
             return resp.choices[0].message.content or ""
+
+        return self._run(role, fn)
+
+    # ── generación de imágenes ───────────────────────────────────────────────
+    def tiene_rol(self, role: str) -> bool:
+        """¿El rol está configurado DE VERDAD (alias existente con targets)?
+
+        `_chain` es deliberadamente indulgente: un rol sin mapear cae al default
+        para que una instancia vieja no se rompa cuando el motor agrega una
+        capacidad. Para imágenes eso sería peor que fallar —terminaría pidiéndole
+        un PNG a un modelo de texto—, así que quien genera pregunta primero.
+        """
+        alias = self._roles.get(role)
+        return bool(alias and self._aliases.get(alias))
+
+    def generate_image(self, role: str, prompt: str, *, size: str | None = None) -> bytes:
+        """Genera una imagen y devuelve sus bytes. Misma cadena de fallback que el resto.
+
+        Dos formas de API conviven porque los proveedores no se pusieron de acuerdo,
+        y el hop las elige con `api` en la config:
+          * `chat` (default) — chat/completions con `modalities: [image, text]`.
+            Es lo que habla OpenRouter (Gemini, GPT-image).
+          * `images` — el `/v1/images/generations` clásico. Es lo que hablan OpenAI,
+            xAI (Grok) y casi cualquier servidor local.
+        """
+        if not self.tiene_rol(role):
+            raise KeyError(f"rol {role!r} sin alias configurado (no hay modelo de imagen)")
+
+        def fn(t: _Target) -> bytes:
+            if str(t.opciones.get("api") or "chat").lower() == "images":
+                return _bytes_de_payload(_imagen_por_endpoint_images(t, prompt, size))
+            return _bytes_de_payload(_imagen_por_chat(t, prompt))
 
         return self._run(role, fn)
 
@@ -203,6 +309,9 @@ class RoleLLM:
 
     def call_with_tools(self, system: str, user: str, tools: list[dict]) -> tuple[str | None, list]:
         return self._router.call_with_tools(self._role, system, user, tools)
+
+    def call_with_messages(self, messages: list[dict], tools: list[dict]) -> tuple[str | None, list]:
+        return self._router.call_with_messages(self._role, messages, tools)
 
     def chat(self, messages: list[dict], **kwargs: Any) -> str:
         return self._router.chat(self._role, messages, **kwargs)

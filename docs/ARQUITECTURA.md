@@ -78,6 +78,8 @@ cablea. Eso permite testearlos aislados y, a futuro (M7), reutilizarlos con otro
 | `FEEDS[]` | fuentes de LECTURA (list/feed/following/local/channel) + intervalo | grafo de feed |
 | `TOOLS` | enable/scopes por tool | `ToolRegistry.apply_config` |
 | `TASKS` | enable/intervalo por tarea periódica | `scheduler.apply_tasks_config` |
+| `BOT_ACTIONS_FROM` + `BOT_ACTIONS_GROUPS` | quién puede agendarle acciones (`admin`\|`groups`\|`any`) | `_puede_agendar_acciones` |
+| `MOODS` | apagado / fijo (`manual.fixed`) / auto + susceptibilidad e histéresis | `current_mood`, `run_mood_pass` |
 | `MCP` | servers MCP externos (transport/command/filtros) | `mcp_tools` |
 | `MEMBRILLA` | repo + comandos del scraper hermano (botón "Lanzar scraper" de la UI) | `config_ui.py` |
 
@@ -93,7 +95,20 @@ las fuentes que le correspondan, y un `type` que dice por dónde entra cada una:
 | `youtube` | canales (`@handle`, `UC…`) o listas (`PL…`) | tool `share_video` (parámetro `topic`) |
 | `pinterest` | tableros `usuario/tablero` (RSS oficial, sin credenciales) | tool `get_latest_media` |
 | `tumblr` | blogs (`blog` o `blog#tag`, API v2 + `TUMBLR_API_KEY`) | tool `get_latest_media` |
-| `api` | cualquier API JSON, **descripta en la propia entrada** (T46) | tool `get_latest_media` |
+| `api` | cualquier API JSON, **descripta en la propia entrada** (T46) | `get_latest_media` (si mapea imagen) · `get_data` (si mapea otros campos) |
+
+**Media vs datos (el mismo conector, 2026-07-30):** el tipo `api` exigía mapear
+`image_url`, así que solo servía para fotos — y la mitad de lo que se habla en una
+comunidad (el dólar, el clima, si hoy juega Boca) quedaba afuera, condenado a una
+tool a medida por cada API. Ahora el `map` es **libre**: tres nombres siguen
+teniendo significado (`image_url`, `url`, `title`) y el resto son campos que
+elige el admin (`{"venta": "blue.venta"}`). Con `image_url` la entrada es de
+media y la lee `get_latest_media`; sin él es de datos y la lee `get_data`, que
+devuelve texto plano (`- [blue] compra: 1550 · venta: 1570`) para que el bot lo
+comente con su voz — un JSON crudo en el prompt lo empuja a copiarlo tal cual.
+`_entradas_en_vivo` filtra las de datos para que pedir una imagen no vaya a
+buscar la cotización. Consecuencia práctica: sumar el dólar, el clima o los
+feriados es cargar una fuente en la UI, no escribir un conector.
 
 **Indexado vs en vivo (frontera a no confundir):** `membrilla` es contenido **indexado** —
 Membrilla lo baja, `catalog.py` lo describe con visión y entra al motor de búsqueda semántica,
@@ -143,6 +158,28 @@ init_db() → BskyClient (login con retry) → build_router → build_graph (men
 ```
 
 Modos: `open` (responde a todos) / `admin_only` (ignora no-admins, registrándolos).
+
+### Fecha y hora (por qué está donde está)
+
+`soul_text()` — el único punto de carga del SOUL, por donde pasan todos los flujos
+outward — **incluye** `current_datetime_line()`. Antes cada caller la sumaba a
+mano y alcanzaba con que un flujo nuevo se olvidara para que el bot se perdiera en
+los días. Los flujos que NO cargan el SOUL (clasificación, comando de admin,
+resumen de feed, update de perfil, fase de tools del reply) la agregan aparte. En
+`GenerateReplyNode` va **dos veces** a propósito: con el SOUL arriba y de nuevo al
+final, porque ese prompt es largo (skills + hechos + charlas + hilo) y lo del
+principio queda sepultado. La línea incluye el **día de la semana** (`_DIAS_ES`,
+índice = `datetime.weekday()`, lunes=0) porque es lo que el bot usa para hablar
+("lunes de Dio").
+
+**Y la otra mitad del problema (2026-07-29):** la DB guarda con
+`datetime('now')`, que en SQLite es **UTC**, mientras el bot vive en -3. Leía su
+propia historia tres horas adelantada — a las 20:39 locales su último post decía
+23:39 — y pasadas las 21:00 TODO lo que leía (posts, interacciones, memoria)
+estaba fechado **al día siguiente**, contra una línea que decía "hoy es domingo".
+Se arregla al RENDERIZAR con `fecha_local()` (no se toca lo guardado: mezclar
+zonas en la misma columna sería peor). Un valor sin hora se devuelve tal cual —
+"2026-07-21" ya es una fecha, y convertirla la correría un día para atrás.
 
 ## 4. El grafo de menciones (flujo reactivo)
 
@@ -520,11 +557,57 @@ TOOLS` puede override-ar enable y scopes por nombre sin tocar código. El contra
 handler: `(args: dict, ctx: ToolContext) → ToolResult(text, image_path?)`. Los handlers
 viven en `botata.py` y se cierran sobre lo que necesitan (bsky, router, conn).
 
-Tools actuales (por scope predominante): `web_search` (Brave), `get_upcoming_events` /
+Tools actuales (por scope predominante): `web_search` (Brave) + `read_url`, `get_upcoming_events` /
 `create_event` (calendario), `summarize_feed` / `get_my_recent_posts` / `get_news` /
 `search_music` (Spotify) / `share_video` (YouTube) / `use_skill` / `reset_my_memory` /
-`block_me` (reply); `save_to_user_profile` / `save_to_memory` / `search_images` /
+`forget_about_me` /
+`like_post` / `block_me` (reply); `save_to_user_profile` / `save_to_memory` / `search_images` /
 `get_debug_info` / `get_help` (admin).
+
+**Artistas parecidos (2026-08-02).** `similar_artists(artist)` = **MusicBrainz**
+(identifica y desambigua: "Los Redondos" → Patricio Rey; "Sumo" → la banda argentina y
+no el homónimo de 3 oyentes) + **ListenBrainz Labs** (vecinos por datos de escucha).
+Ninguna de las dos pide API key. Existe porque a la app le quedó de Spotify **solo
+`/search`** (`related-artists` 403, `/recommendations` 404, `audio-features` 403): "algo
+parecido a X" no puede salir de Spotify. **No reemplaza a `search_music`** — devuelve
+ARTISTAS, y el link de Spotify lo sigue dando `search_music(artist=…)`; el loop de tools
+las encadena. Tres defensas, todas por motivos medidos: (1) **ritmo de 1 req/s** hacia
+MusicBrainz + User-Agent identificable, porque dos requests seguidas devuelven 503;
+(2) **cache en la kv con vencimiento de 30 días** (los vecinos de un artista no cambian
+de un día para otro); (3) **auto-reparación del algoritmo** — el endpoint de similares es
+de *Labs* y su enum ya cambió una vez (la string del 08-01 daba 400 el 08-02), así que
+ante un 400 se sacan las opciones válidas del propio mensaje de error y se reintenta.
+⚠️ Sesgo conocido: en consultas argentinas tira al canon (Charly y Cerati aparecen casi
+siempre) — no esperar rarezas.
+
+**Generar imágenes (2026-08-01).** `generate_image` CREA una imagen (vs. `search_images`,
+que busca en el catálogo indexado, y `get_latest_media`, que trae de una fuente en vivo).
+El modelo sale del router por el rol **`image_generate`** → alias `image_gen`, así que
+hereda endpoints y cadena de fallback como cualquier otro rol. `ModelRouter.generate_image`
+habla **dos formas de API** según `api` en el hop: `chat` (default — chat/completions con
+`modalities: [image, text]`, lo que habla OpenRouter) e `images` (`/v1/images/generations`,
+lo que hablan OpenAI, xAI/Grok y los servidores locales). Si la instancia no declara el
+alias, `tiene_rol()` da False y la tool se apaga sola en vez de pedirle un PNG a un modelo
+de texto. La tool **nace scope `admin`** (cada imagen se paga y el bot es público);
+ampliarla a `reply` es opt-in de la instancia. `IMAGE_GEN` = `{max_per_day, max_bytes, size}`:
+el tope diario se cuenta con los archivos del día en `scrape/generated/` (el archivo ES el
+registro, sin estado nuevo), y `max_bytes` existe porque **Bluesky rechaza blobs > 1 MB** y
+los generadores devuelven PNG de ~1,5 MB — se recomprime a JPEG con Pillow **si está
+instalada** (dependencia opcional; sin ella la tool avisa en vez de mandar algo que el canal
+va a rechazar). WhatsApp no tiene ese límite, por eso el tope es por instancia.
+
+**Buscar ≠ leer (2026-08-01).** `web_search` devuelve solo los snippets de Brave, que
+muy seguido no contienen el dato (medido: "dólar blue hoy" → tres resúmenes que dicen
+"acá seguí la cotización" y ni un número). `read_url` cierra el ciclo: baja una página,
+la pasa a texto plano y la devuelve recortada, de modo que con el loop de tools el bot
+encadena *buscar → elegir → leer → contestar*, y además puede abrir un link que alguien
+pegó en la conversación. Dos cuidados de diseño, porque las URLs llegan desde un grupo
+público: (1) **guarda de SSRF** — se resuelve el host y se rechaza si cualquiera de sus
+IPs no es global (loopback, LAN, `169.254.169.254`), revalidando **cada redirect**, así
+nadie le hace leer el bridge de WhatsApp en `127.0.0.1:8899` ni la metadata de cloud;
+(2) el resultado va rotulado como **dato, no instrucciones**, contra prompt injection
+en la página. Además `web_search` reintenta una vez ante 429 (el tier gratuito de Brave
+es ~1 req/s y el loop de tools puede buscar dos veces en una misma respuesta).
 
 **Config por comandos (T30):** el admin ajusta la configuración desde Bluesky con 6 tools
 scope `admin` (`get_bot_config` + `set_{tool,task,feed}_config`, `set_mcp_enabled`,
@@ -601,6 +684,39 @@ Tareas registradas:
 | `feed` | pase de LECTURA por cada feed configurado (aprende, nunca postea) | on |
 | `mentions` | poll + proceso de menciones | on |
 | `routines` | TODA la conducta proactiva con cadencia (rutinas en `routines/*.md`) | on, cada ciclo |
+| `calendar` / `actions` | anunciar eventos vencidos / ejecutar `bot_action` | on, cada ciclo |
+| `memory_compact` | compactación de memoria (se auto-gatea por tamaño) | on |
+
+La tarea `feed` es el **pase silencioso** (`_pase_silencioso`): TODO lo que el bot hace
+hacia adentro, en una vuelta y sobre el mismo material — aprender del feed, **elegir el
+humor del día** (sale de ese mismo clima) y **destilar lecciones** de su propia actividad.
+Las tareas `mood` y `reflection` **se retiraron como PeriodicTask** (2026-07-29): eran tres
+relojes para lo mismo. Cada parte conserva su gate — feed: intervalo por fuente; humor: uno
+por día; reflexión: `TASKS.reflection.{enabled,interval_hours}` sobre el cursor
+`task:reflection` de siempre, así que migrar no resetea la cadencia (`TASKS.reflection`
+sigue siendo config válida y se saltea en `apply_tasks_config`). Cada parte va aislada: un
+canal sin feed (WhatsApp, Telegram) o la red caída no pueden dejar al bot sin humor ni sin
+reflexión.
+
+La tarea `bio` **se retiró** (2026-07-28): la bio es la rutina `routines/bio.md`
+llamando a la tool `update_bio` (scope `admin` + `feed_reflection`). Era el caso más
+claro de duplicación — dos mecanismos para "hacé esto cada tanto" — y como rutina
+además puede dispararse *por un motivo* ("si te cambió el humor") y no solo por reloj.
+Un `TASKS.bio` viejo en settings ya no hace nada: el arranque avisa por log.
+
+**Fase de tools de los pases proactivos (`_fase_de_tools`, 2026-07-29)**: rutinas
+y acciones piden tools en **dos rondas**, no una. Con una sola, el modelo gastaba
+su única oportunidad en las tools de contexto (`summarize_feed`,
+`get_my_recent_posts`) y después no tenía cómo traer lo que iba a compartir —
+pero igual posteaba diciendo que lo compartía (7 de 12 pases de la rutina
+`canciones` en producción nunca llamaron `get_playlist_track`; uno declinó con
+"no puedo usar la herramienta de búsqueda de música"). La ronda 2 le muestra lo
+que ya trajo y le avisa que es su última oportunidad. Anti-loop: no se repite la
+misma tool con los mismos args. Cada tool va aislada (una que explota no se lleva
+el pase). Y `_rescatar_link` es la red final: si las tools trajeron UN link y el
+post no trae ninguno, se le pega (recortando el texto primero, para que el
+truncado del canal no se coma justo el link) — misma lección que la imagen en el
+flujo de replies.
 
 **Rutinas (2026-07-26, unifica el ex-heartbeat y los ex-rooms)**: una rutina = un
 archivo `routines/*.md` de la instancia — frontmatter `interval_hours` (cadencia
@@ -639,6 +755,11 @@ estricto (el lock global impide promoverlas a scopes públicos por post; la viej
 - **Feeds**: `get_feed_posts(type, id, since)` — dispatcher sobre `get_list_feed` /
   `get_custom_feed` / `get_timeline`, con paginación común (cap 5 páginas, corta en `since`).
 - **Moderación**: `block_user(handle)` (para `/blockme`).
+- **Aprobación**: `like_post(uri, cid)` — el gesto de "me gusta" del contrato Channel. Cada
+  canal lo resuelve con lo que tiene: like en Bluesky, favourite en Mastodon, reacción ❤️
+  en Discord y WhatsApp (en WhatsApp el bridge expone `POST /react`). La tool `like_post`
+  (scope `reply`, sin parámetros) actúa siempre sobre el post que el bot está leyendo, con
+  dedup en `kv` para que un reintento no duplique el gesto.
 - **Robustez**: login con timeout explícito (15s connect / 30s read) y 4 reintentos con
   backoff exponencial — un hipo de red en el arranque no mata el proceso.
 
@@ -671,17 +792,80 @@ spawnean procesos locales; el de Reddit usa fixtures). Convenciones:
 
 Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
 
+### Comando vs. tool (cuándo hace falta una barra)
+
+Un comando nuevo solo se justifica si hace algo **preciso e irreversible** (soltar
+un hilo, borrar memoria) o si **desambigua** dos capacidades que el modelo
+confunde (`/schedule` = calendario vs `/remember` = memoria). Todo lo demás —
+"¿qué sabés de mí?", "olvidate de que vivo en Rosario", "buscame un tema",
+"pasame una noticia" — el bot lo entiende hablando, y una barra solo agrega
+superficie que mantener, ruido en `/help` y le enseña a la comunidad a hablarle
+como a una terminal. Decisión del admin, 2026-07-29: **lo que falta casi nunca es
+un comando, es una tool.** `forget_about_me` nació de ahí — no había forma de
+borrar UN dato (solo `reset_my_memory`, todo o nada), y eso no se arreglaba con
+un `/olvida` sino con la capacidad.
+
+### Comandos-consulta (`/check-role`, `/bloques`): atajo literal en ClassifyNode
+
+`_CONSULTAS_LITERALES` resuelve el texto EXACTO sin llamar al modelo. Nació de un
+bug de producción (2026-07-29): un usuario mandó `/check-role` y el bot contestó
+"no existe /check-role". `HandleRoleQueryNode` y su ruteo estaban escritos **y
+testeados**, pero el `classify_prompt.md` nunca mencionó `is_role_query`: el modelo
+tenía que adivinar un booleano que nadie le pedía. Devolvió
+`is_command=True, command='check-role', role_query=False`, y al no ser admin la
+mención cayó al flujo de reply, donde el bot improvisó una negación. Dos mitades
+testeadas y el cable del medio sin conectar. Se arregló en las dos capas: el atajo
+literal (piso: no se le pregunta a un LLM lo que es una comparación de strings) y
+la cláusula en el prompt (techo: las variantes en criollo — "qué permisos tengo" —
+tienen que seguir funcionando).
+
+### Comandos determinísticos (sin LLM, interceptados antes del grafo)
+
+Dos familias, y la diferencia importa. Los de **pausa y de hilo** (`/sleep`,
+`/wake`, `/stop`, `/start`) corren en `process_mention`, antes de cualquier llamada
+a un modelo: tienen que funcionar con el router caído o el presupuesto quemado, y
+se exigen **exactos** (el texto sin @menciones debe ser solo el comando) — un
+`/stop` dentro de una frase no cuenta, así nadie suelta un hilo ni duerme al bot
+sin querer. El resto los reconoce el **classify_prompt** y los resuelve una tool:
+son interpretados a propósito, porque "agendá el cumple de ana el 15/8" pide
+entender una fecha. Ahí la barra es un atajo, no un requisito: la variante en
+criollo funciona igual.
+
+| Comando | Quién | Qué hace |
+|---|---|---|
+| `/sleep` · `/wake` | solo admins | **duerme al bot entero** (kv `bot_paused`): no responde a no-admins ni corre tareas proactivas. A los admins les sigue contestando — por ahí viaja el `/wake`. |
+| `/schedule` · `/agendar` | cualquiera | atajo al **calendario** (`create_event`). Interpretado, no literal: la fecha la resuelve el LLM ("el sábado a las 21"). Un usuario común solo agenda para sí mismo; `bot_action` requiere admin o grupo habilitado. |
+| `/agenda` · `/eventos` | cualquiera | qué se viene (`get_upcoming_events`) |
+| `/stop` · `/start` | cualquiera | **suelta ESTE hilo** (kv `hilo_mudo:<root_uri>`): silencio total en ese hilo, incluso para el admin, hasta que alguien mande `/start`. Las menciones del hilo soltado se marcan `ignored` para no reprocesarlas en cada poll. |
+
+La pausa global se llamaba `/stop` + `/resume` hasta 2026-07-29. `/stop` pasó al
+hilo porque para un usuario que está hablando con el bot, "stop" significa
+"callate acá"; y la global quedó como `/sleep` + `/wake` porque esto es un bot con
+personalidad, no un servicio: se duerme y se despierta. Soltar un hilo es un
+comando LITERAL a propósito: leerlo semánticamente ("ya está", "basta") haría que
+el bot abandone conversaciones por su cuenta, que es el bug que esto evita. Si el
+admin manda `/stop` por costumbre, la confirmación le aclara que dormirlo del todo
+es `/sleep`.
+
 ## 15. Operación
 
 - **Entrypoints CLI**: `python -m botata` (loop completo; `--mode open|admin_only`) ·
   `--proactive` (pase de lectura one-shot) · `--routines` ·
-  `--fetch-feeds [--backfill]`. Satélites: `mem_admin.py`,
+  `--fetch-feeds [--backfill]` · `--hello-world [--publicar]`. Satélites: `mem_admin.py`,
   `catalog.py`, `scrape_ig.py`, `migrate_maripobot.py`.
 - **Panel de configuración** (`python config_ui.py`, T22): UI web solo-localhost (stdlib,
   cero deps) sobre settings.json/.env/news_sites.json/skills. Credenciales write-only
   (la API nunca devuelve valores), validación server-side, escrituras atómicas con `.bak`.
   Settings/.env/news requieren reiniciar el bot; el toggle de skills es hot-reload.
   Es la UI del núcleo: las futuras UIs por canal serán interfaces separadas.
+- **Presentación inicial (hello world)**: último paso de la puesta en marcha. `POST
+  /api/hello` (sección «Presentación» de la UI) o `python -m botata --hello-world
+  [--publicar]`. `hello_world_pendientes()` corta ANTES de escribir nada si falta identidad,
+  credencial del canal, key del LLM o el SOUL sigue siendo la plantilla neutra, y devuelve
+  qué falta y en qué sección se completa — presentarse como "un bot deliberadamente neutro"
+  es peor que no presentarse. El texto lo escribe el bot con su propia identidad (las
+  instrucciones de QUÉ lograr viven en `prompts/presentacion.md` de la instancia), se puede
+  editar antes de publicar y queda marcado en `kv.hello_world_posted`: uno por instancia.
 - **Credenciales**: nunca en el repo (verificado: `.env` y `config/{bluesky,instagram}.json`
   jamás entraron al historial). Viven en el repo hermano privado `butterbot-secrets` con
   scripts `pull`/`push`.

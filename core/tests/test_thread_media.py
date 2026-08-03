@@ -159,3 +159,36 @@ def test_describe_media_never_raises():
         raise RuntimeError("x")
     bc.set_media_describer(boom)
     assert bc._describe_media(O(embed=None)) == ""
+
+
+# ─── De dónde salen los bytes de la imagen ──────────────────────────────────
+_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000d4944415478da63fccf1003000305010e854a8c00"
+    "00000049454e44ae426082")
+
+
+def test_describe_una_imagen_que_es_un_archivo_local(tmp_path):
+    """La media de WhatsApp viaja cifrada: la baja el bridge y el motor solo ve
+    un path. Si el describidor supiera únicamente de URLs, el bot contestaría
+    que no puede ver imágenes con la imagen ahí."""
+    foto = tmp_path / "foto.png"
+    foto.write_bytes(_PNG)
+    vistas = []
+
+    class LLM:
+        def chat(self, msgs, **kw):
+            vistas.append(msgs[1]["content"][0]["image_url"]["url"][:22])
+            return "un mapache lavando una galletita"
+
+    assert b._vision_describe_url(LLM(), str(foto)) == "un mapache lavando una galletita"
+    assert vistas == ["data:image/png;base64,"]
+
+
+def test_un_archivo_que_no_existe_no_rompe_la_respuesta():
+    """Best-effort: perder la descripción es aceptable, romper la respuesta no."""
+    class LLM:
+        def chat(self, *a, **k):
+            raise AssertionError("no debería llegar al modelo")
+
+    assert b._vision_describe_url(LLM(), "/no/existe/foto.jpg") == ""

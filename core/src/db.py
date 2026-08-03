@@ -1534,6 +1534,25 @@ def pinned_user_facts(conn: sqlite3.Connection, handle: str,
         "ORDER BY id LIMIT ?", (handle, limit)).fetchall()]
 
 
+def delete_user_fact(conn: sqlite3.Connection, fact_id: int, handle: str) -> str | None:
+    """Borra UN hecho de `handle` (y su embedding). Devuelve el texto borrado, o None.
+
+    Scopeado por handle a propósito: aunque el id venga equivocado, nunca puede
+    borrar el hecho de otra persona. El índice FTS lo limpia su trigger; el vector
+    en vec0 NO tiene trigger y hay que borrarlo a mano (si no, queda huérfano y
+    sigue ganando búsquedas con un rowid que ya no existe).
+    """
+    row = conn.execute(
+        "SELECT fact_text FROM user_facts WHERE id = ? AND handle = ?",
+        (fact_id, handle)).fetchone()
+    if row is None:
+        return None
+    conn.execute("DELETE FROM user_facts_vec WHERE rowid = ?", (fact_id,))
+    conn.execute("DELETE FROM user_facts WHERE id = ?", (fact_id,))
+    conn.commit()
+    return row["fact_text"]
+
+
 def set_user_fact_pinned(conn: sqlite3.Connection, fact_id: int, pinned: bool) -> bool:
     cur = conn.execute("UPDATE user_facts SET pinned = ? WHERE id = ?",
                        (1 if pinned else 0, fact_id))

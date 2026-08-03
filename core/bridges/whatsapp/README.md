@@ -24,27 +24,47 @@ Compila a un binario único: quien instale Botata no necesita instalar Go.
 ./whatsapp-bridge.exe -data ../../../bots/<instancia>/whatsapp
 ```
 
-Muestra un link/QR por consola y lo publica en `/status`, que es de donde lo
-toma la UI de Botata (⚙️ → WhatsApp). Se escanea desde el teléfono en
-**WhatsApp → Ajustes → Dispositivos vinculados**. La sesión queda en
+Escucha en `127.0.0.1:8899` (fuera del rango que usa la UI de config, que
+arranca en 8787 y se corre al siguiente libre: los dos procesos conviven
+mientras se configura el canal).
+
+Muestra un link por consola, lo publica en `/status` y lo dibuja en `/qr.png`,
+que es lo que muestra la **UI de Botata → sección Canal** cuando el canal es
+`whatsapp` (ahí mismo se refresca solo mientras el QR rota). Se escanea desde el
+teléfono en **WhatsApp → Ajustes → Dispositivos vinculados**. La sesión queda en
 `session.db` y se reusa: no hay que volver a escanear en cada arranque.
 
 ## Configurar el canal
 
-Con la sesión viva, `GET /groups` lista los grupos con su JID — que no se ve por
-ningún lado desde el teléfono y es lo que va en `WHATSAPP_CHAT_IDS`:
+Con la sesión viva, la UI lista los grupos con su JID y los deja marcar con un
+checkbox — el JID no se ve por ningún lado desde el teléfono. A mano es
+`GET /groups`:
 
 ```bash
-curl -s http://127.0.0.1:8787/groups
+curl -s http://127.0.0.1:8899/groups
 ```
 
-En el `settings.json` de la instancia:
+Queda en el `settings.json` de la instancia:
 
 ```json
 "CHANNEL": "whatsapp",
 "WHATSAPP_CHAT_IDS": ["12036300000000@g.us"],
-"WHATSAPP_BRIDGE_URL": "http://127.0.0.1:8787"
+"WHATSAPP_BRIDGE_URL": "http://127.0.0.1:8899"
 ```
+
+Y **la misma lista va al bridge** con `-chats`, que es lo que hace que ni
+siquiera reciba lo demás:
+
+```bash
+./whatsapp-bridge.exe -data ../../../bots/<instancia>/whatsapp \
+  -chats "12036300000000@g.us"
+```
+
+Sin `-chats` el bridge procesa todos los chats del número y **baja su media a
+disco** —incluidas las fotos de las conversaciones personales del dueño— para
+que después el motor las descarte. La UI arma el comando con los chats ya
+puestos (⚙️ → Canal); si cambiás la lista, hay que reiniciar el bridge con el
+comando nuevo.
 
 **`WHATSAPP_CHAT_IDS` no es opcional** y el motor se niega a arrancar sin él.
 Todos los dispositivos vinculados de un número reciben **todos** los mensajes,
@@ -57,6 +77,7 @@ otro bot ya vinculado (cada uno actúa en sus chats).
 | Endpoint | Qué hace |
 |---|---|
 | `GET /status` | `{connected, qr, me:{id,name}}` |
+| `GET /qr.png` | el QR vigente como imagen (404 si ya está vinculado) |
 | `GET /messages?after=<cursor>` | mensajes nuevos + cursor |
 | `GET /messages/<id>` | releer uno (para reconstruir citas) |
 | `POST /send` | `{chat_id, text, reply_to?, media_path?}` |

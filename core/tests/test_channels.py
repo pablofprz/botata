@@ -217,6 +217,7 @@ class FakeDiscordHttp:
 
     def __init__(self):
         self.posted = []
+        self.reactions = []
         bot_hello = _msg(15, "hola gente, soy botata", author=_BOT)
         self.messages = {
             "15": bot_hello,
@@ -245,6 +246,9 @@ class FakeDiscordHttp:
         if method == "POST" and path == "/channels/111/messages":
             self.posted.append({"json": json, "files": files, "data": data})
             return FakeResp({"id": "99"})
+        if method == "PUT" and path.startswith("/channels/111/") and "/reactions/" in path:
+            self.reactions.append(path)
+            return FakeResp(None, status=204)
         return FakeResp({"message": "Not Found"}, status=404)
 
 
@@ -439,3 +443,31 @@ def test_discord_tope_de_paginas_por_ciclo(caplog):
         vistas = ch.get_mentions()
     assert len(vistas) == 30                             # 3 páginas × 10
     assert "menciones sin leer" in caplog.text           # el admin se entera
+
+
+# ─── "me gusta" (like/favourite/reacción) ────────────────────────────────────
+def test_mastodon_like_post():
+    ch, api = make_channel()
+    api.favs = []
+    api.status_favourite = api.favs.append
+    assert ch.like_post("11", "11") is True
+    assert api.favs == ["11"]
+
+
+def test_mastodon_like_post_falla_sin_romper():
+    ch, api = make_channel()
+    def _explota(_id):
+        raise RuntimeError("403")
+    api.status_favourite = _explota
+    assert ch.like_post("11", "11") is False
+
+
+def test_discord_like_post_reacciona():
+    ch, http = make_discord()
+    assert ch.like_post("111/20", "20") is True
+    assert http.reactions == ["/channels/111/messages/20/reactions/%E2%9D%A4%EF%B8%8F/@me"]
+
+
+def test_discord_like_post_falla_sin_romper():
+    ch, http = make_discord()
+    assert ch.like_post("222/20", "20") is False   # canal que el fake no conoce → 404
