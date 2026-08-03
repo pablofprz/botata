@@ -63,9 +63,16 @@ class ToolResult:
 class ToolContext:
     """Todo lo que un handler necesita del runtime. `state` es el MentionState (o el
     estado del loop proactivo); `conn` es la conexión sqlite. Handlers que necesiten
-    más se cierran sobre los globals de botata.py."""
+    más se cierran sobre los globals de botata.py.
+
+    `scope` es desde dónde se llamó: contestando a alguien (reply) o por iniciativa
+    propia (feed_reflection). No es lo mismo — si un usuario pide un tema puntual hay
+    que dárselo aunque el bot ya lo haya compartido, y si el bot elige solo qué
+    postear, repetir es el error. Default 'reply', que es el caso conservador.
+    """
     state: dict[str, Any]
     conn: Any
+    scope: str = "reply"
 
 
 ToolHandler = Callable[[dict, ToolContext], ToolResult]

@@ -174,6 +174,11 @@ def validate_settings(s: dict) -> list[str]:
     if not isinstance(rondas, int) or isinstance(rondas, bool) or not 1 <= rondas <= 5:
         errs.append("TOOL_ROUNDS debe ser un entero de 1 a 5 (cada ronda extra es "
                     "una llamada más al modelo por respuesta)")
+    reintentos = s.get("MENTION_MAX_RETRIES", 3)
+    if (not isinstance(reintentos, int) or isinstance(reintentos, bool)
+            or not 1 <= reintentos <= 20):
+        errs.append("MENTION_MAX_RETRIES debe ser un entero de 1 a 20 (cada reintento "
+                    "reejecuta la fase de tools de esa mención)")
 
     conns = s.get("CONNECTORS", {})
     if not isinstance(conns, dict):
@@ -1796,6 +1801,9 @@ def make_handler(store: ConfigStore):
             self.send_response(code)
             self.send_header("Content-Type", ctype + "; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            # Sin esto el browser cachea el HTML y, tras actualizar el motor,
+            # el admin sigue viendo (y operando) la UI vieja.
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 

@@ -51,7 +51,8 @@ if "--init" in sys.argv:
 
 import instance  # resolución del directorio de instancia (T28c)
 import db as dbmod  # módulo de persistencia local (la var `db` es la conexión sqlite)
-from channels import strip_fake_media, truncate_post  # helpers de salida compartidos
+from channels import (MentionRefetchError, strip_fake_media,
+                      truncate_post)  # helpers de salida compartidos
 import budget as budgetmod  # guard de presupuesto diario de tokens
 import clearsky as clearsky_mod  # proxy de la API pública de ClearSky ("quién me bloquea")
 from tools import ToolRegistry, ToolContext, ToolResult, ToolHandler, Scope, ALL_SCOPES  # framework de tools
@@ -201,6 +202,9 @@ MASTODON_BASE_URL  : str  = settings.get("MASTODON_BASE_URL", "")
 # Discord: canales que el bot escucha (ids de canal, strings). El primero es
 # el canal principal (destino de posts proactivos).
 DISCORD_CHANNEL_IDS: list = settings.get("DISCORD_CHANNEL_IDS", [])
+# Ventana de conversación del canal (mismo concepto que en WhatsApp): cuántos
+# mensajes recientes ve el bot como contexto al contestar en Discord.
+DISCORD_CONTEXT_MESSAGES: int = int(settings.get("DISCORD_CONTEXT_MESSAGES", 20))
 # WhatsApp: chats que el bot escucha (jids). El primero es el principal. El
 # allowlist es lo que permite compartir el número con otro cliente vinculado:
 # todos los dispositivos reciben todo, así que la partición la hace cada bot.
@@ -250,6 +254,11 @@ POLL_INTERVAL      : int  = settings.get("POLL_INTERVAL_SECONDS", 60)
 # siguiente. Cada ronda extra es UNA llamada más al modelo del rol, así que el
 # default conservador es 1 y se sube por instancia.
 TOOL_ROUNDS        : int  = max(1, min(5, int(settings.get("TOOL_ROUNDS", 1))))
+# Tope de intentos por mención (T55). Una mención 'failed' se reintenta en cada
+# poll; sin tope, un endpoint caído se vuelve un loop de horas que además
+# reejecuta la fase de tools. Agotado el tope se abandona: es la decisión
+# correcta, porque reintentar no arregla lo que está roto afuera.
+MENTION_MAX_RETRIES: int  = max(1, min(20, int(settings.get("MENTION_MAX_RETRIES", 3))))
 FEEDS_CONFIG       : list = settings.get("FEEDS", [])
 TOOLS_CONFIG       : dict = settings.get("TOOLS", {})
 MCP_CONFIG         : dict = settings.get("MCP", {})
@@ -690,21 +699,45 @@ def has_replied(conn: sqlite3.Connection, uri: str) -> bool:
     """
     True = skip this post.
     'replied', 'pending', 'ignored' → skip.
-    'failed' → retry.
+    'failed' → retry, hasta MENTION_MAX_RETRIES reintentos (el primer intento
+               no cuenta: con tope 3 son 4 ejecuciones en total).
     missing  → process.
     """
     row = conn.execute(
-        "SELECT status FROM replied_posts WHERE uri = ?", (uri,)
+        "SELECT status, attempts FROM replied_posts WHERE uri = ?", (uri,)
     ).fetchone()
     if row is None:
         return False
-    return row[0] in ("replied", "pending", "ignored")
+    if row[0] in ("replied", "pending", "ignored"):
+        return True
+    if row[0] == "failed" and row[1] >= MENTION_MAX_RETRIES:
+        # Se agotaron los intentos: la mención queda sin respuesta. Es a
+        # propósito — el reintento eterno no arregla un endpoint caído, solo
+        # quema plata reejecutando la fase de tools cada poll. En debug porque
+        # esto se evalúa en CADA poll mientras la mención siga en la ventana de
+        # notificaciones; el aviso visible se da una vez, al arrancar.
+        log.debug("mención %s abandonada tras %d intentos fallidos", uri, row[1])
+        return True
+    return False
 
 
 def mark_pending(conn: sqlite3.Connection, uri: str, cid: str, author: str, mode: str) -> None:
+    """Marca la mención como en curso. Si venía de 'failed', cuenta el reintento.
+
+    El intento se cuenta acá, al EMPEZAR, y en ningún otro lado: si se contara al
+    fallar, un flujo que explota antes de PostReplyNode (o un proceso que muere a
+    mitad) no sumaría nunca y el tope no cerraría el loop que viene a cerrar.
+    """
+    # El retry también refresca replied_at (y mode): dejarlos congelados en el
+    # primer intento hacía que _rescatar_pending_colgados viera "colgada hace
+    # 30 min" a una mención recién reintentada y la flipeara al instante —
+    # anulaba su gracia de 10 minutos y quemaba el tope al ritmo del poll.
     conn.execute(
-        "INSERT OR IGNORE INTO replied_posts (uri, cid, author, status, replied_at, mode) "
-        "VALUES (?, ?, ?, 'pending', ?, ?)",
+        "INSERT INTO replied_posts (uri, cid, author, status, replied_at, mode) "
+        "VALUES (?, ?, ?, 'pending', ?, ?) "
+        "ON CONFLICT(uri) DO UPDATE SET status = 'pending', attempts = attempts + 1, "
+        "replied_at = excluded.replied_at, mode = excluded.mode "
+        "WHERE replied_posts.status = 'failed'",
         (uri, cid, author, datetime.now(timezone.utc).isoformat(), mode),
     )
     conn.commit()
@@ -1257,6 +1290,10 @@ def describe_bsky_error(e: Exception) -> str:
 
 class BskyClient:
 
+    # Tope de un post en este canal (el contrato Channel lo declara por clase;
+    # los pases proactivos lo leen en vez de asumir el 295 de Bluesky en todos).
+    MAX_POST_LEN = 295
+
     # El default de httpx (5s connect) es muy justo para la red de prod;
     # un ConnectTimeout transitorio en el arranque no debe matar el proceso.
     _LOGIN_RETRIES = 4
@@ -1474,12 +1511,16 @@ class BskyClient:
         """Reconstruct a mention dict (with thread context) from a single post URI.
         Used to retry failed/stale mentions on startup — the poll only sees the latest
         25 notifications, so older failed mentions must be refetched by URI. Returns
-        None if the post is deleted/gone (caller should mark it 'ignored')."""
+        None SOLO si el post no existe (borrado); si no se pudo averiguar (red,
+        5xx) lanza MentionRefetchError — el caller la deja como failed."""
         try:
             resp = self._client.app.bsky.feed.get_post_thread({"uri": uri})
         except Exception as e:
-            log.warning("get_mention_by_uri: fetch failed for %s: %s", uri, e)
-            return None
+            # El AppView responde 'NotFound' para un URI que no resuelve; eso
+            # sí es "borrado". Todo lo demás no autoriza a descartar.
+            if "notfound" in str(e).lower():
+                return None
+            raise MentionRefetchError(f"{type(e).__name__}: {e}") from e
         leaf = resp.thread
         if not hasattr(leaf, "post"):
             return None
@@ -1499,20 +1540,36 @@ class BskyClient:
             "thread_root_cid": root_cid,
         }
 
+    # https://bsky.app/profile/{actor}/lists/{rkey} — la URL que se copia del
+    # navegador. `lists` ↔ graph.list y `feed` ↔ feed.generator.
+    _WEB_URI_RE = re.compile(
+        r"^https?://bsky\.app/profile/(?P<actor>[^/]+)/(?P<kind>lists|feed)/(?P<rkey>[^/?#]+)")
+    _WEB_KIND = {"lists": "app.bsky.graph.list", "feed": "app.bsky.feed.generator"}
+
     def resolve_list_uri(self, uri: str) -> str:
         """
         Convert at://handle/app.bsky.graph.list/xxx to at://did:plc:.../app.bsky.graph.list/xxx.
         get_list_feed requires a DID-based URI — handles don't resolve in that endpoint.
         If the URI already contains a DID, returns it unchanged.
+
+        También acepta la URL web (https://bsky.app/profile/.../lists/...): es lo
+        que el admin pega desde el navegador, y tomarla como at:// hacía que
+        "https:" se tratara como handle — miles de getProfile("https:") fallando
+        y la fuente muerta en silencio.
         """
+        m = self._WEB_URI_RE.match(uri)
+        if m:
+            uri = f"at://{m['actor']}/{self._WEB_KIND[m['kind']]}/{m['rkey']}"
+
         # at://did:plc:xxx/... — already resolved
         if uri.startswith("at://did:"):
             return uri
 
         # at://handle.bsky.social/app.bsky.graph.list/xxx
         parts = uri.removeprefix("at://").split("/", 1)
-        if len(parts) != 2:
-            log.warning("resolve_list_uri: unexpected URI format %s", uri)
+        if not uri.startswith("at://") or len(parts) != 2:
+            log.warning("resolve_list_uri: unexpected URI format %s "
+                        "(se espera at://... o https://bsky.app/profile/...)", uri)
             return uri
 
         handle, rest = parts
@@ -1711,7 +1768,7 @@ class BskyClient:
         return resp.uri
 
 
-    def post(self, text: str, limit: int = 295, media_path: str | None = None,
+    def post(self, text: str, limit: int | None = None, media_path: str | None = None,
              target: str | None = None) -> str:
         """
         Post a standalone skeet (no reply), optionally with an attached image OR video.
@@ -1719,6 +1776,7 @@ class BskyClient:
         punctuation before `limit` to avoid cutting mid-word.
         `target` (rutinas) se ignora: Bluesky es un solo timeline.
         """
+        limit = limit or self.MAX_POST_LEN
         text = strip_fake_media(text)
         if len(text) > limit:
             cut = text[:limit]
@@ -1783,7 +1841,7 @@ def build_channel():
         for r in routinesmod.load_routines(ROUTINES_DIR):
             if r.channel and str(r.channel) not in ids:
                 ids.append(str(r.channel))
-        return DiscordChannel(token, ids)
+        return DiscordChannel(token, ids, context_messages=DISCORD_CONTEXT_MESSAGES)
     if CHANNEL == "whatsapp":
         from channels import WhatsAppChannel
         if not WHATSAPP_CHAT_IDS:
@@ -2617,7 +2675,10 @@ def run_calendar_pass(bsky: "BskyClient", router: ModelRouter,
 
 
 _URL_EN_TEXTO = re.compile(r"https?://\S+")
-_POST_LIMIT = 295          # el default de `Channel.post` en todos los canales
+# Fallback si el canal no declara MAX_POST_LEN (el contrato Channel lo declara
+# por clase: 295 Bluesky, 490 Mastodon, 1990 Discord, 4000 WhatsApp — escribir
+# telegramas de 300 chars en canales de 2000+ no tenía razón de ser).
+_POST_LIMIT = 295
 
 
 def _fase_de_tools(llm: RoleLLM, registry: "ToolRegistry | None", *, scope: str,
@@ -2674,7 +2735,8 @@ def _fase_de_tools(llm: RoleLLM, registry: "ToolRegistry | None", *, scope: str,
             # Aislado POR TOOL: una que explota (Spotify caído) no puede llevarse
             # el pase entero ni las otras que sí anduvieron.
             try:
-                outcome = registry.execute(cname, cargs, ToolContext(state={}, conn=conn))
+                outcome = registry.execute(
+                    cname, cargs, ToolContext(state={}, conn=conn, scope=scope))
             except Exception as e:
                 log.warning("%s: la tool %s falló: %s", etiqueta, cname, e)
                 continue
@@ -2685,7 +2747,7 @@ def _fase_de_tools(llm: RoleLLM, registry: "ToolRegistry | None", *, scope: str,
     return links
 
 
-def _rescatar_link(text: str, links: list[str]) -> str:
+def _rescatar_link(text: str, links: list[str], limit: int = _POST_LIMIT) -> str:
     """Si el post promete algo que vino de una tool y se comió el link, lo pega.
 
     Misma lección que la imagen en el flujo de replies: lo que la tool trajo ES
@@ -2697,7 +2759,7 @@ def _rescatar_link(text: str, links: list[str]) -> str:
     if len(unicos) != 1 or _URL_EN_TEXTO.search(text or ""):
         return text
     link = unicos[0]
-    sobra = _POST_LIMIT - len(link) - 2
+    sobra = limit - len(link) - 2
     if sobra < 40:
         return text            # el link no entra sin destrozar el texto
     log.info("rescate: el post no traía el link de la tool — lo agrego (%s)", link)
@@ -2757,7 +2819,8 @@ def run_actions_pass(bsky: "BskyClient", router: ModelRouter,
                         a["event_at"], a["title"], decision.reason[:80])
     if not decision.should_post:
         return
-    text = _rescatar_link((decision.text or "").strip(), links)
+    text = _rescatar_link((decision.text or "").strip(), links,
+                          getattr(bsky, "MAX_POST_LEN", _POST_LIMIT))
     if not text:
         log.info("actions: should_post sin texto — skip")
         return
@@ -3114,7 +3177,8 @@ def _run_routine_pass(bsky: "BskyClient", router: ModelRouter, conn: sqlite3.Con
              decision.reason[:80])
     if not decision.should_post:
         return
-    text = _rescatar_link((decision.text or "").strip(), links)
+    text = _rescatar_link((decision.text or "").strip(), links,
+                          getattr(bsky, "MAX_POST_LEN", _POST_LIMIT))
     # Mismo guard que en las replies: un link que el bot no leyó se lo inventó.
     # `links` son los que trajeron las tools de este pase, así que valen.
     text = _sacar_links_inventados(text, "\n".join([system, pregunta, *links]))
@@ -3316,6 +3380,7 @@ def _mood_state_get(conn: sqlite3.Connection) -> dict | None:
     try:
         return json.loads(raw)
     except Exception:
+        log.warning("mood_state corrupto en kv — se ignora (lo regenera el pase diario)")
         return None
 
 
@@ -3344,7 +3409,14 @@ def current_mood(conn: sqlite3.Connection):
     if str(cfg.get("mode", "manual")).lower() == "auto":
         st = _mood_state_get(conn)
         if st and st.get("date") == now_local().date().isoformat() and st.get("mood"):
-            return moodmod.get_mood(MOODS_DIR, st["mood"])
+            mood = moodmod.get_mood(MOODS_DIR, st["mood"])
+            if mood:
+                return mood
+            # El mood decidido ya no existe (archivo borrado/renombrado/off en
+            # caliente): sin este fallback el bot quedaba SIN mood el resto del
+            # día, en silencio.
+            log.warning("mood: %r decidido hoy pero su archivo ya no está — uso el default",
+                        st["mood"])
         return _default_mood()
     fixed = ((cfg.get("manual", {}) or {}).get("fixed") or "").strip()
     return moodmod.get_mood(MOODS_DIR, fixed) if fixed else _default_mood()
@@ -3481,8 +3553,11 @@ def run_mood_pass(router: ModelRouter, conn: sqlite3.Connection, *,
         return
     today = now_local().date().isoformat()
     st = _mood_state_get(conn)
-    if not force and st and st.get("date") == today and st.get("mood"):
-        return  # ya decidido hoy
+    if (not force and st and st.get("date") == today and st.get("mood")
+            and moodmod.get_mood(MOODS_DIR, st["mood"]) is not None):
+        return  # ya decidido hoy Y el archivo del mood sigue existiendo — si el
+                # admin lo borró/renombró en caliente, se re-decide en vez de
+                # quedar "en nada" el resto del día
 
     climate  = dbmod.recent_interactions_all(conn, limit=climate_limit)
     activity = recent_bot_activity(conn, limit=activity_limit)
@@ -3529,9 +3604,13 @@ def run_mood_pass(router: ModelRouter, conn: sqlite3.Connection, *,
     if not chosen:  # el modelo alucinó un name → fallback al primero disponible
         log.warning("mood: el modelo eligió %r (inexistente) — uso %r", decision.mood, index[0][0])
         chosen = moodmod.get_mood(MOODS_DIR, index[0][0])
+    # SIN changed_at: ese timestamp arma la histéresis de choose_mood, y el pase
+    # diario no es un cambio reactivo — estampar acá bloqueaba la ventana
+    # reactiva de toda la mañana (y de paso pisa el changed_at de anoche, que
+    # sobrevivía el cambio de fecha y bloqueaba igual).
     dbmod.kv_set(conn, "mood_state", json.dumps(
         {"date": today, "mood": chosen.name, "reason": decision.reason,
-         "mode": "auto", "changed_at": now_local().isoformat()}))
+         "mode": "auto"}))
     log.info("mood: hoy el bot está %s — %s", chosen.name, decision.reason)
 
 
@@ -4481,8 +4560,11 @@ def _tool_get_playlist_track(args: dict, ctx: ToolContext) -> ToolResult:
             log.warning("get_playlist_track: no pude leer la playlist %s: %s", pl, e)
     if not tracks:
         return ToolResult(text="no pude leer ninguna playlist ahora (o están vacías)")
-    recientes = recent_bot_posts(ctx.conn, limit=30)
-    frescos = [t for t in tracks if not any(t["url"] in p for p in recientes)]
+    # Anti-repetición por id de tema y no por "¿el link está en los últimos 30
+    # posts?": en un día movido 30 posts son unas horas, y el bot volvía a sacar
+    # el mismo tema de la playlist a la vuelta. Misma memoria que search_music.
+    quemados = _temas_ya_compartidos(ctx.conn)
+    frescos = [t for t in tracks if t.get("id") not in quemados]
     track = random.choice(frescos or tracks)
     return ToolResult(text=f"Tema al azar de la playlist comunitaria: "
                            f"{track['title']} — {track['artist']}\n"
@@ -4900,24 +4982,75 @@ def _tool_similar_artists(args: dict, ctx: ToolContext) -> ToolResult:
     ))
 
 
+_TRACK_EN_TEXTO = re.compile(r"open\.spotify\.com/track/([A-Za-z0-9]+)")
+
+
+def _temas_ya_compartidos(conn) -> set[str]:
+    """Ids de Spotify que el bot ya posteó. El feed ES la memoria de lo compartido:
+    si el link salió, el tema está quemado y no hay que volver a ofrecerlo."""
+    if conn is None:
+        return set()
+    try:
+        rows = conn.execute(
+            "SELECT text FROM bot_posts WHERE text LIKE '%open.spotify.com/track/%' "
+            "ORDER BY posted_at DESC LIMIT 300").fetchall()
+    except Exception:
+        return set()
+    return {i for r in rows for i in _TRACK_EN_TEXTO.findall(r[0] or "")}
+
+
+def _tema_unico(t: dict) -> tuple[str, str]:
+    """Clave de canción, no de grabación: Spotify devuelve el MISMO tema con varios
+    ids (single, álbum, recopilado) y llenaba media lista con repetidos."""
+    return (t.get("title", "").strip().lower(), t.get("artist", "").strip().lower())
+
+
 def _tool_search_music(args: dict, ctx: ToolContext) -> ToolResult:
     """T13: busca temas en Spotify por consulta (canción/artista/vibe) y devuelve
-    título+artista+link. La opinión la compone el LLM del nodo (reply/feed)."""
+    título+artista+link. La opinión la compone el LLM del nodo (reply/feed).
+
+    Cuando el bot busca por iniciativa propia (scope feed_reflection: la rutina de
+    canciones) se sacan los temas que ya compartió. Medido en producción el
+    2026-08-03: con el mismo humor la rutina arma casi la misma query, Spotify es
+    determinístico y devolvía primero el mismo tema — Callejeros dos veces en tres
+    pases, y en uno de ellos el ÚNICO resultado fue el que ya había posteado. Es un
+    filtro y no un pedido al prompt porque el modelo no puede elegir distinto si le
+    llega un solo candidato. Contestándole a alguien NO se filtra: si te piden ese
+    tema, es ese tema.
+    """
     query  = (args.get("query") or "").strip()
     artist = (args.get("artist") or "").strip()
     if not (query or artist):
         return ToolResult(text="necesito una canción, artista o vibe para buscar")
     if not (os.environ.get("SPOTIFY_CLIENT_ID") and os.environ.get("SPOTIFY_CLIENT_SECRET")):
         return ToolResult(text="la música no está configurada")
+    propia = ctx.scope == Scope.FEED_REFLECTION
+    # Pidiendo de a 5 no queda margen para filtrar: si los 5 están quemados no
+    # queda nada. Se pide hondo y se recorta después de filtrar.
     try:
-        tracks = search_spotify_tracks(query, limit=5, artist=artist or None)
+        tracks = search_spotify_tracks(query, limit=20 if propia else 5,
+                                       artist=artist or None)
     except Exception as e:
         log.error("search_music: %s", e)
         return ToolResult(text="no pude buscar música ahora")
     que = f"{artist} {query}".strip()
     if not tracks:
         return ToolResult(text=f"no encontré temas para '{que}'")
-    lines = [f"- {t['title']} — {t['artist']} ({t['url']})" for t in tracks]
+
+    vistos: set[tuple[str, str]] = set()
+    unicos = [t for t in tracks if not (_tema_unico(t) in vistos or vistos.add(_tema_unico(t)))]
+    if propia:
+        quemados = _temas_ya_compartidos(ctx.conn)
+        frescos  = [t for t in unicos if t.get("id") not in quemados]
+        if not frescos:
+            # Que se entere: sin esto el modelo posteaba igual el repetido.
+            log.info("search_music: los %d resultados de %r ya se compartieron",
+                     len(unicos), que)
+            return ToolResult(text=f"todos los temas que encontré para '{que}' ya los "
+                                   f"compartiste. Buscá otra cosa: otro artista, otra "
+                                   f"época, otro género.")
+        unicos = frescos
+    lines = [f"- {t['title']} — {t['artist']} ({t['url']})" for t in unicos[:5]]
     return ToolResult(text="\n".join(lines))
 
 
@@ -5638,7 +5771,9 @@ def _make_group_feed_resolver(bsky: "BskyClient") -> "Callable[[str], frozenset[
     `following` (a quién sigue el bot). Un feed algorítmico (type `feed`) no
     tiene miembros → vacío con warning. Error de red → se sirve el último
     resultado bueno (un hiccup no le saca permisos a nadie); sin cache previo
-    → vacío (cerrado).
+    → vacío (cerrado), y ESE vacío también se cachea un rato: esto se evalúa
+    en cada chequeo de permisos, y una fuente rota (URI mal configurada, red
+    caída) martillaba la API en cada mención — miles de reintentos por día.
     """
     cache: dict[str, tuple[float, frozenset[str]]] = {}
 
@@ -5650,6 +5785,7 @@ def _make_group_feed_resolver(bsky: "BskyClient") -> "Callable[[str], frozenset[
         feed = next((f for f in FEEDS_CONFIG if f.get("name") == name), None)
         if feed is None:
             log.warning("USER_GROUPS: 'feed:%s' no matchea ningún feed de FEEDS", name)
+            cache[name] = (now + _GROUP_FEED_TTL_S, frozenset())
             return frozenset()
         ftype = feed.get("type", "list")
         try:
@@ -5659,6 +5795,7 @@ def _make_group_feed_resolver(bsky: "BskyClient") -> "Callable[[str], frozenset[
                 members = frozenset(bsky.get_follows())
             else:
                 log.warning("USER_GROUPS: 'feed:%s' es type=%s — sin membresía definida", name, ftype)
+                cache[name] = (now + _GROUP_FEED_TTL_S, frozenset())
                 return frozenset()
         except Exception as e:
             log.warning("USER_GROUPS: no pude resolver miembros de 'feed:%s': %s%s",
@@ -5666,6 +5803,7 @@ def _make_group_feed_resolver(bsky: "BskyClient") -> "Callable[[str], frozenset[
             if hit:  # stale-ok: reintento corto, sirviendo lo último bueno
                 cache[name] = (now + 60, hit[1])
                 return hit[1]
+            cache[name] = (now + 60, frozenset())  # cache negativo: no martillar
             return frozenset()
         cache[name] = (now + _GROUP_FEED_TTL_S, members)
         log.info("USER_GROUPS: 'feed:%s' → %d miembros", name, len(members))
@@ -6048,16 +6186,23 @@ def build_tool_registry(config: dict | None = None, *,
         _tool_forget_about_me,
         {Scope.REPLY, Scope.ADMIN},
     )
-    reg.register(
-        "block_me",
-        "Bloquea al usuario que te habla Y borra TODA su memoria (hechos, embeddings, "
-        "eventos, relaciones y perfil). Acción destructiva e irreversible. Llamala SOLO "
-        "cuando el usuario pide EXPLÍCITAMENTE que lo bloquees (ej. '/blockme', "
-        "'bloqueame y olvidate de mí'). Nunca bloquea ni borra a terceros.",
-        {"type": "object", "properties": {}, "required": []},
-        _make_block_me_tool(bsky),
-        {Scope.REPLY, Scope.ADMIN},
-    )
+    # En canales sin bloqueo real (Discord, WhatsApp: CAN_BLOCK=False) la tool
+    # ni se registra — ofrecerla era prometerle al usuario algo que nunca iba a
+    # pasar. Con bsky=None (registry de la config UI) se registra igual: es
+    # solo el catálogo.
+    if bsky is None or getattr(bsky, "CAN_BLOCK", True):
+        reg.register(
+            "block_me",
+            "Bloquea al usuario que te habla Y borra TODA su memoria (hechos, embeddings, "
+            "eventos, relaciones y perfil). Acción destructiva e irreversible. Llamala SOLO "
+            "cuando el usuario pide EXPLÍCITAMENTE que lo bloquees (ej. '/blockme', "
+            "'bloqueame y olvidate de mí'). Nunca bloquea ni borra a terceros.",
+            {"type": "object", "properties": {}, "required": []},
+            _make_block_me_tool(bsky),
+            {Scope.REPLY, Scope.ADMIN},
+        )
+    else:
+        log.info("block_me: el canal no soporta bloquear usuarios — tool no registrada")
     reg.register(
         "like_post",
         "Marcá 'me gusta' en el mensaje que estás leyendo (like en Bluesky, "
@@ -6257,7 +6402,7 @@ def build_tool_registry(config: dict | None = None, *,
         _tool_use_skill,
         {Scope.REPLY, Scope.FEED_REFLECTION},
     )
-    _register_admin_config_tools(reg)  # T30: config por comandos de admin
+    _register_admin_config_tools(reg, bsky=bsky, router=router)  # T30: config por comandos de admin
     # Lazy de verdad: el SDK de MCP se importa solo si hay algún server PRENDIDO.
     # Con la sección MCP presente pero todo enabled:false (el default), ni se carga
     # — y el bot arranca aunque el entorno no tenga el paquete `mcp` instalado.
@@ -6285,7 +6430,9 @@ def build_tool_registry(config: dict | None = None, *,
     return reg
 
 
-def _register_admin_config_tools(reg: ToolRegistry) -> None:
+def _register_admin_config_tools(reg: ToolRegistry, *,
+                                 bsky: "BskyClient | None" = None,
+                                 router: "ModelRouter | None" = None) -> None:
     """T30: tools scope ADMIN para ajustar la config desde la plataforma.
 
     Doble efecto: persistir a settings.json (validado, atómico — T22) y aplicar
@@ -7262,6 +7409,13 @@ class HandleBlockQueryNode:
         self.conn = conn
 
     def run(self, state: MentionState) -> dict:
+        # ClearSky, DIDs y get_profile_handles son TODOS Bluesky: en otro canal
+        # este nodo moría con AttributeError y la mención quedaba 'failed'
+        # reintentándose. El atajo de ClassifyNode y la clasificación LLM no
+        # filtran por canal, así que el gate va acá.
+        if CHANNEL != "bluesky":
+            return {"reply_text": "lo de los bloqueos es cosa de Bluesky — "
+                                  "en este canal no aplica"}
         handle = state["author_handle"]
         did = self._get_author_did(handle)
         if not did:
@@ -7589,13 +7743,18 @@ def bot_paused(conn: sqlite3.Connection) -> bool:
         raw = dbmod.kv_get(conn, _PAUSE_KEY)
         return bool(raw and json.loads(raw).get("paused"))
     except Exception:
+        # Fail-open (despausado), pero QUE SE VEA: un JSON roto acá despausaba
+        # al bot sin dejar rastro de por qué.
+        log.warning("estado de pausa ilegible en kv — asumo despausado", exc_info=True)
         return False
 
 
 def set_bot_paused(conn: sqlite3.Connection, paused: bool, by: str) -> None:
     dbmod.kv_set(conn, _PAUSE_KEY, json.dumps({
         "paused": paused, "by": by,
-        "at": datetime.now().isoformat(timespec="seconds"),
+        # local_now() (TIMEZONE de la instancia), no el reloj del sistema:
+        # todo lo demás estampa así y mezclar ya se pagó caro (ver fecha_local).
+        "at": dbmod.local_now().isoformat(timespec="seconds"),
     }))
 
 
@@ -7809,7 +7968,9 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
     - 'pending' stale (el bot murió antes de pasarlos a 'replied'/'failed') → se
       pasan a 'failed' porque has_replied saltea 'pending' y nunca se reintentarían.
     - 'failed' que cayeron fuera de la ventana de las últimas 25 notifs → la poll
-      de Bluesky no los vuelve a traer, acá los refetcheamos por URI.
+      de Bluesky no los vuelve a traer, acá los refetcheamos por URI. Los que ya
+      agotaron MENTION_MAX_RETRIES no se tocan: si no, cada reinicio del bot
+      reabriría el mismo loop que el tope viene a cerrar.
     - En modo open, los 'ignored' que descartó el filtro admin_only (mode guardado
       = 'admin_only') vuelven a 'failed' para responderles. Los 'ignored' de posts
       borrados quedan como están.
@@ -7827,13 +7988,30 @@ def retry_stuck_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: 
     db.execute("UPDATE replied_posts SET status = 'failed' WHERE status = 'pending'")
     db.commit()
     rows = db.execute(
-        "SELECT uri, cid, author, mode FROM replied_posts WHERE status = 'failed'"
+        "SELECT uri, cid, author, mode FROM replied_posts "
+        "WHERE status = 'failed' AND attempts < ?", (MENTION_MAX_RETRIES,)
     ).fetchall()
+    abandonadas = db.execute(
+        "SELECT COUNT(*) FROM replied_posts WHERE status = 'failed' AND attempts >= ?",
+        (MENTION_MAX_RETRIES,)).fetchone()[0]
+    if abandonadas:
+        log.warning("%d mención(es) abandonadas tras %d intentos — no se reintentan más "
+                    "(subí MENTION_MAX_RETRIES si querés otra vuelta)",
+                    abandonadas, MENTION_MAX_RETRIES)
     if not rows:
         return
     log.info("Retrying %d stuck/failed mention(s) from last run", len(rows))
     for r in rows:
-        mention = bsky.get_mention_by_uri(r["uri"])
+        try:
+            mention = bsky.get_mention_by_uri(r["uri"])
+        except Exception as e:
+            # Red/endpoint caído ≠ post borrado: la mención queda 'failed' y
+            # se reintenta en el próximo arranque. Descartar acá convertía un
+            # arranque con el PDS caído 30 segundos en menciones perdidas para
+            # siempre. Catch amplio a propósito: ante la duda, no descartar.
+            log.warning("no pude refetchear %s (%s: %s) — queda failed para "
+                        "el próximo arranque", r["uri"], type(e).__name__, e)
+            continue
         if mention is None:
             log.warning("Could not refetch %s (deleted?) — marking ignored", r["uri"])
             # mode se pisa con el actual para que el rescate de arriba no lo
@@ -7955,6 +8133,12 @@ def run(mode: str) -> None:
         except KeyboardInterrupt:
             log.info("Shutting down.")
             break
+        except Exception:
+            # El loop 24/7 NO muere por una iteración rota: guard.check() y
+            # bot_paused() tocan la DB (que la config UI también abre), y un
+            # `database is locked` acá mataba el proceso en silencio — sin
+            # systemd que lo levante. Se loguea y se sigue al próximo ciclo.
+            log.error("iteración del loop principal falló — sigo", exc_info=True)
         time.sleep(POLL_INTERVAL)
 
 
@@ -7993,23 +8177,36 @@ def _announce_budget_transition(bsky: BskyClient, conn: sqlite3.Connection,
 
 def _thread_participants(thread_context: str) -> list[str]:
     """Handles que participaron del thread. Las líneas del contexto las armamos
-    nosotros con formato fijo `handle: texto` (_thread_context) → parseo seguro."""
+    nosotros con formato fijo `handle: texto` (_thread_context) → parseo seguro.
+
+    Qué cuenta como handle depende del canal: dominio con punto (Bluesky /
+    Mastodon), username sin espacios (Discord) o teléfono en dígitos (WhatsApp).
+    El filtro anterior exigía el punto y el grafo de relaciones no-opeaba en
+    silencio fuera de Bluesky. Sigue siendo best-effort: una línea rara se
+    saltea (bump_relationship además solo registra usuarios ya conocidos)."""
     seen: list[str] = []
     for line in thread_context.splitlines():
         h = line.split(":", 1)[0].strip()
-        if h and "." in h and " " not in h and h not in seen:  # forma de handle (dominio)
+        if not h or " " in h or h in seen:
+            continue
+        if "." in h or h.isdigit() or (h.isascii() and h.replace("_", "").isalnum()):
             seen.append(h)
     return seen
 
 
 def _bump_thread_relationships(conn: sqlite3.Connection, author: str,
-                               thread_context: str) -> None:
+                               thread_context: str,
+                               bot_handle: str | None = None) -> None:
     """Grafo de relaciones: el autor de la mención interactuó con los participantes
     del thread. Mecánico y best-effort (solo entre usuarios ya conocidos — el gate
     vive en db.bump_relationship); jamás bloquea el procesamiento."""
     try:
+        # El bot se excluye por el handle DEL CANAL (`bot_handle`), no solo por
+        # BSKY_HANDLE: fuera de Bluesky ese setting está vacío y el bot se
+        # contaba a sí mismo como participante.
+        propios = {author, BSKY_HANDLE, bot_handle}
         for other in _thread_participants(thread_context):
-            if other not in (author, BSKY_HANDLE):
+            if other not in propios:
                 dbmod.bump_relationship(conn, author, other, kind="thread")
     except Exception:
         log.error("bump_thread_relationships falló para @%s", author, exc_info=True)
@@ -8017,10 +8214,14 @@ def _bump_thread_relationships(conn: sqlite3.Connection, author: str,
 
 def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -> None:
     """Poll de menciones (extraído del loop en T27; comportamiento idéntico)."""
+    # El rescate corre ANTES de filtrar y aunque no haya menciones nuevas: una
+    # colgada en 'pending' es filtrada por has_replied, así que si era la única
+    # notificación, adentro del `if mentions:` no corría nunca — quedaba
+    # 'pending' para siempre con el proceso vivo. Es un UPDATE barato.
+    _rescatar_pending_colgados(db)
     mentions = [m for m in bsky.get_mentions() if not has_replied(db, m["uri"])]
     if mentions:
         log.info("Found %d mention(s) to process", len(mentions))
-        _rescatar_pending_colgados(db)
         for mention in mentions:
             ctx, root_uri, root_cid, leaf_media = bsky.get_thread_info(mention["uri"], mention["cid"])
             mention["thread_context"]  = ctx
@@ -8028,7 +8229,8 @@ def _poll_mentions(graph, db: sqlite3.Connection, bsky: BskyClient, mode: str) -
             mention["thread_root_cid"] = root_cid
             if leaf_media:  # media del post que menciona al bot (video/GIF/imagen)
                 mention["text"] = f"{mention['text']} {leaf_media}".strip()
-            _bump_thread_relationships(db, mention["author_handle"], ctx)
+            _bump_thread_relationships(db, mention["author_handle"], ctx,
+                                       bot_handle=getattr(bsky, "handle", None))
             process_mention(graph, db, mention, mode, channel=bsky)
         # mark_all_read is UI hygiene only (keeps Polci's notif tab clean);
         # it no longer gates dedup — the DB does.

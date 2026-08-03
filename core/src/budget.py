@@ -10,8 +10,11 @@ Diseño (patrón scheduler.py — infra genérica, no conoce botata):
 - Estado persistido en la tabla `kv` de la DB (sobrevive reinicios), clave
   'budget_state': {today, snapshot, state, announced_today, wake_announced_today}.
 - Día en hora ARGENTINA (UTC-3), consistente con events/heartbeat.
-- Fail-open pegajoso: si el endpoint de créditos no responde, se mantiene el
-  estado anterior (un hiccup de red no despierta ni duerme al bot).
+- Fail-open pegajoso INTRADÍA: si el endpoint de créditos no responde, se
+  mantiene el estado anterior (un hiccup de red no despierta ni duerme al bot).
+  Pero el cambio de día SIEMPRE despierta, con o sin medición: día nuevo =
+  presupuesto nuevo, y exigir una lectura exitosa para despertar convertía un
+  /credits caído en un sleeping permanente.
 - `check()` devuelve la transición ('sleep' | 'wake' | None); los ANUNCIOS los
   postea el caller (botata) — este módulo no habla con Bluesky.
 """
@@ -84,6 +87,14 @@ class BudgetGuard:
         self._fetch = fetch
         self.daily_usd = float(daily_usd)
         self.enabled = bool(enabled)
+        if self.enabled and self.daily_usd <= 0:
+            # Un settings editado a mano puede traer 0 o negativo (la UI valida
+            # solo al guardar): con eso, `spent >= 0` es True desde el primer
+            # check de cada día = dormido para siempre. Mejor guard apagado y
+            # que se note en el log.
+            log.warning("budget: daily_usd=%.2f inválido (debe ser > 0) — "
+                        "guard DESHABILITADO", self.daily_usd)
+            self.enabled = False
         self.check_interval_s = check_interval_s
         self._now_day = now_day
         self._cache: tuple[float, Optional[float]] | None = None  # (ts, total_usage)
@@ -105,11 +116,16 @@ class BudgetGuard:
 
     # ─── lecturas ───────────────────────────────────────────────────────────
     def _usage_cached(self) -> Optional[float]:
+        """El cache guarda (expira_en, total). Un fallo se cachea 60s, no los
+        600 del intervalo normal: cachear el None a plazo completo dejaba al
+        bot 10 minutos sin medición por cada hiccup — y si estaba sleeping,
+        10 minutos más dormido de lo necesario."""
         now = time.monotonic()
-        if self._cache is not None and now - self._cache[0] < self.check_interval_s:
+        if self._cache is not None and now < self._cache[0]:
             return self._cache[1]
         total = self._fetch()
-        self._cache = (now, total)
+        ttl = self.check_interval_s if total is not None else min(60, self.check_interval_s)
+        self._cache = (now + ttl, total)
         return total
 
     def usage_today(self, state: dict | None = None) -> Optional[float]:
@@ -134,11 +150,23 @@ class BudgetGuard:
 
         state = self._load()
         dirty = False
+        transition: Optional[str] = None
 
         today = self._now_day()
         if state["today"] != today:
             state.update(today=today, snapshot=None,
                          announced_today=False, wake_announced_today=False)
+            if state["state"] == "sleeping":
+                # Día nuevo = presupuesto nuevo: el despertar NO depende de
+                # poder leer /credits. Antes exigía una lectura exitosa, y con
+                # el endpoint caído (key rotada, provider sin /credits, outage)
+                # el sleeping era PERMANENTE — el bot desaparecía sin ruido.
+                # Si de verdad sigue quemado, el próximo check con medición lo
+                # vuelve a dormir.
+                state["state"] = "active"
+                state["wake_announced_today"] = True
+                transition = "wake"
+                log.info("budget: día nuevo — despierto (con o sin medición)")
             self._cache = None  # lectura fresca para el snapshot del día nuevo
             dirty = True
 
@@ -154,13 +182,12 @@ class BudgetGuard:
         spent = (max(0.0, current - state["snapshot"])
                  if current is not None and state["snapshot"] is not None else None)
         if spent is None:
-            self.burned = state["state"] == "sleeping"  # pegajoso ante fallas
+            self.burned = state["state"] == "sleeping"  # pegajoso ante fallas intradía
             if dirty:
                 self._save(state)
-            return None
+            return transition
         self.burned = spent >= self.daily_usd
 
-        transition: Optional[str] = None
         if self.burned and state["state"] == "active":
             state["state"] = "sleeping"
             if not state["announced_today"]:

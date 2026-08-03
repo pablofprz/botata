@@ -85,7 +85,15 @@ def run_due(tasks: list[PeriodicTask], *,
     alcanza; el canal inyecta uno que sabe leer sus errores de red)."""
     describe = describe_error or _default_describe
     for task in tasks:
-        if not task.enabled or not _is_due(task, get_last):
+        try:
+            # _is_due lee la DB (get_last): dentro del aislamiento por tarea,
+            # porque un `database is locked` acá afuera escapaba run_due entero
+            # — y en el loop principal eso era el proceso muerto en silencio.
+            if not task.enabled or not _is_due(task, get_last):
+                continue
+        except Exception:
+            log.error("tarea '%s': no pude evaluar si está al día", task.name,
+                      exc_info=True)
             continue
         transient = False
         try:

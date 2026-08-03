@@ -6,6 +6,7 @@
 	"CHANNEL": "bluesky",
 	"MASTODON_BASE_URL": "",
 	"DISCORD_CHANNEL_IDS": [],
+	"DISCORD_CONTEXT_MESSAGES": 20,
 	"WHATSAPP_CHAT_IDS": [],
 	"WHATSAPP_BRIDGE_URL": "http://127.0.0.1:8899",
 	"WHATSAPP_CONTEXT_MESSAGES": 20,
@@ -18,6 +19,7 @@
 	"IMAGE_MODEL": "google/gemini-2.5-flash",
 	"POLL_INTERVAL_SECONDS": 60,
 	"TOOL_ROUNDS": 1,
+	"MENTION_MAX_RETRIES": 3,
 	"MEMBRILLA": {
 		"repo": "",
 		"commands": []

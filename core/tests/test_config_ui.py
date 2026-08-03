@@ -28,6 +28,18 @@ _SETTINGS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _restaurar_local_tz():
+    """El store aplica el TIMEZONE de sus settings con set_local_tz — un GLOBAL
+    de db.py. Los tests de mood usan Asia/Tokyo, y sin restore quedaba pegada
+    para el resto de la suite: test_events_today_ar fallaba solo cuando Tokio
+    ya había cruzado la medianoche (flaky por hora del día, 12:00-21:00 AR)."""
+    import db as dbmod
+    saved = dbmod.LOCAL_TZ
+    yield
+    dbmod.LOCAL_TZ = saved
+
+
 @pytest.fixture
 def store(tmp_path):
     (tmp_path / "config").mkdir()

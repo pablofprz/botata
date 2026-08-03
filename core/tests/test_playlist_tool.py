@@ -16,10 +16,13 @@ import db as d
 import spotify_auth as sa
 from tools import ToolContext
 
+# El id y el sufijo de la URL son EL MISMO string (como en Spotify real): el
+# anti-repetición quema por id extraído de la URL posteada — si difieren acá,
+# el filtro nunca matchea y el test queda a merced del random.choice.
 _TRACKS = [
-    {"id": "t1", "title": "Flaca", "artist": "Andrés Calamaro",
+    {"id": "1", "title": "Flaca", "artist": "Andrés Calamaro",
      "url": "https://open.spotify.com/track/1"},
-    {"id": "t2", "title": "Zamba de mi esperanza", "artist": "Los Chalchaleros",
+    {"id": "2", "title": "Zamba de mi esperanza", "artist": "Los Chalchaleros",
      "url": "https://open.spotify.com/track/2"},
 ]
 

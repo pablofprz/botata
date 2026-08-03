@@ -151,6 +151,29 @@ def test_update_bio_disponible_para_rutinas():
     assert "update_bio" not in [t.name for t in reg.available(Scope.REPLY)]
 
 
+def test_update_bio_ejecuta_con_el_canal_del_registry(conn, monkeypatch):
+    """Regresión: update_bio vivía en _register_admin_config_tools, que no
+    recibía bsky/router — toda llamada moría con NameError ('name bsky is not
+    defined') y la bio quedó congelada una semana. Acá se EJECUTA el handler
+    real vía el registry armado con canal y router, como en producción."""
+    from tools import ToolContext
+    llm, ch = FakeChatLLM(), FakeChannel()
+    _patch_llm(monkeypatch, llm)
+    reg = b.build_tool_registry(b.TOOLS_CONFIG, bsky=ch, router=object())
+    out = reg.get("update_bio").handler({}, ToolContext(state={}, conn=conn))
+    assert "bio nueva" in out.text
+    assert ch.bios == ["soy botata, hoy ando eufórica ⚡"]
+
+
+def test_update_bio_sin_canal_degrada_con_gracia(conn):
+    """Sin bsky/router (p. ej. el registry de la config UI) la tool avisa,
+    no explota."""
+    from tools import ToolContext
+    reg = b.build_tool_registry(b.TOOLS_CONFIG)
+    out = reg.get("update_bio").handler({}, ToolContext(state={}, conn=conn))
+    assert "no puedo tocar la bio" in out.text
+
+
 def test_la_tarea_bio_ya_no_existe():
     from scheduler import PeriodicTask, apply_tasks_config
     tareas = [PeriodicTask("routines", lambda: None)]

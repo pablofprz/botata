@@ -211,7 +211,10 @@ CREATE TABLE IF NOT EXISTS replied_posts (
     author     TEXT NOT NULL,
     status     TEXT NOT NULL DEFAULT 'pending',   -- pending|replied|failed|ignored
     replied_at TEXT NOT NULL,
-    mode       TEXT NOT NULL
+    mode       TEXT NOT NULL,
+    -- intentos fallidos acumulados (T55): 'failed' se reintenta en cada poll,
+    -- así que sin contador una caída de endpoints es un loop infinito.
+    attempts   INTEGER NOT NULL DEFAULT 0
 );
 
 -- ─── feed_cursors: cursores por feed ─────────────────────────────────
@@ -428,6 +431,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "pinned" not in cols:
         conn.execute("ALTER TABLE user_facts ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         log.info("migración: user_facts.pinned agregada")
+
+    # replied_posts.attempts (T55, 2026-08-02): tope de reintentos. Una mención
+    # 'failed' se reprocesa en cada poll mientras siga en la ventana de notifs;
+    # con los endpoints caídos eso fueron 1h20 de reintentos cada 4 minutos
+    # (reejecutando la fase de tools, que ahora cuesta plata). Las que ya
+    # existen arrancan en 0: el tope corre de acá en adelante.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(replied_posts)")}
+    if "attempts" not in cols:
+        conn.execute("ALTER TABLE replied_posts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        log.info("migración: replied_posts.attempts agregada")
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(interactions)")}
     if "superseded_by" not in cols:

@@ -77,6 +77,23 @@ def test_error_no_frena_las_demas():
     assert calls == [1]
 
 
+def test_cursor_que_explota_no_frena_las_demas():
+    """Regresión: _is_due lee la DB vía get_last y corría FUERA del try por
+    tarea — un `database is locked` (la config UI comparte la SQLite) escapaba
+    run_due y en el loop principal mataba el proceso en silencio."""
+    calls = []
+
+    def get_last_roto(name):
+        if name == "task:rota":
+            raise RuntimeError("database is locked")
+        return None
+
+    tasks = [PeriodicTask("rota", lambda: calls.append("no"), interval_hours=1),
+             PeriodicTask("sana", lambda: calls.append("si"), interval_hours=1)]
+    run_due(tasks, get_last=get_last_roto, save_last=lambda name: None)  # no lanza
+    assert calls == ["si"]                    # la rota se saltea, la sana corre
+
+
 def test_network_error_solo_warning(caplog):
     class FakeNetErr(Exception):
         pass

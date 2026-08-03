@@ -23,6 +23,13 @@ U1 = "user1.bsky.social"
 U2 = "user2.bsky.social"
 
 
+def _futuro(dias: int) -> str:
+    """Fecha relativa: los eventos hardcodeados (_futuro(1)) vencían y estos
+    tests pasaban de verde a rojo con la medianoche — enseñaban a ignorar rojos."""
+    from datetime import date, timedelta
+    return (date.today() + timedelta(days=dias)).isoformat()
+
+
 @pytest.fixture(autouse=True)
 def _admin_de_test(monkeypatch):
     monkeypatch.setattr(b, "ADMIN_HANDLE", ADMIN)
@@ -46,35 +53,35 @@ def _ctx(conn, author=None):
 def test_user_creates_only_for_self_ignores_handle(conn):
     # user1 intenta agendar "para" user2 → debe quedar como evento de user1.
     b._tool_create_event(
-        {"title": "cumple", "event_at": "2026-08-01", "handle": U2}, _ctx(conn, U1))
+        {"title": "cumple", "event_at": _futuro(1), "handle": U2}, _ctx(conn, U1))
     assert any(e["handle"] == U1 for e in d.upcoming_events(conn, handle=U1))
     # user2 no recibió nada.
     assert not any(e["handle"] == U2 for e in d.upcoming_events(conn, handle=None))
 
 
 def test_admin_creates_community_event(conn):
-    b._tool_create_event({"title": "juntada", "event_at": "2026-08-02"}, _ctx(conn, ADMIN))
+    b._tool_create_event({"title": "juntada", "event_at": _futuro(2)}, _ctx(conn, ADMIN))
     evs = d.upcoming_events(conn, handle=None)
     assert any(e["title"] == "juntada" and e["handle"] is None for e in evs)
 
 
 def test_admin_creates_for_specific_user(conn):
     b._tool_create_event(
-        {"title": "charla", "event_at": "2026-08-03", "handle": U2}, _ctx(conn, ADMIN))
+        {"title": "charla", "event_at": _futuro(3), "handle": U2}, _ctx(conn, ADMIN))
     assert any(e["title"] == "charla" and e["handle"] == U2
                for e in d.upcoming_events(conn, handle=U2))
 
 
 def test_create_event_is_idempotent(conn):
-    b._tool_create_event({"title": "repetido", "event_at": "2026-08-04"}, _ctx(conn, ADMIN))
-    r = b._tool_create_event({"title": "repetido", "event_at": "2026-08-04"}, _ctx(conn, ADMIN))
+    b._tool_create_event({"title": "repetido", "event_at": _futuro(4)}, _ctx(conn, ADMIN))
+    r = b._tool_create_event({"title": "repetido", "event_at": _futuro(4)}, _ctx(conn, ADMIN))
     assert "ya estaba agendado" in r.text
     assert len(d.upcoming_events(conn, handle=None)) == 1
 
 
 def test_admin_cannot_target_user_without_profile(conn):
     r = b._tool_create_event(
-        {"title": "x", "event_at": "2026-08-05", "handle": "nadie.bsky.social"}, _ctx(conn, ADMIN))
+        {"title": "x", "event_at": _futuro(5), "handle": "nadie.bsky.social"}, _ctx(conn, ADMIN))
     assert "no tiene perfil" in r.text
 
 
@@ -86,10 +93,10 @@ def test_create_event_requires_title_and_date(conn):
 def test_everyone_sees_all_events(conn):
     # No hay eventos privados: el bot es de comunidades. `handle` dice de quién
     # es el evento (a quién saludar), no quién puede verlo.
-    b._tool_create_event({"title": "comunidad-ev", "event_at": "2026-09-01"}, _ctx(conn, ADMIN))
+    b._tool_create_event({"title": "comunidad-ev", "event_at": _futuro(10)}, _ctx(conn, ADMIN))
     b._tool_create_event(
-        {"title": "user2-ev", "event_at": "2026-09-02", "handle": U2}, _ctx(conn, ADMIN))
-    b._tool_create_event({"title": "user1-ev", "event_at": "2026-09-03"}, _ctx(conn, U1))
+        {"title": "user2-ev", "event_at": _futuro(11), "handle": U2}, _ctx(conn, ADMIN))
+    b._tool_create_event({"title": "user1-ev", "event_at": _futuro(12)}, _ctx(conn, U1))
     out = b._tool_get_upcoming_events({}, _ctx(conn, U1)).text
     assert "comunidad-ev" in out and "user1-ev" in out
     assert "user2-ev" in out  # ve también el cumple/evento de otro
@@ -97,7 +104,7 @@ def test_everyone_sees_all_events(conn):
 
 def test_admin_and_proactive_loop_see_all(conn):
     b._tool_create_event(
-        {"title": "user2-ev", "event_at": "2026-09-02", "handle": U2}, _ctx(conn, ADMIN))
+        {"title": "user2-ev", "event_at": _futuro(11), "handle": U2}, _ctx(conn, ADMIN))
     assert "user2-ev" in b._tool_get_upcoming_events({}, _ctx(conn, ADMIN)).text
     # loop proactivo: ctx sin author_handle (FeedState) → ve todo
     assert "user2-ev" in b._tool_get_upcoming_events({}, _ctx(conn)).text

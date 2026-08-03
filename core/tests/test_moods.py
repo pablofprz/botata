@@ -398,3 +398,39 @@ def test_el_humor_sigue_siendo_uno_por_dia(conn, monkeypatch):
     _fake_rolellm(monkeypatch, "angry", "segunda decisión")
     b._pase_silencioso(_GrafoFalso(), None, conn, None)
     assert b.current_mood(conn).name == "snarky"   # no la repisó
+
+
+# ─── mood clavado "en nada" (barrida 2026-08-03) ─────────────────────────────
+
+def _estado_hoy(conn, mood):
+    d.kv_set(conn, "mood_state", json.dumps(
+        {"date": b.now_local().date().isoformat(), "mood": mood, "mode": "auto"}))
+
+
+def test_mood_borrado_en_caliente_cae_al_default(conn):
+    """Regresión: si el .md del mood decidido se borra/renombra en caliente,
+    current_mood devolvía None y el bot quedaba SIN mood el resto del día."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "default": "upbeat"}
+    _estado_hoy(conn, "ya-no-existe")
+    m = b.current_mood(conn)
+    assert m and m.name == "upbeat"
+
+
+def test_mood_borrado_en_caliente_se_redecide(conn, monkeypatch):
+    """Y el pase diario no debe saltearse por un mood que ya no resuelve:
+    el skip "ya decidido hoy" validaba el string, no que el archivo exista."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    _estado_hoy(conn, "ya-no-existe")
+    _fake_rolellm(monkeypatch, "prickly", "recalculando")
+    b.run_mood_pass(None, conn)                  # sin force
+    assert b.current_mood(conn).name == "prickly"
+
+
+def test_el_pase_diario_no_arma_histeresis(conn, monkeypatch):
+    """El pase diario no es un cambio reactivo: si estampara changed_at, la
+    histéresis de choose_mood bloqueaba la ventana reactiva de la mañana."""
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    _fake_rolellm(monkeypatch, "prickly", "amanecí así")
+    b.run_mood_pass(None, conn, force=True)
+    st = json.loads(d.kv_get(conn, "mood_state"))
+    assert "changed_at" not in st

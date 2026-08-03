@@ -125,3 +125,39 @@ def test_estado_corrupto_regenera(conn):
     d.kv_set(conn, "budget_state", "{no es json")
     g, _ = make_guard(conn, FakeFetch(10.0), daily=1.0)
     assert g.check() is None and g.burned is False
+
+
+def test_dia_nuevo_despierta_aunque_credits_este_caido(conn):
+    """Regresión: despertar exigía una lectura EXITOSA de /credits — con el
+    endpoint caído (key rotada, provider sin /credits, outage), un estado
+    sleeping era PERMANENTE y el bot no corría nada, menciones incluidas.
+    Día nuevo = presupuesto nuevo: se despierta con o sin medición."""
+    g, days = make_guard(conn, FakeFetch(10.0, 11.5, None), daily=1.0)
+    g.check()                          # snapshot
+    assert g.check() == "sleep"        # quemado
+    days["value"] = "2026-07-20"       # rollover con /credits caído (None)
+    assert g.check() == "wake"         # despierta igual
+    assert g.burned is False
+
+
+def test_dia_nuevo_quemado_de_verdad_vuelve_a_dormir(conn):
+    """El despertar incondicional no regala presupuesto: si al medir el día
+    nuevo el gasto ya supera el tope, el mismo pase lo vuelve a dormir."""
+    g, days = make_guard(conn, FakeFetch(10.0, 11.5, 20.0, 21.5), daily=1.0)
+    g.check()
+    assert g.check() == "sleep"
+    days["value"] = "2026-07-20"
+    assert g.check() == "wake"         # rollover: snapshot 20.0, gasto 0
+    assert g.check() == "sleep"        # gasto 1.5 ≥ 1.0 → duerme de nuevo
+    assert g.burned is True
+
+
+def test_daily_usd_cero_deshabilita_con_warning(conn, caplog):
+    """Regresión: daily_usd=0 editado a mano en settings hacía `0 >= 0` = True
+    desde el primer check del día — dormido para siempre sin salida."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="botata.budget"):
+        g, _ = make_guard(conn, FakeFetch(10.0), daily=0)
+    assert g.enabled is False
+    assert g.check() is None and g.burned is False
+    assert "DESHABILITADO" in caplog.text
