@@ -189,3 +189,38 @@ if __name__ == "__main__":
             traceback.print_exc()
     print(f"\n{len(tests) - failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ─── params por hop → extra_body (passthrough al proveedor) ──────────────────
+# `params` existe para prender capacidades del proveedor desde la config (el
+# caso que lo parió: `reasoning: {enabled: true}` de OpenRouter en deepseek
+# flash). Vive por hop: el fallback local no entiende los params del primario.
+
+def test_params_del_hop_llegan_al_extra_body():
+    r = ModelRouter(
+        {"a": {"base_url": "http://a/v1", "api_key": "x"}},
+        {"al": [{"endpoint": "a", "model": "m",
+                 "params": {"reasoning": {"enabled": True}}}]},
+        {"rol": "al"})
+    t = r._chain("rol")[0]
+    body = t.extra_body(guided_json={"type": "object"})
+    assert body["reasoning"] == {"enabled": True}
+    assert body["guided_json"] == {"type": "object"}   # el fijo de la llamada gana
+
+
+def test_hop_sin_params_no_ensucia_el_body():
+    r = ModelRouter(
+        {"a": {"base_url": "http://a/v1", "api_key": "x"}},
+        {"al": [{"endpoint": "a", "model": "m"}]},
+        {"rol": "al"})
+    assert r._chain("rol")[0].extra_body() == {}
+
+
+def test_el_fijo_de_la_llamada_pisa_al_param_homonimo():
+    r = ModelRouter(
+        {"a": {"base_url": "http://a/v1", "api_key": "x"}},
+        {"al": [{"endpoint": "a", "model": "m",
+                 "params": {"guided_json": "basura", "temperature": 0.2}}]},
+        {"rol": "al"})
+    body = r._chain("rol")[0].extra_body(guided_json={"ok": 1})
+    assert body["guided_json"] == {"ok": 1} and body["temperature"] == 0.2

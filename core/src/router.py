@@ -111,6 +111,18 @@ class _Target:
     # quien sabe qué significa; el router solo lo transporta.
     opciones: dict = field(default_factory=dict)
 
+    def extra_body(self, **fijos) -> dict:
+        """`params` del hop + los campos fijos de la llamada, para extra_body.
+
+        `params` es el passthrough de la config al proveedor: cualquier campo
+        que la API acepte en el body (p. ej. `reasoning: {enabled: true}` de
+        OpenRouter para los modelos con thinking). Vive POR HOP a propósito —
+        el fallback local no tiene por qué entender los parámetros del primario.
+        Los campos fijos de la llamada (guided_json, modalities) ganan.
+        """
+        params = self.opciones.get("params")
+        return {**params, **fijos} if isinstance(params, dict) else dict(fijos)
+
 
 class ModelRouter:
     """Rutea llamadas LLM por rol, con fallback entre endpoints/modelos."""
@@ -204,7 +216,7 @@ class ModelRouter:
                 model=t.model,
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                 response_format={"type": "json_object"},
-                extra_body={"guided_json": schema},
+                extra_body=t.extra_body(guided_json=schema),
             )
             raw = resp.choices[0].message.content
             return response_model.model_validate_json(raw)
@@ -235,6 +247,7 @@ class ModelRouter:
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
+                extra_body=t.extra_body(),
             )
             msg = resp.choices[0].message
             if msg.tool_calls:
@@ -246,7 +259,8 @@ class ModelRouter:
     def chat(self, role: str, messages: list[dict], **kwargs: Any) -> str:
         """Chat plano → texto. Para prompts que no necesitan structured output."""
         def fn(t: _Target) -> str:
-            resp = t.client.chat.completions.create(model=t.model, messages=messages, **kwargs)
+            resp = t.client.chat.completions.create(model=t.model, messages=messages,
+                                                    extra_body=t.extra_body(), **kwargs)
             return resp.choices[0].message.content or ""
 
         return self._run(role, fn)
