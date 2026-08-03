@@ -257,7 +257,12 @@ parents reconstruida), `thread_root_uri/cid`, `mode`, `is_admin`. Los nodos van 
   en `replied_posts` (`replied`/`failed`) y loguea en `bot_posts`.
 - **UpdateProfileNode** (rol reasoning): después de responder, relee la conversación entera
   y extrae hechos nuevos autorrevelados → `upsert_user_fact` (con dedup semántico). Corre
-  en todos los caminos que postean; si no hay nada nuevo el LLM contesta `NADA`.
+  en todos los caminos que postean; si no hay nada nuevo el LLM contesta `NADA`. Cuán
+  selectivo ser lo calibra **`MEMORY_SUSCEPTIBILITY`** (0–1, default 0.3 = el histórico
+  estricto; slider en la UI, "Memoria por usuario"): el valor se traduce en código a un
+  bloque que se appendea al prompt de extracción — sin tocar las tres copias del prompt —
+  con tramos mínimo / estricto / generoso / máximo. La nota de interacción se escribe
+  siempre, a cualquier susceptibilidad (T57).
 
 ### Orquestación e idempotencia
 

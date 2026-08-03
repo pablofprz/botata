@@ -963,6 +963,10 @@ class WhatsAppChannel:
     THREAD_HOPS = 12       # tope al subir por citas
     POLL_LIMIT = 100       # mensajes por request al bridge
     BUFFER_POR_CHAT = 300  # cuánto se recuerda por chat (techo de memoria)
+    # El bridge sabe subir un .ogg como nota de voz (PTT). Lo consulta la tool
+    # generate_audio: sin este flag se niega, en vez de mandar un adjunto que
+    # el canal no sabe subir (Bluesky, p. ej., lo rechazaría como imagen).
+    SUPPORTS_AUDIO = True
 
     def __init__(self, bridge_url: str, chat_ids: list[str], http=None,
                  context_messages: int = 20):

@@ -108,9 +108,16 @@ def mood_index(moods_dir: Path) -> list[tuple[str, str, str]]:
     return [(m.name, m.description, m.triggers) for m in load_moods(moods_dir).values()]
 
 
-def mood_prompt_block(mood: Mood) -> str:
-    """Sección para el system prompt: el bot está HOY con este humor."""
+def mood_prompt_block(mood: Mood, reason: str | None = None) -> str:
+    """Sección para el system prompt: el bot está HOY con este humor.
+
+    `reason` es el motivo REAL guardado al cambiar (mood_state): sin él, el bot
+    está gloomy sin saber por qué y, si le preguntan qué le pasa, se inventa
+    una causa — el motivo verdadero existía pero nunca entraba al prompt.
+    """
+    porque = (f"\nEstás así por esto: {reason} — si te preguntan qué te pasa, "
+              "ESE es el motivo; no inventes otro." if reason else "")
     return (
         f"Tu estado de ánimo HOY es «{mood.name}» ({mood.description}). "
-        f"Que se note en el tono, sin romper tu personalidad de base:\n{mood.body}"
+        f"Que se note en el tono, sin romper tu personalidad de base:\n{mood.body}{porque}"
     )

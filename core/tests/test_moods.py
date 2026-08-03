@@ -114,6 +114,36 @@ def test_auto_undecided_returns_none(conn):
     assert b.current_mood(conn) is None
 
 
+def test_mood_line_incluye_el_motivo_guardado(conn):
+    """Caso real (2026-08-03, arg): el bot pasó a gloomy con motivo guardado en
+    mood_state, pero el prompt solo llevaba el mood — le preguntaban qué le
+    pasaba y confabulaba una causa. El motivo REAL tiene que entrar al prompt."""
+    import json as _json
+
+    import db as dbmod
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto"}
+    dbmod.kv_set(conn, "mood_state", _json.dumps({
+        "date": b.now_local().date().isoformat(), "mood": "gloomy",
+        "reason": "me mandaron a pegarme un tiro", "mode": "admin"}))
+    line = b.mood_line(conn)
+    assert "gloomy" in line and "me mandaron a pegarme un tiro" in line
+    assert "no inventes otro" in line
+
+
+def test_mood_line_sin_motivo_si_cayo_al_default(conn):
+    """Si current_mood cayó al default (el mood del estado ya no existe), el
+    reason guardado ya no explica el humor vigente: no se inyecta."""
+    import json as _json
+
+    import db as dbmod
+    b.MOODS_CONFIG = {"enabled": True, "mode": "auto", "default": "upbeat"}
+    dbmod.kv_set(conn, "mood_state", _json.dumps({
+        "date": b.now_local().date().isoformat(), "mood": "ya-no-existe",
+        "reason": "un motivo viejo", "mode": "reactive"}))
+    line = b.mood_line(conn)
+    assert "upbeat" in line and "un motivo viejo" not in line
+
+
 # ─── run_mood_pass (auto) ─────────────────────────────────────────────────────
 
 def _fake_rolellm(monkeypatch, mood, reason, captured=None):

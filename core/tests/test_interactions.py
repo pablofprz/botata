@@ -55,6 +55,40 @@ def test_migrate_handle_mueve_interacciones(conn):
     assert d.recent_interactions(conn, U1) == []
 
 
+# ─── MEMORY_SUSCEPTIBILITY: cuánto anota de cada charla ──────────────────────
+# Nace de un dato medido (arg, 2026-08-03): 536 interacciones en una semana →
+# 51 hechos. El prompt estricto es una decisión, y ahora es del admin.
+
+def test_susceptibilidad_default_no_agrega_bloque():
+    """La franja media (default 0.3) no repite lo que el prompt del archivo ya
+    dice: cero costo de contexto para quien no tocó nada."""
+    assert b._memory_hunger_block(b._memory_susceptibility()) == ""
+
+
+def test_susceptibilidad_extremos(monkeypatch):
+    assert "SOLO identidad dura" in b._memory_hunger_block(0.1)
+    assert "generoso" in b._memory_hunger_block(0.6)
+    assert "Ante la duda, anotalo" in b._memory_hunger_block(0.9)
+    # valores rotos caen al default (franja media, sin bloque)
+    monkeypatch.setattr(b, "settings", {**b.settings, "MEMORY_SUSCEPTIBILITY": "alto"})
+    assert b._memory_susceptibility() == 0.3
+    monkeypatch.setattr(b, "settings", {**b.settings, "MEMORY_SUSCEPTIBILITY": 7})
+    assert b._memory_susceptibility() == 1.0  # clamp
+
+
+def test_susceptibilidad_llega_al_prompt_del_nodo(conn, monkeypatch):
+    monkeypatch.setattr(b, "settings", {**b.settings, "MEMORY_SUSCEPTIBILITY": 0.9})
+    visto = {}
+
+    class Espia:
+        def complete(self, system, user, model_cls=None):
+            visto["system"] = system
+            return b.ProfileUpdate(facts=[], interaction_summary="x")
+
+    b.UpdateProfileNode(Espia(), conn).run(_state())
+    assert "Ante la duda, anotalo" in visto["system"]
+
+
 # ─── UpdateProfileNode: structured output ────────────────────────────────────
 class FakeLLM:
     def __init__(self, update: dict):

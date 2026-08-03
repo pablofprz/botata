@@ -355,16 +355,19 @@ def _load_vec_extension(conn: sqlite3.Connection) -> None:
     conn.enable_load_extension(False)
 
 
-def init_db(path: Path | str = DB_PATH) -> sqlite3.Connection:
+def init_db(path: Path | str = DB_PATH, timeout: float = 5.0) -> sqlite3.Connection:
     """Abre/crea botata.db, aplica pragmas, carga sqlite-vec y crea el esquema.
 
     Devuelve una conexión lista para uso del bot. `check_same_thread=False`
     porque langgraph puede ejecutar nodos en hilos; WAL cubre la concurrencia.
+    `timeout` es cuánto espera un lock ajeno antes de "database is locked":
+    un segundo proceso (la config UI editando en vivo) lo sube para aguantar
+    las ráfagas de escritura del bot en vez de reventar.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=timeout)
     conn.row_factory = sqlite3.Row
     for pragma in ("journal_mode=WAL", "foreign_keys=ON", "synchronous=NORMAL"):
         conn.execute(f"PRAGMA {pragma}")

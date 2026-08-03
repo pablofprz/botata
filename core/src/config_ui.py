@@ -288,6 +288,12 @@ def validate_settings(s: dict) -> list[str]:
             if size is not None and not re.fullmatch(r"\d{3,5}x\d{3,5}", str(size)):
                 errs.append("IMAGE_GEN.size debe tener la forma ANCHOxALTO (ej. 1024x1024)")
 
+    ms = s.get("MEMORY_SUSCEPTIBILITY")
+    if ms is not None and (isinstance(ms, bool) or not isinstance(ms, (int, float))
+                           or not 0 <= ms <= 1):
+        errs.append("MEMORY_SUSCEPTIBILITY debe ser un número entre 0 y 1 "
+                    "(0 = casi no anota, 1 = anota todo dato duradero; default 0.3)")
+
     ag = s.get("AUDIO_GEN")
     if ag is not None:
         if not isinstance(ag, dict):
@@ -572,10 +578,21 @@ class ConfigStore:
         self.skills_dir = self.base / "skills"
         self.moods_dir = self.base / "moods"
         self.db_path = self.base / "posted" / "botata.db"
+        self._db_cache: "tuple | None" = None   # (dbmod, conn) — ver _db()
 
     def _db(self):
         """Conexión al DB del bot (WAL: convive con el bot corriendo). Lazy
-        import para que la UI arranque aunque falte sqlite-vec."""
+        import para que la UI arranque aunque falte sqlite-vec.
+
+        CACHEADA (2026-08-03): abrir por request re-corría el schema y las
+        migraciones — escrituras DDL en cada click — que es exactamente lo que
+        choca contra el bot en medio de una ráfaga propia: el "database is
+        locked" al editar memoria en vivo salía de acá. Además cada request
+        filtraba una conexión que no se cerraba nunca. Una sola conexión, con
+        timeout largo para ESPERAR el lock del bot en vez de reventar.
+        """
+        if self._db_cache is not None:
+            return self._db_cache
         import db as dbmod
         try:  # los defaults de "hoy"/"ahora" del calendario usan la tz de la instancia
             tz = json.loads(self.settings_path.read_text(encoding="utf-8")).get("TIMEZONE", "")
@@ -584,7 +601,35 @@ class ConfigStore:
         except Exception:
             pass
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        return dbmod, dbmod.init_db(self.db_path)
+        self._db_cache = (dbmod, dbmod.init_db(self.db_path, timeout=15))
+        return self._db_cache
+
+    def _db_recover(self) -> None:
+        """Tras un request que explotó: soltar lo que la conexión cacheada tenga
+        a medias. Una transacción colgada en una conexión viva es un "database
+        is locked" PERMANENTE para el bot y para la próxima edición — este
+        rollback es lo que garantiza que un error de un request no deje la DB
+        tomada hasta matar la UI."""
+        if self._db_cache is None:
+            return
+        try:
+            self._db_cache[1].rollback()
+        except Exception:
+            try:
+                self._db_cache[1].close()
+            except Exception:
+                pass
+            self._db_cache = None
+
+    def _db_close(self) -> None:
+        """Cierra la conexión cacheada (para poder borrar el archivo en Windows:
+        con un handle abierto, el unlink de reset_memory falla)."""
+        if self._db_cache is not None:
+            try:
+                self._db_cache[1].close()
+            except Exception:
+                pass
+            self._db_cache = None
 
     # -- helpers ---------------------------------------------------------------
     @staticmethod
@@ -752,7 +797,7 @@ class ConfigStore:
                  "changed_at": ahora.isoformat()}))
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def edit_mood(self, body: dict) -> list[str]:
         """Crea/edita/borra un mood (archivo moods/<name>.md)."""
@@ -1214,6 +1259,7 @@ class ConfigStore:
         if confirm != self.base.name:
             return [f"confirmación incorrecta: escribí '{self.base.name}' para confirmar"]
         if action == "reset_memory":
+            self._db_close()   # con el handle abierto, en Windows el unlink falla
             posted = self.base / "posted"
             for f in ("botata.db", "botata.db-wal", "botata.db-shm"):
                 try:
@@ -1222,6 +1268,7 @@ class ConfigStore:
                     return [f"no pude borrar {f}: {e} (¿el bot está corriendo?)"]
             return []
         if action == "delete_instance":
+            self._db_close()
             repo_root = Path(__file__).resolve().parent.parent
             if self.base in (repo_root, repo_root.parent):
                 return ["esta instancia es el repo mismo — borrala a mano si es lo que querés"]
@@ -1279,7 +1326,7 @@ class ConfigStore:
                 "bio_current": dbmod.kv_get(conn, "bio_current"),
             }
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def _mood_today(self, mood_state: dict | None, dbmod) -> str | None:
         """El humor VIGENTE, con la misma regla que `current_mood()` del motor.
@@ -1348,7 +1395,7 @@ class ConfigStore:
             dbmod.set_event_announce(conn, eid, bool(body.get("announce")))
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def edit_memory(self, body: dict) -> list[str]:
         dbmod, conn = self._db()
@@ -1377,7 +1424,7 @@ class ConfigStore:
                 return ["action inválida (add|delete|pin)"]
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def read_user_memory(self, handle: str | None = None) -> dict:
         """Visor de memoria por usuario. Sin handle → overview (usuarios con
@@ -1414,7 +1461,7 @@ class ConfigStore:
             return {"facts": [dict(r) for r in facts],
                     "interactions": [dict(r) for r in inter]}
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     _USERMEM_KINDS = {"fact": ("user_facts", "user_facts_vec"),
                       "lesson": ("lessons", "lessons_vec"),
@@ -1442,7 +1489,7 @@ class ConfigStore:
             conn.commit()
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def pin_user_fact(self, body: dict) -> list[str]:
         """Fija o desfija un hecho. Lo fijado entra en TODAS las respuestas a esa
@@ -1459,7 +1506,7 @@ class ConfigStore:
                 return ["id inexistente"]
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def add_user_memory(self, body: dict) -> list[str]:
         """Alta manual de memoria semántica: fact (por usuario) o lesson
@@ -1491,7 +1538,7 @@ class ConfigStore:
                 return ["ya existe una memoria semánticamente equivalente (dedup)"]
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def edit_preferences(self, body: dict) -> list[str]:
         dbmod, conn = self._db()
@@ -1512,7 +1559,7 @@ class ConfigStore:
                 return ["action inválida (add|delete)"]
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def edit_events(self, body: dict) -> list[str]:
         dbmod, conn = self._db()
@@ -1558,7 +1605,7 @@ class ConfigStore:
                 return ["action inválida (add|edit|delete)"]
             return []
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     # ─── Importación de calendario (CSV / ICS) ──────────────────────────────
     _IMPORT_KINDS = {"other", "birthday", "meetup", "reminder", "community"}
@@ -1609,7 +1656,7 @@ class ConfigStore:
             return {"ok": True, "dry_run": dry, "rows": results, "importados": importados,
                     "importables": sum(1 for x in results if x["estado"] == "ok")}
         finally:
-            conn.close()
+            pass  # la conexión es la cacheada de _db(): no se cierra por request
 
     def _validate_import_row(self, conn, dbmod, r: dict) -> str | None:
         if not r["titulo"]:
@@ -2150,6 +2197,9 @@ def make_handler(store: ConfigStore):
             except json.JSONDecodeError:
                 self._send(400, {"ok": False, "errors": ["JSON inválido"]})
             except Exception as e:  # nunca tirar el server por un request
+                # Y nunca dejar una transacción a medias en la conexión cacheada:
+                # eso sería un "database is locked" permanente para el bot.
+                store._db_recover()
                 self._send(500, {"ok": False, "errors": [f"{type(e).__name__}: {e}"]})
 
     return ConfigHandler

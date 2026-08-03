@@ -377,6 +377,7 @@
       hablaron, en qué tono). Abajo, las <b>lecciones</b> que sacó de sus conversaciones.
       Podés agregar hechos y lecciones a mano (entran con dedup semántico, como si los
       hubiera aprendido el bot). Borrar elimina también el embedding — no hay vuelta atrás.</p>
+    <div class="card" id="c-memsus"></div>
     <div class="card" id="c-usermem"></div>
     <div class="card" id="c-lessons"></div></section>
 
@@ -815,7 +816,7 @@ function render() {
 
   $("rt-discord-hint").style.display = isDiscord ? "" : "none";
 
-  renderBudget(); renderModels(); renderFeeds(); renderTools(); renderAudio(); renderGroups();
+  renderBudget(); renderModels(); renderFeeds(); renderTools(); renderAudio(); renderGroups(); renderMemSus();
   renderTasks(); renderMcp(); renderSources(); renderPlugins(); renderSkills(); renderMoods();
   renderPrefsMode(); renderData(); renderUserMem(); renderRoutines(); renderAdvFlags();
   $("prompt-file").innerHTML = PROMPTS.map(f => `<option>${esc(f)}</option>`).join("");
@@ -1345,6 +1346,34 @@ function saveEventEdit(id) {
   if (!at) return toast("falta la fecha", false);
   EV_EDIT = null;
   dataAction("/api/events", {action: "edit", id, event_at: at, recur});
+}
+
+// ─── Susceptibilidad de memoria (cuánto anota de cada charla) ────────────
+// Mismo patrón que la susceptibilidad de moods: el criterio de cuán selectivo
+// ser al anotar hechos es del admin, no del motor. Default 0.3 = el histórico.
+function renderMemSus() {
+  const v = S.MEMORY_SUSCEPTIBILITY ?? 0.3;
+  $("c-memsus").innerHTML = `<div class="row" style="align-items:center">
+    <div><label>Susceptibilidad de memoria
+      <input id="i-memsus" type="range" min="0" max="1" step="0.05" value="${v}" style="width:220px"></label></div>
+    <div style="min-width:220px"><b id="i-memsus-val">${v}</b> — <span id="i-memsus-desc"></span></div></div>
+    <p class="hint">Cuánto anota el bot de cada conversación como <b>hechos del usuario</b>.
+      Bajo = solo identidad dura y pedidos explícitos de recordar; alto = todo dato concreto
+      que plausiblemente siga siendo cierto en un mes. La nota de interacción se escribe
+      siempre, esto no la toca. Ojo con el máximo: los hechos débiles compiten en el
+      retrieval con los importantes.</p>`;
+  const desc = (x) => x <= 0.15 ? "mínimo: casi no anota"
+    : x <= 0.45 ? "estricto (el histórico): solo datos claros e importantes"
+    : x <= 0.75 ? "generoso: también gustos y datos casuales claros"
+    : "máximo: todo dato duradero, ante la duda anota";
+  $("i-memsus-desc").textContent = desc(v);
+  $("i-memsus").addEventListener("input", e => {
+    const x = parseFloat(e.target.value);
+    S.MEMORY_SUSCEPTIBILITY = x;
+    $("i-memsus-val").textContent = x;
+    $("i-memsus-desc").textContent = desc(x);
+    markDirty();
+  });
 }
 
 function renderBudget() {

@@ -219,6 +219,7 @@ BSKY_PASSWORD      : str  = os.environ.get("BSKY_PASSWORD", "")
 # declara sus propias keys — el router valida donde corresponde.
 LLM_API_KEY        : str  = router_llm_api_key()
 BRAVE_API_KEY      : str | None = os.environ.get("BRAVE_API_KEY")  # opcional (tool web_search, T8)
+ELEVENLABS_API_KEY : str | None = os.environ.get("ELEVENLABS_API_KEY")  # opcional (tool generate_audio)
 def _handle_del_canal(valor: str | None) -> str:
     """Normaliza un handle escrito en settings a la forma que usa el canal.
 
@@ -1854,6 +1855,14 @@ def build_channel():
         for r in routinesmod.load_routines(ROUTINES_DIR):
             if r.channel and str(r.channel) not in ids:
                 ids.append(str(r.channel))
+        # El bridge es un proceso aparte, pero eso es un detalle de
+        # implementación, no una tarea del operador: si no responde, el motor
+        # lo levanta (y lo compila la primera vez). Uno ya corriendo se respeta.
+        import wa_bridge
+        _, err = wa_bridge.ensure_bridge(WHATSAPP_BRIDGE_URL,
+                                         BASE_DIR / "whatsapp", ids)
+        if err:
+            raise SystemExit(f"no pude levantar el bridge de WhatsApp: {err}")
         return WhatsAppChannel(WHATSAPP_BRIDGE_URL, ids,
                                context_messages=WHATSAPP_CONTEXT_MESSAGES)
     if CHANNEL != "bluesky":
@@ -3430,7 +3439,19 @@ def mood_line(conn: sqlite3.Connection) -> str:
     except Exception:
         log.debug("current_mood falló", exc_info=True)
         return ""
-    return f"\n---\n{moodmod.mood_prompt_block(mood)}" if mood else ""
+    if not mood:
+        return ""
+    # El motivo guardado al cambiar (choose_mood o pase diario) entra al prompt
+    # SOLO si el estado corresponde a este mood: si current_mood cayó al default
+    # (archivo borrado, estado viejo), el reason del estado ya no lo explica.
+    reason = None
+    try:
+        st = _mood_state_get(conn)
+        if st and st.get("mood") == mood.name:
+            reason = (st.get("reason") or "").strip() or None
+    except Exception:
+        log.debug("mood_line: no pude leer el reason del estado", exc_info=True)
+    return f"\n---\n{moodmod.mood_prompt_block(mood, reason)}"
 
 
 # ---------------------------------------------------------------------------
@@ -4439,6 +4460,100 @@ def _make_generate_image_tool(router: "ModelRouter | None", bsky=None) -> ToolHa
                 "No digas que la estás haciendo ni que ya va — eso ya lo avisaste)"
                 if avisado else "")
         return ToolResult(text=f"generé la imagen: {prompt}{nota}", image_path=str(path))
+
+    return handler
+
+
+# ─── Generar audio (TTS · ElevenLabs) ────────────────────────────────────────
+# Espejo de generate_image, pero para voz: convierte texto en una nota de voz y
+# la adjunta por la MISMA plomería (ToolResult.image_path → media_path del
+# canal). No pasa por el router: ElevenLabs no habla OpenAI — es un endpoint
+# propio con su propia key (ELEVENLABS_API_KEY en el .env de la instancia).
+_AUDIO_DIR = BASE_DIR / "scrape" / "generated_audio"
+
+
+def _config_audio() -> dict:
+    """settings → AUDIO_GEN: {voice_id, model_id, max_per_day, max_per_thread, max_chars}."""
+    return settings.get("AUDIO_GEN") or {}
+
+
+def _audios_hoy() -> int:
+    """Cuántos audios se generaron hoy (igual que las imágenes: el archivo ES el
+    registro). El tope importa porque ElevenLabs cobra por carácter y en un grupo
+    público la tool queda al alcance de cualquiera que escriba 'mandame otro'."""
+    if not _AUDIO_DIR.exists():
+        return 0
+    hoy = now_local().strftime("%Y%m%d")
+    return len([p for p in _AUDIO_DIR.glob(f"aud_{hoy}_*") if p.is_file()])
+
+
+def _elevenlabs_tts(texto: str, cfg: dict) -> bytes:
+    """TTS con la config de la instancia. El cliente vive en elevenlabs_client
+    (compartido con la UI, que lista voces y prueba la elegida)."""
+    import elevenlabs_client
+    return elevenlabs_client.tts(
+        texto,
+        voice_id=str(cfg.get("voice_id") or "").strip(),
+        model_id=cfg.get("model_id") or elevenlabs_client.DEFAULT_MODEL,
+        api_key=ELEVENLABS_API_KEY or "")
+
+
+def _make_generate_audio_tool(canal=None) -> ToolHandler:
+    def handler(args: dict, ctx: ToolContext) -> ToolResult:
+        texto = (args.get("text") or "").strip()
+        if not texto:
+            return ToolResult(text="necesito el texto que querés que diga en voz alta")
+        if not ELEVENLABS_API_KEY:
+            return ToolResult(text="no tengo generación de audio configurada")
+        # El adjunto viaja como media_path genérico, pero no todo canal sabe
+        # subir un ogg (Bluesky lo rechaza como imagen). El canal declara si
+        # soporta audio; sin eso la tool se niega en vez de romper el reply.
+        if not getattr(canal, "SUPPORTS_AUDIO", False):
+            return ToolResult(text="en este canal no puedo mandar audios")
+        cfg = _config_audio()
+        if not str(cfg.get("voice_id") or "").strip():
+            return ToolResult(text="no tengo una voz configurada todavía "
+                                   "(se elige en la UI de config, sección Tools)")
+        # ElevenLabs cobra por carácter: un texto largo se come la cuota del
+        # mes en una pasada. Se rechaza, no se trunca — un audio cortado a la
+        # mitad es peor que pedir que lo acorten.
+        tope_chars = int(cfg.get("max_chars", 600))
+        if tope_chars and len(texto) > tope_chars:
+            return ToolResult(text="ese texto es muy largo para un audio, "
+                                   "resumilo o pedime algo más corto")
+        tope = int(cfg.get("max_per_day", 20))
+        if tope and _audios_hoy() >= tope:
+            log.info("generate_audio: tope diario alcanzado (%d)", tope)
+            return ToolResult(text="ya generé todos los audios que tenía para hoy")
+        # Tope POR CONVERSACIÓN, misma lección que las imágenes (2026-08-02):
+        # en un hilo donde los audios son el tema, el modelo los lee como la
+        # respuesta esperada. El prompt pide, el código impide.
+        tope_hilo = int(cfg.get("max_per_thread", 3))
+        hilo = (ctx.state or {}).get("thread_root_uri") or (ctx.state or {}).get("mention_uri")
+        clave_hilo = f"auds_hilo:{hilo}:{now_local():%Y%m%d}" if hilo else ""
+        if tope_hilo and clave_hilo and ctx.conn is not None:
+            ya = int(dbmod.kv_get(ctx.conn, clave_hilo) or 0)
+            if ya >= tope_hilo:
+                log.info("generate_audio: tope por hilo alcanzado (%d en %s)", ya, hilo)
+                return ToolResult(text="ya mandé varios audios en esta charla, "
+                                       "mejor seguí por escrito")
+            dbmod.kv_set(ctx.conn, clave_hilo, str(ya + 1))
+        try:
+            blob = _elevenlabs_tts(texto, cfg)
+        except Exception as e:
+            log.error("generate_audio: falló '%s': %s", texto[:80], e)
+            return ToolResult(text="no pude generar el audio ahora")
+        if not blob:
+            return ToolResult(text="no pude generar el audio ahora")
+        _AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        nombre = f"aud_{now_local():%Y%m%d_%H%M%S}_{abs(hash(texto)) % 10000:04d}.ogg"
+        path = _AUDIO_DIR / nombre
+        path.write_bytes(blob)
+        log.info("generate_audio: %s (%d KB) — '%s'", nombre, len(blob) // 1024, texto[:60])
+        return ToolResult(
+            text="generé el audio (YA queda adjunto como nota de voz en esta "
+                 "respuesta: no digas que lo vas a mandar ni lo describas, ya está)",
+            image_path=str(path))
 
     return handler
 
@@ -6274,6 +6389,26 @@ def build_tool_registry(config: dict | None = None, *,
         {Scope.ADMIN},
     )
     reg.register(
+        "generate_audio",
+        "Convierte un texto en un AUDIO con tu voz (nota de voz) y lo adjunta de "
+        "verdad. Usala cuando te piden un audio, una nota de voz, o que digas algo "
+        "hablando ('mandame un audio', 'decilo con voz', 'cantame X'). El `text` que "
+        "pases es EXACTAMENTE lo que se va a escuchar: escribilo como se habla, en el "
+        "idioma de la conversación, y corto — es una nota de voz, no un discurso.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string",
+                         "description": "El texto exacto a decir en voz alta."},
+            },
+            "required": ["text"],
+        },
+        _make_generate_audio_tool(bsky),
+        # Mismo criterio que generate_image: cada audio se paga (por carácter).
+        # Nace admin; ampliar a `reply` es opt-in de la instancia.
+        {Scope.ADMIN},
+    )
+    reg.register(
         "search_music",
         "Busca canciones en Spotify y devuelve los primeros resultados con título, artista y "
         "link. Usala cuando un usuario pide música, una canción o un artista, o cuando el "
@@ -7553,11 +7688,54 @@ class ProfileUpdate(BaseModel):
     )
 
 
+def _memory_susceptibility() -> float:
+    """MEMORY_SUSCEPTIBILITY (0–1, default 0.3): cuánto anota de cada charla.
+
+    Existe por un dato medido (arg, 2026-08-03): 536 interacciones en una semana
+    dejaron 51 hechos — el prompt de extracción es estricto a propósito y con
+    razón (la basura en user_facts GANA el retrieval, ver T49), pero cuán
+    selectivo ser es una decisión del admin, no del motor. Mismo patrón que
+    MOODS.susceptibility: el default reproduce la conducta de siempre.
+    """
+    try:
+        s = float(settings.get("MEMORY_SUSCEPTIBILITY", 0.3))
+    except (TypeError, ValueError):
+        s = 0.3
+    return min(1.0, max(0.0, s))
+
+
+def _memory_hunger_block(s: float) -> str:
+    """Traduce la susceptibilidad a una instrucción para el prompt de extracción.
+
+    En la franja media (0.15–0.45) no agrega nada: el prompt del archivo YA es
+    estricto, y repetírselo con otras palabras solo agranda el contexto.
+    """
+    if s <= 0.15:
+        return ("\n## Criterio de anotación (config del admin: mínimo)\n"
+                "Anotá SOLO identidad dura (dónde vive, profesión, fechas) o lo que "
+                "te pidieron recordar. Todo lo demás, aunque parezca interesante, no.")
+    if s <= 0.45:
+        return ""
+    if s <= 0.75:
+        return ("\n## Criterio de anotación (config del admin: generoso)\n"
+                "Aflojá el criterio: además de los datos duros, anotá gustos, fandoms, "
+                "proyectos, vínculos y datos casuales CLAROS que la persona contó de sí "
+                "misma, aunque no parezcan importantes. Seguí sin anotar chistes, "
+                "opiniones al pasar ni nada dicho por otros.")
+    return ("\n## Criterio de anotación (config del admin: máximo)\n"
+            "Criterio amplio: anotá TODO dato concreto sobre la persona que "
+            "plausiblemente siga siendo cierto en un mes (gustos, hábitos, contexto "
+            "de vida, vínculos, proyectos). Ante la duda, anotalo. Los límites que "
+            "siguen en pie: solo lo que dijo DE SÍ MISMA, nada del bot ni de terceros, "
+            "y nada de estados de ánimo del momento.")
+
+
 class UpdateProfileNode:
     """
     Node 5: Post-reply, memoria en dos niveles.
     - `facts`: hechos duraderos autorrevelados → db.user_facts (dedup semántico).
-      El LLM decide — la mayoría de las interacciones no revelan ninguno.
+      El LLM decide — la mayoría de las interacciones no revelan ninguno; cuánto
+      anotar lo calibra el admin con MEMORY_SUSCEPTIBILITY.
     - `interaction_summary`: nota breve de CADA interacción (tema + tono) →
       db.interactions (log cronológico, sin embeddings). Esto garantiza que
       ninguna conversación pasa sin dejar huella en la memoria del usuario.
@@ -7580,7 +7758,8 @@ class UpdateProfileNode:
 
         try:
             result = self.llm.complete(
-                f"{current_datetime_line()}\n\n{prompt.format(author_handle=handle)}",
+                f"{current_datetime_line()}\n\n{prompt.format(author_handle=handle)}"
+                f"{_memory_hunger_block(_memory_susceptibility())}",
                 conversation,
                 ProfileUpdate,
             )
@@ -8034,6 +8213,10 @@ def run(mode: str) -> None:
     acquire_instance_lock()      # dos bots sobre la misma instancia se pisan
 
     db     = init_db()
+    if os.environ.get("BOTATA_TRACE_SQL"):
+        # Depuración de locks: loguea cada statement. Con esto, el último SQL
+        # antes del warning "quedó una transacción abierta" ES el culpable.
+        db.set_trace_callback(lambda sql: log.info("SQL> %s", " ".join(sql.split())[:180]))
     bsky   = build_channel()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     log.info("Router de modelos: %s", router.describe())
@@ -8139,6 +8322,17 @@ def run(mode: str) -> None:
             # `database is locked` acá mataba el proceso en silencio — sin
             # systemd que lo levante. Se loguea y se sigue al próximo ciclo.
             log.error("iteración del loop principal falló — sigo", exc_info=True)
+        # Invariante del borde del ciclo (2026-08-03): a dormir SIN transacción
+        # abierta. Medido en vivo: un ciclo dejaba una escritura sin commitear y
+        # el bot dormía con el write-lock tomado — la config UI daba "database
+        # is locked" en cualquier edición mientras el bot corría. El commit acá
+        # cura el síntoma pase lo que pase adentro; el warning delata al culpable
+        # (con BOTATA_TRACE_SQL=1 el log muestra el SQL exacto que quedó colgado).
+        if db.in_transaction:
+            log.warning("ciclo: quedó una transacción abierta al ir a dormir — "
+                        "commiteo (esto es un bug: correr con BOTATA_TRACE_SQL=1 "
+                        "para identificar la escritura sin commit)")
+            db.commit()
         time.sleep(POLL_INTERVAL)
 
 

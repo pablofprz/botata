@@ -996,3 +996,30 @@ def test_api_plugins(server):
 def test_api_plugins_install_id_invalido(server):
     code, body = _post(server + "/api/plugins/install", {"id": "banana"})
     assert code == 400 and body["errors"]
+
+
+# ─── Conexión a la DB: cacheada y sin transacciones colgadas (2026-08-03) ────
+# El "database is locked" al editar memoria en vivo salía de abrir una conexión
+# NUEVA por request (re-corriendo schema y migraciones — DDL — en cada click,
+# justo contra el bot escribiendo) y de no cerrarla jamás.
+
+def test_db_cachea_la_conexion(store):
+    d1, c1 = store._db()
+    d2, c2 = store._db()
+    assert c1 is c2                      # una conexión por proceso, no por click
+
+
+def test_db_recover_suelta_la_transaccion(store):
+    _, conn = store._db()
+    conn.execute("CREATE TABLE IF NOT EXISTS t_probe(x)")
+    conn.execute("INSERT INTO t_probe VALUES (1)")   # transacción abierta
+    assert conn.in_transaction
+    store._db_recover()
+    assert not conn.in_transaction       # rollback: el lock se soltó
+
+
+def test_reset_memory_cierra_la_conexion_antes_de_borrar(store):
+    store._db()                          # deja una conexión cacheada abierta
+    assert store.danger("reset_memory", store.base.name) == []
+    assert store._db_cache is None       # sin esto, en Windows el unlink falla
+    assert not (store.base / "posted" / "botata.db").exists()

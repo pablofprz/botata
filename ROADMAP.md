@@ -414,6 +414,14 @@ para un bot comunitario.**
 - **Fase 2 HECHA (2026-07-28): el bridge, en Go con whatsmeow** (`core/bridges/whatsapp/`). Decisión del admin tras aclarar que los dos motores corren 24/7 y la diferencia es peso y distribución: **whatsmeow** porque compila a **binario único** — el que instale Botata no necesita Node ni Go. SQLite en **Go puro** (sin cgo ni gcc en Windows). La cola de mensajes vive **en memoria**: persistirla duplicaría una fuente de verdad, porque al reiniciar el motor relee lo vivo y el dedup lo hace `has_replied`. La media entrante se baja del lado de Go (viene **cifrada**, la clave la tiene esa sesión) y el motor solo ve un path; si la bajada falla se anota igual que había una imagen — perder el hecho es peor que perder el archivo. `GET /groups` existe por un problema concreto: el JID de un grupo **no se ve desde el teléfono** y es lo que va en `WHATSAPP_CHAT_IDS`. Escucha **solo en loopback** y se niega a arrancar con otra dirección (quien llegue a ese puerto escribe en el WhatsApp del número). **Verificado en vivo:** compila, levanta, se conecta a WhatsApp y publica un QR de vinculación real en `/status`; no se vinculó ningún número.
 - ⏸️ **En pausa (2026-07-28, decisión del admin).** Lo que falta es solo lo que necesita el número: vincular por QR, sacar el JID del grupo con `/groups`, configurar `CHANNEL: "whatsapp"` en **botata-dev** (no en producción) y validar el ida y vuelta real.
 - **Motor: ~~pendiente de decidir al escribir el bridge~~ → whatsmeow.** OpenClaw usa **Baileys** (Node) por default y **whatsmeow** (Go) como alternativa recomendada para 24/7. En la máquina de dev hay Node 24 y no hay Go; a favor de whatsmeow juega que se distribuye como binario único (el que instale Botata no necesita runtime). El contrato ya escrito hace que la elección sea barata de cambiar.
+- **Bridge gestionado (2026-08-03):** el bridge dejó de ser un paso manual — `wa_bridge.py`
+  lo levanta si `/status` no responde (compilándolo con `go build` la primera vez, si hay
+  Go), con pid en `<instancia>/whatsapp/bridge.pid` y salida en `bridge.log`. Lo usan el
+  motor (`build_channel`) y la UI (botón **"Arrancar / reiniciar bridge"** — reiniciar
+  aplica un cambio de `WHATSAPP_CHAT_IDS` al allowlist Go). Un bridge ajeno (lanzado a
+  mano, o compartido) se respeta: solo se mata el que registró su pid. Sin chats
+  configurados arranca en modo vinculación, que es lo que permite el flujo de instalación:
+  botón → QR → elegir grupos → guardar → botón de nuevo. Tests: `test_wa_bridge.py` (8).
 - **Riesgo asumido, a documentar en la UI:** ban permanente y sin apelación del número, típicamente en 2-8 semanas; los modelos de detección puntúan ratio de respuesta bajo, contactos desconocidos y timing regular — o sea, el perfil de un bot comunitario. Mitigaciones conocidas: número descartable, volumen bajo, y el jitter de cadencia que las rutinas ya tienen por diseño.
 - **Impedance mismatch (el mayor de todos los canales):** sin feed público, sin bios, el grupo es la única unidad de conversación, media pesada. Estimado **L**, no M.
 
@@ -661,6 +669,50 @@ exactamente lo que hace un modelo cuando no lo tiene.
 - Prompt, para la otra mitad que el código no puede ver: *no narres acciones que no
   hiciste* — el bot había escrito `🎵 abriendo spotify...` con cero tools llamadas.
 - Tests: `test_links_inventados.py` (8).
+
+### T56 · `generate_audio` (TTS · ElevenLabs)  `infra` `M`  `P1`  ✅ **HECHO** (2026-08-03)
+Tool `generate_audio(text)`: convierte texto en **nota de voz** y la adjunta por la misma
+plomería de media que las imágenes (`ToolResult.image_path` → `media_path` del canal).
+No pasa por el router — ElevenLabs no habla OpenAI: endpoint propio con
+`ELEVENLABS_API_KEY` en el `.env` de la instancia.
+
+- **Ogg/Opus a propósito** (`output_format=opus_48000_64`): es lo que WhatsApp exige para
+  que salga como nota de voz (`PTT`) y lo que Telegram va a pedir en `sendVoice` (T40) —
+  un formato, dos canales, sin transcodificar.
+- **El canal declara `SUPPORTS_AUDIO`** (hoy solo WhatsApp): el .ogg viaja por la plomería
+  genérica y Bluesky lo rechazaría como imagen — la tool se niega antes de romper el reply.
+- **Bridge Go**: `/send` decide por extensión — audio sube como `MediaAudio`
+  (`AudioMessage`, `PTT` con ogg/opus); `AudioMessage` no tiene caption, así que el texto
+  del bot sale en un mensaje aparte ANTES y la nota de voz llega pegada atrás.
+- `AUDIO_GEN`: `voice_id` (obligatorio) · `model_id` · `max_per_day` · `max_per_thread`
+  (misma lección que T52: el prompt pide, el código impide) · `max_chars` (ElevenLabs
+  cobra por carácter: un texto largo se **rechaza**, no se trunca — un audio cortado es
+  peor que pedir que lo acorten).
+- **Nace scope `admin`** como T52; `rancher` lo amplía a todos (`reply`) por settings.
+- **UI (2026-08-03):** tarjeta "🎙️ Voz del bot" en la sección Tools — selector de voz
+  poblado desde la cuenta real (`GET /voices` del lado del server; un voice_id de la
+  library se guarda bien y después da 402 en el tier gratis, la lista de la cuenta es lo
+  único que no miente), botón "probar la voz guardada" que reproduce el audio en la página,
+  y los topes editables. El cliente HTTP vive en `elevenlabs_client.py`, compartido entre
+  la tool y la UI; `ELEVENLABS_API_KEY` entra por la sección Credenciales (write-only).
+  On/off y permisos: en la tabla de tools, como cualquier otra.
+- Tests: `test_generate_audio.py` (11).
+
+### T57 · Susceptibilidad de memoria  `infra` `S`  `P2`  ✅ **HECHO** (2026-08-03)
+Pedido del admin al medir que el bot casi no anotaba hechos: en arg, **536 interacciones
+en 7 días → 51 hechos** desde conversación (el resto vino de UI/bios/compactación). El
+prompt de extracción es estricto a propósito — la basura en `user_facts` GANA el retrieval
+(T49) — pero cuán selectivo ser es una decisión del admin, no del motor.
+
+- `MEMORY_SUSCEPTIBILITY` (0–1, default **0.3** = la conducta histórica), mismo patrón que
+  `MOODS.susceptibility`. Se traduce a un bloque que se APPENDEA al prompt de extracción
+  en código (sin tocar las tres copias de `update_user_prompt.md`): ≤0.15 mínimo ·
+  0.15–0.45 nada (el prompt del archivo ya es estricto; repetirlo es contexto tirado) ·
+  ≤0.75 generoso (gustos, fandoms, datos casuales claros) · >0.75 máximo ("ante la duda,
+  anotalo"). Los límites que nunca se aflojan: solo lo autodicho, nada de terceros ni del bot.
+- UI: slider en "Memoria por usuario", con descripción del tramo elegido.
+- La nota de interacción no se toca: se escribe siempre, a cualquier susceptibilidad.
+- Configurado: **arg = 0.7** · rancher = default. Tests en `test_interactions.py` (3).
 
 ### T55 · Deuda abierta por este bloque  `infra` `M`  `P1`  ⬜ **PENDIENTE**
 Ninguna es teórica: las cuatro se manifestaron el 2026-08-02.

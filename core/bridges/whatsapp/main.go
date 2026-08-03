@@ -13,6 +13,8 @@
 //	GET  /messages?after=<c>  → {"cursor", "messages": [...]}
 //	GET  /messages/<id>       → un mensaje ya visto
 //	POST /send                → {"chat_id","text","reply_to"?,"media_path"?}
+//	                            (media_path: imagen, o audio por extensión —
+//	                            .ogg/.opus sale como nota de voz)
 //	POST /profile             → {"status"}
 //	GET  /groups              → grupos con su JID (para llenar WHATSAPP_CHAT_IDS)
 //
@@ -379,6 +381,15 @@ func (p *puente) handleMessages(w http.ResponseWriter, r *http.Request) {
 		"cursor": strconv.FormatInt(cursor, 10), "messages": msgs})
 }
 
+// Extensión → mimetype de audio. Decide también el modo de upload en /send:
+// lo que matchea acá sube como MediaAudio; el resto sigue siendo imagen.
+var mimeAudio = map[string]string{
+	".ogg":  "audio/ogg; codecs=opus",
+	".opus": "audio/ogg; codecs=opus",
+	".mp3":  "audio/mpeg",
+	".m4a":  "audio/mp4",
+}
+
 type envio struct {
 	ChatID    string `json:"chat_id"`
 	Text      string `json:"text"`
@@ -415,6 +426,36 @@ func (p *puente) handleSend(w http.ResponseWriter, r *http.Request) {
 			// ya decidió qué decir.
 			log.Printf("no pude leer %s (%v) — mando solo el texto", req.MediaPath, err)
 			req.MediaPath = ""
+		} else if mime, esAudio := mimeAudio[strings.ToLower(filepath.Ext(req.MediaPath))]; esAudio {
+			up, err := p.cli.Upload(ctx, datos, whatsmeow.MediaAudio)
+			if err != nil {
+				log.Printf("upload de audio falló (%v) — mando solo el texto", err)
+				req.MediaPath = ""
+			} else {
+				// AudioMessage no tiene caption: si el bot escribió algo, va en
+				// un mensaje aparte ANTES, y la nota de voz llega pegada atrás.
+				// Si ese texto falla, el audio sale igual — es lo que pidieron.
+				if req.Text != "" {
+					txt := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+						Text: proto.String(req.Text), ContextInfo: ctxInfo}}
+					if _, err := p.cli.SendMessage(ctx, jid, txt); err != nil {
+						log.Printf("no pude mandar el texto que acompaña al audio: %v", err)
+					}
+				}
+				msg.AudioMessage = &waE2E.AudioMessage{
+					// PTT = nota de voz (burbuja con play); solo vale con
+					// ogg/opus. Un mp3 sale como archivo de audio común.
+					PTT:           proto.Bool(strings.HasPrefix(mime, "audio/ogg")),
+					Mimetype:      proto.String(mime),
+					URL:           proto.String(up.URL),
+					DirectPath:    proto.String(up.DirectPath),
+					MediaKey:      up.MediaKey,
+					FileEncSHA256: up.FileEncSHA256,
+					FileSHA256:    up.FileSHA256,
+					FileLength:    proto.Uint64(up.FileLength),
+					ContextInfo:   ctxInfo,
+				}
+			}
 		} else {
 			up, err := p.cli.Upload(ctx, datos, whatsmeow.MediaImage)
 			if err != nil {
@@ -435,7 +476,7 @@ func (p *puente) handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if msg.ImageMessage == nil {
+	if msg.ImageMessage == nil && msg.AudioMessage == nil {
 		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{
 			Text: proto.String(req.Text), ContextInfo: ctxInfo}
 	}

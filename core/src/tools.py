@@ -54,7 +54,12 @@ FEED_REF_PREFIX = "feed:"
 # ─── Contrato ────────────────────────────────────────────────────────────────
 @dataclass
 class ToolResult:
-    """Lo que devuelve un handler: texto de confirmación + imagen opcional a adjuntar."""
+    """Lo que devuelve un handler: texto de confirmación + media opcional a adjuntar.
+
+    `image_path` transporta CUALQUIER media (los canales lo pasan como
+    `media_path` sin mirar qué es): el nombre quedó de cuando solo había
+    imágenes y hoy también viaja el .ogg de generate_audio.
+    """
     text: str
     image_path: str | None = None
 
