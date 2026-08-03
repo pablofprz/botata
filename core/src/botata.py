@@ -13,6 +13,7 @@ Usage:
 import argparse
 import atexit
 import base64
+from collections import deque
 import ipaddress
 import json
 import logging
@@ -8066,9 +8067,14 @@ def _rescatar_pending_colgados(db: sqlite3.Connection, minutos: int = 10) -> Non
         "UPDATE replied_posts SET status = 'failed' "
         "WHERE status = 'pending' AND replied_at < ?", (limite,))
     if cur.rowcount:
-        db.commit()
         log.warning("rescaté %d mención(es) colgadas en 'pending' (>%d min) — "
                     "se reintentan ahora", cur.rowcount, minutos)
+    # Commit SIEMPRE, no solo con rowcount: un UPDATE que matchea 0 filas
+    # también abre la transacción implícita, y este pase corre en CADA ciclo —
+    # sin esto, el bot se dormía con el write-lock tomado y la config UI daba
+    # "database is locked" en cualquier edición en vivo (cazado 2026-08-03 con
+    # el ring buffer de SQL del loop).
+    db.commit()
 
 
 def process_mention(graph, db: sqlite3.Connection, mention: dict, mode: str,
@@ -8213,10 +8219,29 @@ def run(mode: str) -> None:
     acquire_instance_lock()      # dos bots sobre la misma instancia se pisan
 
     db     = init_db()
-    if os.environ.get("BOTATA_TRACE_SQL"):
-        # Depuración de locks: loguea cada statement. Con esto, el último SQL
-        # antes del warning "quedó una transacción abierta" ES el culpable.
-        db.set_trace_callback(lambda sql: log.info("SQL> %s", " ".join(sql.split())[:180]))
+    # Caza de transacciones colgadas: SIEMPRE se recuerdan los últimos SQL en un
+    # ring buffer (costo ~nulo), y el warning del borde del ciclo los imprime —
+    # cada ocurrencia se auto-diagnostica sola, sin reproducir con flags.
+    # BOTATA_TRACE_SQL=1 además loguea TODO statement (verboso, para depurar).
+    ultimos_sql: deque = deque(maxlen=12)
+    verboso = bool(os.environ.get("BOTATA_TRACE_SQL"))
+
+    def _anotar_sql(sql: str) -> None:
+        linea = " ".join(sql.split())[:180]
+        if verboso:
+            log.info("SQL> %s", linea)
+        # Solo escrituras, y el buffer se VACÍA en cada commit/rollback: lo que
+        # queda al saltar la trampa es exactamente el contenido de la
+        # transacción abierta. (Un SELECT no abre transacción, y con lecturas
+        # en el buffer la marea de SELECTs del final del ciclo empujaba afuera
+        # al culpable — pasó en la primera captura: 8 lecturas, cero escrituras.)
+        mayus = linea.upper()
+        if mayus.startswith(("COMMIT", "ROLLBACK")):
+            ultimos_sql.clear()
+        elif not mayus.startswith(("SELECT", "PRAGMA", "BEGIN")):
+            ultimos_sql.append(linea)
+
+    db.set_trace_callback(_anotar_sql)
     bsky   = build_channel()
     router = build_router(MODELS_CONFIG, legacy=_LEGACY_MODELS, env=os.environ)
     log.info("Router de modelos: %s", router.describe())
@@ -8330,8 +8355,8 @@ def run(mode: str) -> None:
         # (con BOTATA_TRACE_SQL=1 el log muestra el SQL exacto que quedó colgado).
         if db.in_transaction:
             log.warning("ciclo: quedó una transacción abierta al ir a dormir — "
-                        "commiteo (esto es un bug: correr con BOTATA_TRACE_SQL=1 "
-                        "para identificar la escritura sin commit)")
+                        "commiteo. Últimos SQL del ciclo (el que abrió la "
+                        "transacción está acá):\n  %s", "\n  ".join(ultimos_sql))
             db.commit()
         time.sleep(POLL_INTERVAL)
 
