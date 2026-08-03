@@ -209,7 +209,9 @@ class FakeResp:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            e = RuntimeError(f"HTTP {self.status_code}")
+            e.response = self  # como httpx.HTTPStatusError: el status viaja acá
+            raise e
 
 
 class FakeDiscordHttp:
@@ -236,8 +238,12 @@ class FakeDiscordHttp:
         if path == "/users/@me":
             return FakeResp(_BOT)
         if method == "GET" and path == "/channels/111/messages":
-            ids = ["24", "23", "22", "21", "20"]  # reverso-cronológico
-            return FakeResp([self.messages[i] for i in ids])
+            ids = sorted(self.messages, key=int, reverse=True)  # reverso-cronológico
+            after = (params or {}).get("after")
+            if after:
+                ids = [i for i in ids if int(i) > int(after)]
+            limit = int((params or {}).get("limit") or 50)
+            return FakeResp([self.messages[i] for i in ids[:limit]])
         if method == "GET" and path.startswith("/channels/111/messages/"):
             mid = path.rsplit("/", 1)[1]
             if mid not in self.messages:
@@ -252,9 +258,14 @@ class FakeDiscordHttp:
         return FakeResp({"message": "Not Found"}, status=404)
 
 
-def make_discord():
+def make_discord(*, cursor="14"):
+    """`cursor` deja al canal "escuchando" desde antes de los mensajes del fake
+    (el primer poll real solo siembra y no procesa — ver test dedicado)."""
     http = FakeDiscordHttp()
-    return DiscordChannel("tok", ["111"], http=http), http
+    ch = DiscordChannel("tok", ["111"], http=http)
+    if cursor is not None:
+        ch._last_seen["111"] = cursor
+    return ch, http
 
 
 def test_discord_login_y_handle():
@@ -266,19 +277,45 @@ def test_discord_get_mentions_filtra_y_mapea():
     ch, _ = make_discord()
     mentions = ch.get_mentions()
     # quedan la mención directa (20) y la reply al bot (21); se filtran
-    # el mensaje propio, el otro bot y la charla ajena
-    assert {m["uri"] for m in mentions} == {"111/20", "111/21"}
+    # el mensaje propio, el otro bot y la charla ajena. Y en orden CRONOLÓGICO:
+    # la API entrega newest-first y sin el sort las respuestas salían al revés.
+    assert [m["uri"] for m in mentions] == ["111/20", "111/21"]
     m20 = next(m for m in mentions if m["cid"] == "20")
     assert m20["author_handle"] == "ana"
     assert m20["text"] == "@botata qué opinás?"  # <@1> traducido
 
 
-def test_discord_thread_info_cadena_de_replies():
+def test_discord_primer_poll_siembra_y_no_contesta_backlog():
+    """Regresión: el primer poll procesaba la ventana inicial — un bot recién
+    arrancado contestaba en ráfaga hasta 50 mensajes viejos del canal."""
+    ch, _ = make_discord(cursor=None)        # sin cursor: primer poll real
+    assert ch.get_mentions() == []           # siembra, no procesa
+    assert ch._last_seen["111"] == "24"      # quedó escuchando desde el último
+    assert ch.get_mentions() == []           # y no hay nada nuevo después
+
+
+def test_discord_thread_info_reply_formal_y_raiz():
+    """Sin ventana acumulada: entran el mensaje y su referenciado directo, la
+    raíz sigue saliendo de la cadena de replies, y el reply formal se marca."""
     ch, _ = make_discord()
     ctx, root_uri, root_cid, media = ch.get_thread_info("111/21", "21")
-    assert ctx == "botata: hola gente, soy botata"
+    lineas = ctx.splitlines()
+    assert lineas[0] == "botata: hola gente, soy botata"
+    assert lineas[1].startswith("ana [le contesta a botata")
+    assert lineas[1].endswith(": seguí contando")
     assert root_uri == "111/15" and root_cid == "15"
     assert media == ""
+
+
+def test_discord_contexto_es_la_conversacion_reciente():
+    """Regresión (portado de WhatsApp): en Discord la gente contesta sin reply
+    formal — la cadena sola dejaba al bot sordo. El contexto es la ventana
+    reciente del canal, charlas ajenas incluidas."""
+    ch, _ = make_discord()
+    ch.get_mentions()                       # el poll llena la ventana
+    ctx, *_ = ch.get_thread_info("111/21", "21")
+    assert "hablando de otra cosa" in ctx   # la charla ajena está
+    assert "qué opinás?" in ctx             # la mención anterior también
 
 
 def test_discord_reply_referencia_al_parent():
@@ -301,7 +338,7 @@ def test_discord_get_mention_by_uri():
     ch, _ = make_discord()
     m = ch.get_mention_by_uri("111/21")
     assert m["uri"] == "111/21" and m["author_handle"] == "ana"
-    assert m["thread_context"] == "botata: hola gente, soy botata"
+    assert "botata: hola gente, soy botata" in m["thread_context"]
     assert m["thread_root_uri"] == "111/15"
     assert ch.get_mention_by_uri("111/404") is None
 
@@ -410,6 +447,7 @@ class CatchupHttp(FakeDiscordHttp):
 def test_discord_segundo_poll_solo_trae_lo_nuevo():
     http = CatchupHttp()
     ch = DiscordChannel("tok", ["111"], http=http)
+    ch._last_seen["111"] = "14"                 # ya escuchando (el primer poll siembra)
     assert len(ch.get_mentions()) == 2          # 20 (mención) y 21 (reply al bot)
     assert ch.get_mentions() == []              # nada nuevo → no relee lo mismo
     assert http.pages[-1][0] == "24"            # y usó el cursor del último visto
@@ -471,3 +509,38 @@ def test_discord_like_post_reacciona():
 def test_discord_like_post_falla_sin_romper():
     ch, http = make_discord()
     assert ch.like_post("222/20", "20") is False   # canal que el fake no conoce → 404
+
+
+def test_truncate_post_nunca_devuelve_vacio():
+    """Regresión: con el único espacio en la posición 0, el corte por espacio
+    devolvía "" — y un post vacío es 400/422 en cualquier canal."""
+    texto = " " + "x" * 100                      # sin '.!?', espacio solo al inicio
+    out = truncate_post(texto, 40)
+    assert out                                    # nunca vacío
+    assert len(out) <= 40
+
+
+def test_reply_con_autor_largo_no_pasa_los_500():
+    """Regresión: truncaba a 490 y DESPUÉS anteponía @autor — con un acct
+    remoto largo pasaba los 500 de Mastodon → 422 → la mención quedaba failed
+    y reintentaba con el mismo resultado."""
+    ch, api = make_channel()
+    api.statuses["12"] = _status("12", "<p>hola</p>",
+                                 acct="usuaria.de.nombre.largo@mastodon.instancia.social")
+    ch.reply("x" * 600, "12", "12", "12", "12")
+    posted = api.posted[-1]["text"]
+    assert posted.startswith("@usuaria.de.nombre.largo@mastodon.instancia.social ")
+    assert len(posted) <= 500
+
+
+def test_max_post_len_por_canal():
+    """Cada canal declara su tope y post() lo usa como default — sin esto el
+    bot escribía telegramas de 295 chars en canales de 2000+."""
+    masto, api = make_channel()
+    disco, http = make_discord()
+    assert masto.MAX_POST_LEN == 490 and disco.MAX_POST_LEN == 1990
+    masto.post("y" * 600)
+    assert len(api.posted[-1]["text"]) <= 490      # y ya no 295
+    assert len(api.posted[-1]["text"]) > 295
+    disco.post("z" * 600)
+    assert len(http.posted[-1]["json"]["content"]) == 600  # entra entero

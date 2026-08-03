@@ -10,7 +10,9 @@ en botata.py es la implementación original y de referencia):
     .get_thread_info(uri, cid) -> (context_text, root_uri, root_cid, leaf_media)
     .get_mention_by_uri(uri) -> dict | None   # + thread_context/thread_root_uri/cid
     .reply(text, parent_uri, parent_cid, root_uri, root_cid, media_path=None) -> uri
-    .post(text, limit=295, media_path=None, target=None) -> uri
+    .post(text, limit=None, media_path=None, target=None) -> uri
+        (limit=None → MAX_POST_LEN de la clase: 295 Bluesky, 490 Mastodon,
+         1990 Discord, 4000 WhatsApp)
                                               # target: destino opcional (rutinas con channel) —
                                               # Discord = id de canal; Bluesky y
                                               # Mastodon lo ignoran (un solo timeline)
@@ -126,7 +128,24 @@ def truncate_post(text: str, limit: int) -> str:
     for i in range(len(cut) - 1, max(len(cut) - 60, 0), -1):
         if cut[i] in ".!?":
             return cut[: i + 1]
-    return cut[: cut.rfind(" ")] if " " in cut else cut
+    # Si el único espacio está al principio, cortar ahí devolvía "" — y un
+    # post vacío es 400/422 en cualquier canal. Mejor a hacha que vacío.
+    if " " in cut and cut.rfind(" ") > 0:
+        return cut[: cut.rfind(" ")]
+    return cut
+
+
+class MentionRefetchError(Exception):
+    """get_mention_by_uri no pudo AVERIGUAR si el post sigue existiendo (red
+    caída, bridge apagado, 5xx). No es lo mismo que None (= borrado seguro):
+    ante esto el caller deja la mención como 'failed' y reintenta después.
+    Confundir ambos hacía que un arranque con el endpoint caído 30 segundos
+    descartara como 'ignored' PERMANENTE todas las menciones pendientes."""
+
+
+def _http_status(e: Exception) -> int | None:
+    """Status code de una excepción de httpx/mastodon, si lo trae."""
+    return getattr(getattr(e, "response", None), "status_code", None)
 
 
 class MastodonChannel:
@@ -225,8 +244,11 @@ class MastodonChannel:
         try:
             status = self._api.status(uri)
         except Exception as e:
-            log.warning("get_mention_by_uri: fetch falló para %s: %s", uri, e)
-            return None
+            # 404 = borrado de verdad → None. Cualquier otra cosa (red, 5xx,
+            # auth) no dice nada sobre el post: no habilita descartarlo.
+            if _http_status(e) == 404 or type(e).__name__ == "MastodonNotFoundError":
+                return None
+            raise MentionRefetchError(f"{type(e).__name__}: {e}") from e
         context, root_uri, root_cid, _ = self.get_thread_info(uri, uri)
         return {
             "uri"            : str(status["id"]),
@@ -240,24 +262,32 @@ class MastodonChannel:
 
     def reply(self, text: str, parent_uri: str, parent_cid: str,
               root_uri: str, root_cid: str, media_path: str | None = None) -> str:
-        text = strip_fake_media(text)[:490]
+        text = strip_fake_media(text)
+        prefijo = ""
         try:
             parent = self._api.status(parent_uri)
             author = parent["account"]["acct"]
             if f"@{author}".lower() not in text.lower():
-                text = f"@{author} {text}"
+                prefijo = f"@{author} "
         except Exception:
             log.debug("no pude traer el parent %s para mencionar al autor", parent_uri)
+        # El truncado va DESPUÉS de reservar la mención: truncar a 490 y recién
+        # ahí anteponer @autor pasaba los 500 con un acct remoto largo → 422 →
+        # la mención quedaba 'failed' y reintentaba con el mismo resultado.
+        # (Y truncate_post, no [:490] a hacha: mismo criterio que post.)
+        text = prefijo + truncate_post(text, 490 - len(prefijo))
         media_ids = self._upload_media(media_path) if media_path else None
         status = self._api.status_post(text, in_reply_to_id=parent_uri,
                                        media_ids=media_ids)
         return str(status["id"])
 
-    def post(self, text: str, limit: int = 295, media_path: str | None = None,
+    MAX_POST_LEN = 490  # 500 de Mastodon, con margen (mismo criterio que reply)
+
+    def post(self, text: str, limit: int | None = None, media_path: str | None = None,
              target: str | None = None) -> str:
         if target:
             log.debug("post: Mastodon no tiene canales — target %r ignorado", target)
-        text = truncate_post(strip_fake_media(text), limit)
+        text = truncate_post(strip_fake_media(text), limit or self.MAX_POST_LEN)
         media_ids = self._upload_media(media_path) if media_path else None
         status = self._api.status_post(text, media_ids=media_ids)
         return str(status["id"])
@@ -319,7 +349,10 @@ class MastodonChannel:
 
     def set_media_describer(self, fn) -> None:
         # Vision sobre media ajena: pendiente en Mastodon; se usa el alt-text.
-        log.debug("set_media_describer: MastodonChannel usa alt-text (vision pendiente)")
+        # Warning y no debug: el admin tiene que ENTERARSE de que en este canal
+        # el bot no ve imágenes (antes se lo tragaba en silencio).
+        log.warning("Mastodon: vision sobre imágenes no implementada — el bot "
+                    "solo lee el alt-text de los attachments")
 
     # ── fuentes de feed (loop proactivo) ─────────────────────────────────
     def get_feed_posts(self, source_type: str, identifier: str | None,
@@ -411,12 +444,13 @@ class DiscordChannel:
     """
 
     API = "https://discord.com/api/v10"
-    HISTORY_LIMIT = 50        # primer poll de un canal (sin cursor): cuánto mirar atrás
     CATCHUP_PAGE = 100        # máximo por request que acepta la API
     MAX_CATCHUP_PAGES = 5     # tope duro por canal y ciclo (500 msgs)
-    THREAD_HOPS = 12          # tope de la cadena de replies al reconstruir contexto
+    THREAD_HOPS = 12          # tope de la cadena de replies al reconstruir la raíz
+    BUFFER_POR_CANAL = 300    # cuánto se recuerda por canal (techo de memoria)
 
-    def __init__(self, bot_token: str, channel_ids: list[str], http=None):
+    def __init__(self, bot_token: str, channel_ids: list[str], http=None,
+                 context_messages: int = 20):
         if http is None:
             import httpx  # lazy: simetría con los otros canales
             http = httpx.Client(
@@ -429,6 +463,12 @@ class DiscordChannel:
         self._users: dict[str, dict] = {}  # username → user visto en mensajes
         self._last_seen: dict[str, str] = {}   # channel_id → id del último mensaje leído
         self._media_describer = None           # vision inyectada (set_media_describer)
+        self._context_messages = max(0, int(context_messages))
+        # Conversación reciente por canal (mismo patrón que WhatsApp): en un
+        # canal de Discord la gente contesta sin reply formal, así que la
+        # cadena de references sola dejaba al bot sordo — contestaba sin saber
+        # de qué se estaba hablando.
+        self._recientes: dict[str, deque] = {}
         me = self._get("/users/@me")
         self._me_id = str(me["id"])
         self.handle = me["username"]
@@ -534,11 +574,19 @@ class DiscordChannel:
         menciones a medio procesar las recupera `retry_stuck_mentions` por URI.
         """
         last = self._last_seen.get(ch)
-        if last is None:                      # primer poll del canal: ventana corta
-            msgs = self._get(f"/channels/{ch}/messages", limit=self.HISTORY_LIMIT) or []
+        if last is None:
+            # Primer poll del canal: se SIEMBRA el cursor y no se procesa nada.
+            # Procesar la ventana inicial hacía que un bot recién arrancado
+            # contestara en ráfaga hasta 50 mensajes viejos del canal — al
+            # validar en vivo eso se ve como un bot desbocado. Costo asumido:
+            # las menciones de mientras estuvo caído no se responden (las que
+            # ya había VISTO y quedaron failed las recupera retry_stuck_mentions
+            # por URI; estas nunca se leyeron).
+            msgs = self._get(f"/channels/{ch}/messages", limit=1) or []
             if msgs:
                 self._last_seen[ch] = str(max(int(m["id"]) for m in msgs))
-            return msgs
+                log.info("canal %s: cursor sembrado — arranco a escuchar desde ahora", ch)
+            return []
 
         out: list[dict] = []
         for _ in range(self.MAX_CATCHUP_PAGES):
@@ -558,6 +606,9 @@ class DiscordChannel:
                 "canal %s: más de %d mensajes nuevos en un ciclo — puede haber "
                 "menciones sin leer. Bajá POLL_INTERVAL_SECONDS o revisá el canal.",
                 ch, self.MAX_CATCHUP_PAGES * self.CATCHUP_PAGE)
+        # La API devuelve newest-first: sin este sort, dos mensajes encadenados
+        # de la misma persona se contestaban al revés dentro del mismo poll.
+        out.sort(key=lambda m: int(m["id"]))
         return out
 
     # ── contrato Channel ─────────────────────────────────────────────────
@@ -570,24 +621,51 @@ class DiscordChannel:
                 log.error("messages de canal %s falló: %s", ch, e)
                 continue
             for msg in msgs or []:
+                # Se recuerda TODO el canal, no solo lo dirigido al bot: el
+                # contexto de un canal son las charlas ajenas (ver _recordar).
+                self._recordar(ch, msg)
                 if self._is_for_me(msg):
                     mentions.append(self._to_mention(ch, msg))
         return mentions
 
+    def _recordar(self, ch: str, msg: dict) -> None:
+        """Conversación reciente del canal (mismo gesto que WhatsApp). El deque
+        acota la memoria; el dedup por id cubre reentregas del paginado."""
+        cola = self._recientes.setdefault(ch, deque(maxlen=self.BUFFER_POR_CANAL))
+        mid = str(msg.get("id"))
+        if cola and any(str(m.get("id")) == mid for m in cola):
+            return
+        cola.append(msg)
+
     def mark_all_read(self) -> None:
         pass  # no existe el concepto; dedup por DB
 
-    def _fetch_message(self, channel_id: str, message_id: str) -> dict | None:
+    def _fetch_message(self, channel_id: str, message_id: str, *,
+                       strict: bool = False) -> dict | None:
+        """`strict` distingue "no existe" (404 → None) de "no pude averiguar"
+        (red/5xx → MentionRefetchError). El modo laxo (default) devuelve None
+        para todo: es el correcto para armar contexto de hilo best-effort,
+        pero NUNCA para decidir si una mención se descarta."""
         try:
             msg = self._get(f"/channels/{channel_id}/messages/{message_id}")
             if msg:
                 self._remember_users(msg)
             return msg
         except Exception as e:
+            if _http_status(e) == 404:
+                return None
+            if strict:
+                raise MentionRefetchError(f"{type(e).__name__}: {e}") from e
             log.warning("fetch de %s/%s falló: %s", channel_id, message_id, e)
             return None
 
     def get_thread_info(self, uri: str, cid: str) -> tuple[str, str, str, str]:
+        """Contexto = la conversación reciente del canal, no solo la cadena de
+        replies (portado de WhatsApp): en Discord la gente contesta sin reply
+        formal, así que la cadena sola era casi siempre vacía y el bot
+        contestaba sordo. La raíz de la cadena se sigue usando como root para
+        agrupar la conversación en la DB; el reply formal no se pierde — se
+        marca en la línea del mensaje que lo tiene."""
         channel_id, _, message_id = uri.partition("/")
         leaf = self._fetch_message(channel_id, message_id)
         if leaf is None:
@@ -603,17 +681,40 @@ class DiscordChannel:
                 break
             chain.append(parent)
             msg = parent
-        chain.reverse()  # raíz primero
-        lines = [f"{m['author']['username']}: {self._full_text(m)}" for m in chain]
-        root = chain[0] if chain else leaf
+        root = chain[-1] if chain else leaf
         root_uri = f"{channel_id}/{root['id']}"
+
+        ventana = list(self._recientes.get(channel_id, ()))[-self._context_messages:]
+        if not any(str(m.get("id")) == message_id for m in ventana):
+            ventana.append(leaf)            # el mensaje que se contesta, siempre
+        # El referenciado directo entra aunque haya salido de la ventana: es lo
+        # más específico que hay sobre qué le están contestando.
+        ref_directo = chain[0] if chain else None
+        if ref_directo and not any(str(m.get("id")) == str(ref_directo["id"])
+                                   for m in ventana):
+            ventana.insert(0, ref_directo)
+
+        lines = [self._linea(m) for m in ventana] if self._context_messages else \
+                [f"{m['author']['username']}: {self._full_text(m)}"
+                 for m in reversed(chain)]
         # Vision solo sobre la hoja: es el mensaje que el bot está por contestar.
-        # La cadena de contexto queda con la anotación barata (costo acotado).
+        # El resto del contexto queda con la anotación barata (costo acotado).
         return "\n".join(lines), root_uri, str(root["id"]), self._media_note(leaf, describe=True)
+
+    def _linea(self, msg: dict) -> str:
+        """Una línea de contexto; si el mensaje es reply formal, lo marca."""
+        quien = (msg.get("author") or {}).get("username") or "alguien"
+        cita = ""
+        ref = msg.get("referenced_message")
+        if (msg.get("message_reference") or {}).get("message_id"):
+            a_quien = ((ref or {}).get("author") or {}).get("username") or "alguien"
+            frag = (self._msg_text(ref) if ref else "")[:40]
+            cita = f" [le contesta a {a_quien}" + (f": «{frag}»]" if frag else "]")
+        return f"{quien}{cita}: {self._full_text(msg)}"
 
     def get_mention_by_uri(self, uri: str) -> dict | None:
         channel_id, _, message_id = uri.partition("/")
-        msg = self._fetch_message(channel_id, message_id)
+        msg = self._fetch_message(channel_id, message_id, strict=True)
         if msg is None:
             return None
         context, root_uri, root_cid, _ = self.get_thread_info(uri, str(msg["id"]))
@@ -634,7 +735,9 @@ class DiscordChannel:
         msg = self._post_message(channel_id, payload, media_path)
         return f"{channel_id}/{msg['id']}"
 
-    def post(self, text: str, limit: int = 295, media_path: str | None = None,
+    MAX_POST_LEN = 1990  # 2000 de Discord, con margen
+
+    def post(self, text: str, limit: int | None = None, media_path: str | None = None,
              target: str | None = None) -> str:
         """Sin target → canal principal (el primero); con target (rutinas) → ese canal."""
         text = strip_fake_media(text)
@@ -642,7 +745,7 @@ class DiscordChannel:
             (self._channel_ids[0] if self._channel_ids else None)
         if not channel_id:
             raise RuntimeError("DISCORD_CHANNEL_IDS vacío: no hay canal donde postear")
-        payload = {"content": truncate_post(text, limit)}
+        payload = {"content": truncate_post(text, limit or self.MAX_POST_LEN)}
         msg = self._post_message(channel_id, payload, media_path)
         return f"{channel_id}/{msg['id']}"
 
@@ -678,7 +781,10 @@ class DiscordChannel:
         """Actualiza el "About Me" del bot (description de la application):
         único campo tipo bio que la API REST le deja tocar a un bot."""
         try:
-            self._request("PATCH", "/applications/@me", json={"description": text})
+            # Tope de Discord para la description: 400. Sin el recorte, una bio
+            # larga era 400 Bad Request → False en cada pase de la rutina.
+            self._request("PATCH", "/applications/@me",
+                          json={"description": truncate_post(text, 400)})
             return True
         except Exception as e:
             log.error("set_bio (Discord): %s", e)
@@ -697,6 +803,11 @@ class DiscordChannel:
     def resolve_did(self, handle: str) -> str | None:
         u = self._users.get(handle.lstrip("@").lower())
         return str(u["id"]) if u else None
+
+    # Discord no tiene bloqueo de usuarios para bots (moderación = permisos del
+    # server). El flag hace que `block_me` NI SE REGISTRE en este canal: una
+    # tool que promete lo que no puede es peor que no tenerla.
+    CAN_BLOCK = False
 
     def block_user(self, handle: str) -> bool:
         log.warning("block_user: Discord no tiene bloqueo de usuarios para bots "
@@ -728,7 +839,10 @@ class DiscordChannel:
         posts = []
         for msg in msgs or []:  # vienen en orden reverso-cronológico
             created = msg.get("timestamp")
-            created_dt = datetime.fromisoformat(created) if created else None
+            # El .replace("Z", ...) es el mismo fallback que Mastodon: Discord
+            # hoy manda +00:00, pero fromisoformat de Python <3.11 no come "Z".
+            created_dt = (datetime.fromisoformat(created.replace("Z", "+00:00"))
+                          if created else None)
             if created_dt and created_dt.tzinfo is None:
                 created_dt = created_dt.replace(tzinfo=timezone.utc)
             if since and created_dt and created_dt <= since:
@@ -802,9 +916,18 @@ def wa_handle(valor: str | None) -> str:
     de arrastre) vuelve tal cual: normalizarlo sería inventar un match.
     """
     s = str(valor or "").strip()
-    if not s or ":" in s:
+    if not s:
         return s
-    digitos = re.sub(r"\D", "", s.split("@", 1)[0])
+    if "@" in s:
+        # Es un JID: puede traer sufijo de device (`549...:12@s.whatsapp.net`).
+        # El ":" del device se saca ANTES del chequeo de refs — si no, el JID
+        # entero volvía crudo y no matcheaba ADMIN_HANDLE ni USER_GROUPS.
+        user = s.split("@", 1)[0].split(":", 1)[0]
+        digitos = re.sub(r"\D", "", user)
+        return digitos or s
+    if ":" in s:
+        return s  # ref tipo `feed:algo`, no un número
+    digitos = re.sub(r"\D", "", s)
     return digitos or s
 
 
@@ -870,6 +993,11 @@ class WhatsAppChannel:
         # dos o el bot no se entera de que le están contestando.
         self._me_ids = {wa_handle(v) for v in (me.get("id"), me.get("lid")) if v}
         self.handle = me.get("name") or self._me_id
+        # Versión sin espacios para escribir @menciones en los textos: con el
+        # display name crudo ("Botata Rancher"), el parser de comandos comía
+        # solo "@Botata" y el resto del nombre ensuciaba el comando — /stop,
+        # /sleep y compañía quedaban mudos.
+        self._handle_token = re.sub(r"\s+", "", self.handle)
         log.info("WhatsApp vinculado como %s (escuchando %d chat(s))",
                  self.handle, len(self._chat_ids))
 
@@ -891,9 +1019,9 @@ class WhatsAppChannel:
         # Arrobarlo deja en el texto el número CRUDO con el que ese grupo lo
         # direcciona —el LID, que no es su teléfono ni su nombre—, así que el
         # bot leía "@104913921159305 sobre esto qué opinás?" y no reconocía que
-        # ese número es él.
+        # ese número es él. Se escribe el token SIN espacios (ver __init__).
         for propio in self._me_ids:
-            text = text.replace(f"@{propio}", f"@{self.handle}")
+            text = text.replace(f"@{propio}", f"@{self._handle_token}")
         return text.strip()
 
     def _media_note(self, msg: dict, *, describe: bool = False) -> str:
@@ -943,7 +1071,8 @@ class WhatsAppChannel:
         texto = (msg.get("text") or "").lower()
         if "@" not in texto:
             return False
-        candidatos = {c.lower() for c in (self.handle, *self._me_ids) if c}
+        candidatos = {c.lower()
+                      for c in (self.handle, self._handle_token, *self._me_ids) if c}
         for c in candidatos:
             for hit in re.finditer(rf"@{re.escape(c)}\b", texto):
                 # El @ tiene que abrir palabra: si no, "juan@botata.com" sería
@@ -980,11 +1109,22 @@ class WhatsAppChannel:
             chat = str(msg.get("chat_id"))
             if chat not in self._chat_ids:
                 continue
-            self._msgs[str(msg.get("id"))] = msg
+            self._guardar_msg(msg)
             self._recordar(chat, msg)
             if self._is_for_me(msg):
                 menciones.append(self._to_mention(msg))
         return menciones
+
+    # Techo del cache id→msg. `_recientes` topea solo por deque, pero `_msgs`
+    # crecía sin límite: en un grupo activo era un leak lento pero seguro en un
+    # proceso que corre semanas. Los dicts preservan orden de inserción, así
+    # que sacar el primero = sacar el más viejo.
+    MSGS_MAX = 2000
+
+    def _guardar_msg(self, msg: dict) -> None:
+        self._msgs[str(msg.get("id"))] = msg
+        while len(self._msgs) > self.MSGS_MAX:
+            del self._msgs[next(iter(self._msgs))]
 
     def _recordar(self, chat: str, msg: dict) -> None:
         """Guarda el mensaje en la conversación reciente del chat.
@@ -1002,16 +1142,23 @@ class WhatsAppChannel:
     def mark_all_read(self) -> None:
         pass  # no existe el concepto; dedup por DB
 
-    def _fetch_message(self, message_id: str) -> dict | None:
+    def _fetch_message(self, message_id: str, *, strict: bool = False) -> dict | None:
+        """`strict`: 404 → None (no existe), red/bridge caído →
+        MentionRefetchError. Igual que en Discord: el modo laxo es para
+        contexto best-effort, no para decidir descartes."""
         if message_id in self._msgs:
             return self._msgs[message_id]
         try:
             msg = self._get(f"/messages/{message_id}")
-        except Exception:
+        except Exception as e:
+            if _http_status(e) == 404:
+                return None
+            if strict:
+                raise MentionRefetchError(f"{type(e).__name__}: {e}") from e
             log.debug("WhatsApp: no pude releer el mensaje %s", message_id, exc_info=True)
             return None
         if msg:
-            self._msgs[str(msg.get("id"))] = msg
+            self._guardar_msg(msg)
         return msg or None
 
     def get_thread_info(self, uri: str, cid: str) -> tuple[str, str, str, str]:
@@ -1091,7 +1238,7 @@ class WhatsAppChannel:
 
     def get_mention_by_uri(self, uri: str) -> dict | None:
         _, _, message_id = uri.partition("/")
-        msg = self._fetch_message(message_id)
+        msg = self._fetch_message(message_id, strict=True)
         if msg is None:
             return None
         context, root_uri, root_cid, _ = self.get_thread_info(uri, str(msg["id"]))
@@ -1110,7 +1257,12 @@ class WhatsAppChannel:
         if media_path:
             payload["media_path"] = str(media_path)
         out = self._request("POST", "/send", json=payload) or {}
-        return f"{chat_id}/{out.get('id', '')}"
+        if not out.get("id"):
+            # Sin id la URI queda "{chat}/" — una key degenerada que después
+            # envenena el dedup y el refetch en la DB. Mejor explotar acá: el
+            # caller ya trata el envío fallido (la mención queda 'failed').
+            raise RuntimeError(f"el bridge respondió sin id de mensaje: {out!r}")
+        return f"{chat_id}/{out['id']}"
 
     def reply(self, text: str, parent_uri: str, parent_cid: str,
               root_uri: str, root_cid: str, media_path: str | None = None) -> str:
@@ -1118,13 +1270,18 @@ class WhatsAppChannel:
         return self._send(chat_id, strip_fake_media(text),
                           reply_to=message_id, media_path=media_path)
 
-    def post(self, text: str, limit: int = 295, media_path: str | None = None,
+    # WhatsApp banca mucho más, pero un bot que manda biblias a un grupo es
+    # peor que uno que trunca: tope generoso y a otra cosa.
+    MAX_POST_LEN = 4000
+
+    def post(self, text: str, limit: int | None = None, media_path: str | None = None,
              target: str | None = None) -> str:
         """Sin target → el primer chat; con target (rutinas) → ese chat."""
         chat_id = str(target) if target else (self._chat_ids[0] if self._chat_ids else None)
         if not chat_id:
             raise RuntimeError("WHATSAPP_CHAT_IDS vacío: no hay chat donde postear")
-        return self._send(chat_id, truncate_post(strip_fake_media(text), limit),
+        return self._send(chat_id,
+                          truncate_post(strip_fake_media(text), limit or self.MAX_POST_LEN),
                           media_path=media_path)
 
     def like_post(self, uri: str, cid: str = "") -> bool:
@@ -1174,6 +1331,9 @@ class WhatsAppChannel:
 
     def resolve_did(self, handle: str) -> str | None:
         return wa_handle(handle) or None   # el teléfono ya ES el id estable
+
+    # Igual que Discord: sin bloqueo útil → block_me no se registra acá.
+    CAN_BLOCK = False
 
     def block_user(self, handle: str) -> bool:
         """No aplica (decisión del admin, 2026-07-31): en un grupo bloquear no

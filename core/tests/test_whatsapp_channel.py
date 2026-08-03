@@ -56,7 +56,9 @@ class _Resp:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            e = RuntimeError(f"HTTP {self.status_code}")
+            e.response = self  # como httpx.HTTPStatusError: el status viaja acá
+            raise e
 
 
 class BridgeFalso:
@@ -610,3 +612,69 @@ def test_arrobarlo_le_llega_con_su_nombre_y_no_un_numero_crudo():
     b = BridgeFalso([_msg("1", text=f"@{YO_LID.split('@')[0]} sobre esto qué opinás?")])
     m = _canal(b).get_mentions()[0]
     assert m["text"] == "@Botata sobre esto qué opinás?"
+
+
+# ─── barrida 2026-08-03: naranjas de WhatsApp ───────────────────────────────
+
+def test_wa_handle_descarta_el_sufijo_de_device():
+    """Regresión: whatsmeow puede mandar JIDs con device (`...:12@s.whatsapp.net`)
+    y el ":" hacía que el JID entero volviera crudo — no matcheaba ADMIN_HANDLE
+    ni USER_GROUPS."""
+    from channels import wa_handle
+    assert wa_handle("5491111111111:12@s.whatsapp.net") == "5491111111111"
+    assert wa_handle("5491111111111@s.whatsapp.net") == "5491111111111"
+    assert wa_handle("feed:algo") == "feed:algo"     # las refs siguen intactas
+
+
+class BridgeNombreConEspacio(BridgeFalso):
+    def request(self, method, path, params=None, json=None, **kw):
+        if path == "/status":
+            return _Resp({"connected": True, "qr": None,
+                          "me": {"id": YO, "lid": YO_LID, "name": "Botata Rancher"}})
+        return super().request(method, path, params, json, **kw)
+
+
+def test_nombre_con_espacios_no_ensucia_los_comandos():
+    """Regresión: con display name "Botata Rancher", la mención se reescribía
+    como "@Botata Rancher /stop" y el parser de comandos comía solo "@Botata" —
+    el resto del nombre ensuciaba el comando y /stop quedaba mudo."""
+    lid = YO_LID.split("@")[0]
+    bridge = BridgeNombreConEspacio([_msg("1", text=f"@{lid} /stop",
+                                          mentions=[YO_LID])])
+    canal = _canal(bridge)
+    menciones = canal.get_mentions()
+    assert menciones and menciones[0]["text"] == "@BotataRancher /stop"
+
+
+def test_nombre_con_espacios_igual_lo_reconoce_arrobado_a_mano():
+    bridge = BridgeNombreConEspacio([
+        _msg("1", text="@botata rancher qué onda"),
+        _msg("2", text="@botatarancher qué onda"),
+    ])
+    canal = _canal(bridge)
+    assert len(canal.get_mentions()) == 2
+
+
+class BridgeSinId(BridgeFalso):
+    def request(self, method, path, params=None, json=None, **kw):
+        if path == "/send":
+            return _Resp({})                 # respuesta sin id
+        return super().request(method, path, params, json, **kw)
+
+
+def test_send_sin_id_explota_en_vez_de_envenenar_la_db():
+    """Regresión: sin id la URI quedaba "{chat}/" — key degenerada en
+    bot_posts/replied_posts que después rompía dedup y refetch."""
+    canal = _canal(BridgeSinId())
+    with pytest.raises(RuntimeError, match="sin id"):
+        canal.post("hola")
+
+
+def test_el_cache_de_mensajes_tiene_techo():
+    """Regresión: _msgs crecía sin tope — leak lento en un proceso de semanas."""
+    canal = _canal(BridgeFalso())
+    canal.MSGS_MAX = 10
+    for i in range(30):
+        canal._guardar_msg(_msg(str(i)))
+    assert len(canal._msgs) == 10
+    assert "29" in canal._msgs and "0" not in canal._msgs  # quedan los últimos
