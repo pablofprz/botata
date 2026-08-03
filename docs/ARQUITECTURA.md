@@ -1,12 +1,13 @@
 # Arquitectura de Botata
 
-> Documento de referencia para entender el sistema completo. Actualizado al cierre de M6
-> (2026-07-11, tareas T1–T29 salvo T19/T20/T28). El estado de tareas vive en `ROADMAP.md`;
-> las decisiones y su porqué, en `CLAUDE.md`. Este documento explica **cómo funciona el código**.
+> Documento de referencia para entender el sistema completo. Actualizado a la fase de
+> lanzamiento (2026-08-03, milestones M1–M11: núcleo agéntico, instancias, canales, rutinas,
+> multimodal). El estado de tareas vive en `ROADMAP.md`. Este documento explica **cómo
+> funciona el código**.
 
 ## 1. Qué es Botata
 
-Botata es un bot comunitario de Bluesky construido como **agente**: no es un script que
+Botata es un bot comunitario multi-canal construido como **agente**: no es un script que
 reacciona con plantillas, sino un sistema donde un LLM decide — qué responder, si postear,
 qué herramienta usar, qué recordar de cada persona. La refundación de `maripobot.py` (un
 monolito sin estructura) sobre cuatro pilares:
@@ -25,29 +26,39 @@ Todos los módulos Python viven en **`src/`** (layout src, desde 2026-07-20; la 
 `.py` sueltos). Rutas del listado relativas a `src/`:
 
 ```
-botata.py        ← el corazón: grafos, nodos, BskyClient, pases, loop, CLI (~3000 líneas)
+botata.py           ← el corazón: grafos, nodos, BskyClient, pases, loop, CLI (~8300 líneas)
+channels.py         ← los otros canales: Mastodon, Discord y WhatsApp + contrato Channel
+budget.py           ← presupuesto diario de tokens (BudgetGuard: duerme al bot si se quema)
 db.py               ← persistencia: esquema, embeddings, búsqueda híbrida, eventos, catálogo
 router.py           ← ruteo de modelos LLM por rol, con fallbacks entre endpoints
 tools.py            ← framework de tools (registry + scopes), agnóstico de la app
 skills.py           ← workspace de comportamiento en markdown (T26)
+moods.py            ← estados de ánimo diarios (archivos de la instancia + máquina de estados)
+routines.py         ← rutinas: conducta proactiva con cadencia en routines/*.md
 scheduler.py        ← registro de tareas periódicas del loop (T27)
+memory_compact.py   ← compactación de memoria/notas/hechos (T48/T48b/T49)
+connectors.py       ← conectores de contenido declarativos (Pinterest, Tumblr, API genérica…)
 mcp_tools.py        ← cliente MCP: conectores externos → tools (T29)
-mcp_servers/        ← servers MCP propios (reddit_server.py; futuros: x, ig)
-(scraping)          ← MOVIDO a la suite aparte 'Membrilla' (pablofprz/membrilla).
-                       Botata consume su salida por carpeta + sidecar JSON vía catalog.py
+mcp_servers/        ← servers MCP propios (reddit_server.py)
+instance.py + init_instance.py ← resolución de instancia (--instance) y alta desde plantilla
 clearsky.py         ← "quién me bloquea" (API pública de ClearSky)
 catalog.py          ← CLI: cataloga imágenes scrapeadas con un modelo de visión
 mem_admin.py        ← CLI: administrar la memoria (facts/lecciones) a mano
-config_ui.py + ui/  ← panel web local (127.0.0.1) para editar settings/.env/news/skills (T22)
-migrate_maripobot.py← migración one-off desde el bot viejo (idempotente)
-prompts/            ← todos los prompts del sistema (T23: nunca inline en .py)
-skills/             ← skills en markdown, editables en caliente
-config/             ← settings.json (config central) + news_sites.json + credenciales gitignored
-context/            ← SOUL.md (personalidad) + MEMORY.md (memoria general del bot)
-posted/botata.db ← LA base de datos (gitignored; sync por rclone)
-tests/              ← pytest, ~170 tests, sin red salvo E2E marcados
+config_ui.py + ui/  ← panel web local (127.0.0.1) para settings/.env/fuentes/skills/rutinas (T22)
+prompts/ (template) ← todos los prompts del sistema viven en la instancia (T23: nunca inline)
+bridges/whatsapp/   ← bridge de WhatsApp en Go (whatsmeow), binario único, HTTP local
+instance_template/  ← TODA la identidad default de una instancia nueva
+tests/              ← pytest, ~1160 tests, <40s, sin red salvo E2E marcados
 scripts/            ← sync de credenciales/DB, snapshot WAL, pipeline de chats a Obsidian
 ```
+
+El scraping (adquisición de media) vive en la suite aparte **Membrilla**
+(`pablofprz/membrilla`); Botata consume su salida por carpeta + sidecar JSON vía `catalog.py`.
+
+Cada bot es una **instancia** (`bots/<nombre>/`, gitignored): su `config/settings.json`,
+su `.env`, sus `prompts/`, `skills/`, `moods/`, `routines/`, `context/` (SOUL.md y memoria)
+y su DB en `posted/botata.db`. El motor no tiene identidad propia: sin `--instance` (o
+`BOTATA_INSTANCE`) el proceso corta.
 
 La regla de dependencias: los módulos de infra (`tools`, `skills`, `scheduler`, `mcp_tools`,
 `router`, `db`) **no importan botata** — definen contratos genéricos. `botata.py` los
@@ -65,9 +76,11 @@ cablea. Eso permite testearlos aislados y, a futuro (M7), reutilizarlos con otro
    `BSKY_HANDLE`, `ADMIN_HANDLE`, `POLL_INTERVAL`, `FEEDS_CONFIG`, `TOOLS_CONFIG`,
    `MCP_CONFIG`, `TASKS_CONFIG`, `MODELS_CONFIG`, `NEWS_SOURCES`.
 
-**Env vars obligatorias** (el import falla sin ellas): `BSKY_PASSWORD`, `OPENROUTER_API_KEY`.
+**Env vars obligatorias** (el import falla sin ellas): la credencial del canal
+(`BSKY_PASSWORD` / `MASTODON_ACCESS_TOKEN` / `DISCORD_BOT_TOKEN` según `CHANNEL`) y
+`LLM_API_KEY` (alias back-compat: `OPENROUTER_API_KEY`).
 **Opcionales por feature**: `BRAVE_API_KEY` (web_search), `SPOTIFY_CLIENT_ID/SECRET`
-(search_music), `YOUTUBE_API_KEY` (share_video), `IG_*` (scraping IG).
+(search_music), `YOUTUBE_API_KEY` (share_video), `TUMBLR_API_KEY` (get_latest_media).
 
 ### settings.json — secciones
 
@@ -539,9 +552,11 @@ confiables si un rol cae al fallback local.
 output opcional), `call_with_tools(system, user, schemas)` (una ronda de tool-calling:
 devuelve texto o tool_calls, **sin loop de feedback**) y `chat`.
 
-> Nota de diseño: el tool-calling es de **una sola ronda** en todo el sistema. Los nodos
-> ejecutan las tools que el LLM pidió, inyectan los resultados al contexto y hacen un
-> `complete()` final aparte. No hay agente loop multi-turno — decisión de simplicidad.
+> Nota de diseño: el tool-calling es un **loop acotado** (T50, `correr_rondas_de_tools`):
+> el modelo ve el resultado de cada llamada antes de decidir la siguiente, hasta
+> `TOOL_ROUNDS` rondas (config de la instancia, 1–5; default 1 = el comportamiento
+> histórico de una sola ronda). Anti-loop: no se repite la misma tool con los mismos args.
+> Al agotar las rondas, un `complete()` final aparte produce la respuesta.
 
 ## 8. Sistema de tools (tools.py)
 
@@ -740,9 +755,29 @@ update parcial conserva lo no pasado) y **`delete_routine`** — scope `admin`
 estricto (el lock global impide promoverlas a scopes públicos por post; la vieja
 `set_heartbeat` se eliminó). También editables desde la UI (sección ⏰ Rutinas).
 
-## 12. BskyClient (la capa de plataforma)
+## 12. Canales (la capa de plataforma)
 
-Único punto de contacto con Bluesky (~370 líneas dentro de botata.py). Métodos clave:
+El grafo no sabe en qué red habla: habla con un **canal**, un contrato duck-typed que
+implementan cuatro clases — `BskyClient` (dentro de botata.py, el canal maduro) y
+`MastodonChannel` / `DiscordChannel` / `WhatsAppChannel` (`channels.py`, beta). `CHANNEL`
+en settings decide cuál construye `build_channel()`. El contrato: `get_mentions` /
+`get_thread_info` / `get_mention_by_uri` (entrada), `post` / `reply` / `like_post` /
+`set_bio` (salida), más capacidades declaradas por atributos de clase — `MAX_POST_LEN`
+(295 Bluesky, 490 Mastodon, 1990 Discord, 4000 WhatsApp: el truncado respeta el canal) y
+`CAN_BLOCK` (solo Bluesky; sin él, `block_me` ni se registra). Errores de refetch se
+distinguen con `MentionRefetchError`: `get_mention_by_uri` devuelve `None` SOLO ante un
+404 confirmado (post borrado) y levanta la excepción ante errores de red — así una
+mención jamás se descarta por un hipo de conexión. Discord y WhatsApp mantienen además
+una **ventana de conversación** (los últimos N mensajes del canal/grupo como contexto,
+`DISCORD_CONTEXT_MESSAGES` / `WHATSAPP_CONTEXT_MESSAGES`), porque en un chat grupal el
+hilo no alcanza: la charla es la sala entera. WhatsApp no habla con la red directamente
+sino con el **bridge en Go** (`core/bridges/whatsapp/`, whatsmeow, HTTP en
+`127.0.0.1:8899`), con `WHATSAPP_CHAT_IDS` obligatorio como allowlist de grupos — de los
+dos lados, Python y Go.
+
+### BskyClient
+
+Único punto de contacto con Bluesky (dentro de botata.py). Métodos clave:
 
 - **Entrada**: `get_mentions()` (últimas 25 notifs mention/reply; no filtra por `is_read` —
   el dedup es de la DB), `get_thread_info(uri)` (reconstruye la cadena de parents como
@@ -763,8 +798,8 @@ estricto (el lock global impide promoverlas a scopes públicos por post; la viej
 - **Robustez**: login con timeout explícito (15s connect / 30s read) y 4 reintentos con
   backoff exponencial — un hipo de red en el arranque no mata el proceso.
 
-Para M7 (multicanal), esta clase es el molde de la futura interfaz `Channel`: todo lo que
-el grafo necesita de una plataforma pasa por acá.
+Esta clase fue el molde del contrato de canal: todo lo que el grafo necesita de una
+plataforma pasa por esta interfaz, y los canales de `channels.py` la replican.
 
 ## 13. Ingesta de contenido scrapeado (catalog.py)
 
@@ -781,8 +816,9 @@ consume **sin compartir código ni DB** (handoff = carpeta + sidecar):
 
 ## 14. Testing
 
-`pytest` (+ tests stdlib legacy), **~171 tests, <10s**, sin tocar la red (los E2E de MCP
-spawnean procesos locales; el de Reddit usa fixtures). Convenciones:
+`pytest`, **~1160 tests, <40s**, sin tocar la red (los E2E de MCP spawnean procesos
+locales; el de Reddit usa fixtures; el canal de WhatsApp se testea contra un bridge falso).
+Los tests crean una instancia efímera desde `instance_template/`. Convenciones:
 
 - `sys.path.insert` + env dummies (`BSKY_PASSWORD`, `OPENROUTER_API_KEY`) **antes** de
   `import botata` (el import las exige).
@@ -790,7 +826,7 @@ spawnean procesos locales; el de Reddit usa fixtures). Convenciones:
   (`d.init_db(tmp_path/...)`) para lo que toca esquema.
 - Los tests de retrieval con embeddings reales existen pero el grueso usa vectores dummy.
 
-Correr: `pytest` desde la raíz. Un archivo: `pytest tests/test_skills.py -v`.
+Correr: `pytest core/tests -q` desde la raíz. Un archivo: `pytest core/tests/test_skills.py -v`.
 
 ### Comando vs. tool (cuándo hace falta una barra)
 
@@ -918,20 +954,23 @@ es `/sleep`.
   líneas; plantillas: `tests/mcp_echo_server.py` y `mcp_servers/reddit_server.py`).
   Regla: scope `admin` hasta que se decida lo contrario.
 - **Prompt nuevo**: siempre archivo en `prompts/`, cargado con `load_text` (T23).
-- **Canal nuevo (M7, futuro)**: extraer de `BskyClient` la interfaz `Channel`
-  (mentions/post/reply/thread/perfil normalizado); el grafo no debe saber en qué red habla.
-  Alcance ACTUALIZADO (2026-07-27, fase de lanzamiento): Bluesky (maduro) → Discord →
-  WhatsApp (vía no oficial) → Telegram; Mastodon relegado. Ver ROADMAP M10.
-  ~~Alcance decidido (2026-07-19): SOLO Bluesky → Mastodon → Discord~~ (Pleroma/Akkoma
-  gratis vía Mastodon API si sobra tiempo; el resto descartado — ver ROADMAP T28).
+- **Canal nuevo**: una clase en `channels.py` que cumpla el contrato duck-typed (§12):
+  `get_mentions`/`get_thread_info`/`get_mention_by_uri`/`post`/`reply`/`like_post`/`set_bio`
+  + `MAX_POST_LEN` y `CAN_BLOCK`, registrada en `build_channel()`. El grafo no debe saber
+  en qué red habla. Ya escritos: Mastodon, Discord, WhatsApp (bridge Go). Próximo: Telegram
+  (Bot API oficial; sin endpoint de historial, `get_feed_posts` se sirve de la DB). Ver
+  ROADMAP M10.
 
 ## 17. Límites conocidos y deuda deliberada
 
-- **Tool-calling de una ronda**: el LLM no puede encadenar tools ni reaccionar al resultado
-  de una tool con otra. Suficiente hoy; revisar si las tools se vuelven composicionales.
-- **`botata.py` es grande** (~3000 líneas): BskyClient, nodos, pases y CLI conviven.
-  La extracción natural (BskyClient → `channel_bsky.py`) conviene hacerla **como parte de
-  T28**, no antes, para no refactorizar dos veces.
+- **`botata.py` es grande** (~8300 líneas): BskyClient, nodos, pases y CLI conviven.
+  Los otros canales ya viven en `channels.py`; extraer BskyClient quedó diferido — el costo
+  de moverlo hoy no paga contra el riesgo de romper el canal maduro.
+- **Canales beta sin validar en vivo**: Mastodon, Discord y WhatsApp están escritos y
+  testeados contra fakes, pero no rodados contra las plataformas reales (T39/T41).
+- **Al tocar un prompt, tocar las tres copias**: los prompts viven en `instance_template/`
+  y en cada instancia; se desincronizan solos (lección M11: `TOOL_ROUNDS=3` con un prompt
+  que nunca recibió el bloque de rondas = el bot no encadenaba).
 - **Sin reconexión en caliente de MCP**: server muerto en runtime → cada call devuelve
   error graceful; reconectar = reiniciar el bot.
 - **Ollama fallback sin guided_json**: structured outputs degradados si OpenRouter cae.
